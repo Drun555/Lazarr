@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block body %}
+<main class="login-shell">
+  <section class="login-card">
+    <h1>Первый запуск</h1>
+    <p class="muted">Создайте аккаунт администратора. После входа можно настроить провайдеров и папки загрузок.</p>
+    <form id="setup-form" class="stack">
+      <label>Логин<input name="username" autocomplete="username" required autofocus maxlength="80"></label>
+      <label>Пароль<input name="password" type="password" autocomplete="new-password" required minlength="10" maxlength="1024"><small>Не менее 10 символов.</small></label>
+      <label>Повторите пароль<input name="password_confirm" type="password" autocomplete="new-password" required minlength="10" maxlength="1024"></label>
+      <button class="primary" type="submit">Создать аккаунт</button>
+      <p class="form-error" role="alert"></p>
+    </form>
+  </section>
+</main>
+{% endblock %}

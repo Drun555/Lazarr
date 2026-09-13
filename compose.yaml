@@ -1,0 +1,32 @@
+services:
+  lazarr:
+    image: drun555/lazarr:latest
+    build: .
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ:-UTC}
+      LAZARR_DATA_DIR: /data
+      LAZARR_PLUGIN_DIR: /plugins
+      LAZARR_SECURE_COOKIE: ${LAZARR_SECURE_COOKIE:-0}
+      LAZARR_FLARESOLVERR_URL: ${LAZARR_FLARESOLVERR_URL:-http://flaresolverr:8191}
+    ports:
+      - "8000:8000"
+      - "6881:6881/tcp"
+      - "6881:6881/udp"
+    volumes:
+      - lazarr-data:/data
+      - lazarr-plugins:/plugins
+      - ${LAZARR_DOWNLOADS:-./downloads}:/downloads
+    stop_grace_period: 30s
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:v3.5.2
+    profiles: ["cloudflare"]
+    restart: unless-stopped
+    environment:
+      LOG_LEVEL: warning
+      LOG_HTML: "false"
+      TZ: ${TZ:-UTC}
+      TEST_URL: https://rutracker.org/forum/index.php
+volumes:
+  lazarr-data:
+  lazarr-plugins:

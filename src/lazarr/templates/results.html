@@ -1,0 +1,11 @@
+{% if query|length >= 2 %}
+{% for error in errors %}<div class="notice">{{ error }}</div>{% endfor %}
+{% if results %}<div class="section-heading"><p class="eyebrow">Результаты поиска</p><span class="fine">{{ results|length }} найдено</span></div><div class="media-grid">
+{% for item in results %}
+<button class="media-card" data-media-id="{{ item.id }}" data-provider="{{ item.provider }}" data-kind="{{ item.kind }}">
+  <div class="poster">{% if item.poster %}<img src="{{ item.poster|poster_url }}" alt="" loading="lazy">{% endif %}<span class="poster-placeholder" aria-hidden="true">Нет обложки</span><span class="media-kind">{{ 'Фильм' if item.kind == 'movie' else 'Сериал' }}</span></div>
+  <strong>{{ item.title }}</strong><span class="media-meta">{{ item.year or 'Год неизвестен' }} <span>· {{ item.provider|upper }}</span></span>
+</button>
+{% endfor %}</div>
+{% elif not errors %}<div class="empty compact"><h3>Пока ничего не нашли</h3><p>Попробуйте оригинальное название или другой вариант написания.</p></div>{% endif %}
+{% endif %}

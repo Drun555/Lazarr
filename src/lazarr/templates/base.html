@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="csrf-token" content="{{ csrf }}">
+  <meta name="htmx-config" content='{"allowEval":false,"allowScriptTags":false}'>
+  <title>Lazarr</title>
+  <link rel="stylesheet" href="/static/app.css?v={{ asset_version }}">
+  <script src="/static/htmx.min.js" defer></script>
+<script id="language-aliases" type="application/json">{{ language_aliases|tojson }}</script>
+<script id="language-labels" type="application/json">{{ language_labels|tojson }}</script>
+  <script src="/static/language-picker.js?v={{ asset_version }}" defer></script>
+  <script src="/static/library.js?v={{ asset_version }}" defer></script>
+  <script src="/static/app.js?v={{ asset_version }}" defer></script>
+</head>
+<body>
+{% block body %}{% endblock %}
+<div id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>

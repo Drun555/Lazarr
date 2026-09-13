@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block body %}
+<main class="login-shell">
+  <section class="login-card">
+    <h1>Вход</h1>
+    <form id="login-form" class="stack">
+      <label>Логин<input name="username" autocomplete="username" required autofocus maxlength="80"></label>
+      <label>Пароль<input type="password" name="password" autocomplete="current-password" required></label>
+      <button class="primary" type="submit">Войти</button>
+      <p class="form-error" role="alert"></p>
+    </form>
+  </section>
+</main>
+{% endblock %}

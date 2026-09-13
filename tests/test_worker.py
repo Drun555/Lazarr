@@ -1,0 +1,566 @@
+import hashlib
+import json
+from pathlib import Path
+from sqlalchemy import select, func
+import pytest
+from lazarr.models import (
+    ProviderConfig,
+    Subtask,
+    Download,
+    MediaAsset,
+    SubtaskAsset,
+    CandidateDecision,
+    Episode,
+)
+from lazarr.sdk import (
+    ContentProvider,
+    ProviderManifest,
+    SearchPage,
+    DownloadSource,
+    TorrentFile,
+)
+from lazarr.services import CreateTask
+from lazarr.config import Requirements
+from lazarr.torrent import TorrentMetadata
+from lazarr.worker import Worker
+from conftest import candidate, audio_claim
+
+
+class FakeEngine:
+    def contains(self, infohash):
+        return infohash in self.handles
+
+    def __init__(self):
+        self.handles = {}
+        self.plans = {}
+        self.paused = {}
+        self.completed = set()
+        self.uploaded = 0
+        self.downloaded = 100
+        self.inspect_calls = 0
+
+    def inspect(self, source):
+        self.inspect_calls += 1
+        data = json.loads(source.torrent)
+        files = [TorrentFile(index=i, path=path, size=100, offset=i * 100) for i, path in enumerate(data)]
+        return TorrentMetadata(hashlib.sha256(source.torrent).hexdigest(), files, source.torrent)
+
+    def add(self, torrent, save_path, plan, paused=False):
+        self.handles[plan.infohash] = object()
+        self.plans[plan.infohash] = plan
+        self.paused[plan.infohash] = paused
+        Path(save_path).mkdir(parents=True, exist_ok=True)
+        return plan.infohash
+
+    def update_plan(self, infohash, plan):
+        self.plans[infohash] = plan
+
+    def pause(self, infohash):
+        self.paused[infohash] = True
+
+    def remove(self, infohash):
+        self.handles.pop(infohash, None)
+        self.plans.pop(infohash, None)
+        self.paused.pop(infohash, None)
+
+    def resume(self, infohash):
+        self.paused[infohash] = False
+
+    def checkpoint(self):
+        pass
+
+    def snapshot(self, infohash):
+        plan = self.plans[infohash]
+        bindings = {
+            str(b.subtask_id): {
+                "progress": 1 if b.subtask_id in self.completed else 0,
+                "complete": b.subtask_id in self.completed,
+                "buffer_ready": b.subtask_id in self.completed,
+                "downloaded": 100 if b.subtask_id in self.completed else 0,
+                "total": 100,
+                "eta": None,
+            }
+            for b in plan.bindings
+        }
+        complete = bool(bindings) and all(b["complete"] for b in bindings.values())
+        return {
+            "progress": 1 if complete else 0,
+            "complete": complete,
+            "uploaded": self.uploaded,
+            "downloaded": self.downloaded,
+            "bindings": bindings,
+            "paused": self.paused[infohash],
+            "error": None,
+            "download_rate": 0,
+            "upload_rate": 0,
+            "eta": None,
+        }
+
+
+@pytest.fixture
+def worker_setup(core, media):
+    config, db, plugins, service = core
+
+    class Demo(ContentProvider):
+        manifest = ProviderManifest(id="demo", name="Demo", kind="content", version="1.0.0")
+        calls = 0
+        quality = 1080
+
+        async def search(self, query, cursor=None):
+            type(self).calls += 1
+            return SearchPage(
+                items=[
+                    candidate(
+                        provider="demo", id=str(self.quality), title=f"Example Show (2020) {self.quality}p"
+                    )
+                ]
+            )
+
+        async def inspect(self, item):
+            paths = [f"Show.S01E0{i}.{self.quality}p.mkv" for i in [1, 2]]
+            return item.model_copy(update={"evidence": [audio_claim(path) for path in paths]})
+
+        async def resolve_download(self, item):
+            return DownloadSource(
+                torrent=json.dumps([f"Show.S01E0{i}.{self.quality}p.mkv" for i in [1, 2]]).encode()
+            )
+
+    plugins.classes["demo"] = Demo
+    with db.session() as session:
+        session.add(ProviderConfig(id="demo", enabled=True))
+    engine = FakeEngine()
+    worker = Worker(db, plugins, service, engine, config)
+
+    async def probe(path, complete):
+        quality = 2160 if "2160" in str(path) else 1080
+        return {
+            "ok": True,
+            "streams": [
+                {"codec_type": "video", "width": 3840 if quality == 2160 else 1920, "height": quality},
+                {"codec_type": "audio", "tags": {"language": "rus"}},
+            ],
+        }
+
+    worker._probe = probe
+    return worker, engine, Demo
+
+
+async def test_grouped_subtasks_share_one_download(core, media, season, worker_setup):
+    _, db, _, service = core
+    worker, engine, demo = worker_setup
+    service.create_from_metadata(
+        CreateTask(media_id="42", kind="tv", season=1, episodes=[1, 2]), media, season, 1
+    )
+    service.create_from_metadata(
+        CreateTask(media_id="42", kind="tv", season=1, episodes=[1]), media, season, 2
+    )
+    await worker.run_due()
+    with db.session() as session:
+        assert session.scalar(select(func.count()).select_from(Download)) == 1
+        assert session.scalar(select(func.count()).select_from(MediaAsset)) == 2
+        assert session.scalar(select(func.count()).select_from(SubtaskAsset)) == 3
+        assert len(list(session.scalars(select(Subtask).where(Subtask.status == "starting")))) == 3
+    assert demo.calls == 1
+    # An immediate retry must not duplicate active work.
+    await worker.run_due()
+    assert demo.calls == 1
+    engine.completed = {1, 2, 3}
+    await worker.poll()
+    with db.session() as session:
+        assert all(s.status == "done" for s in session.scalars(select(Subtask)))
+        assert all(link.current for link in session.scalars(select(SubtaskAsset)))
+
+
+async def test_shared_download_survives_one_task_pause_and_stops_at_ratio(core, media, season, worker_setup):
+    _, db, _, service = core
+    worker, engine, _ = worker_setup
+    first = service.create_from_metadata(
+        CreateTask(media_id="42", kind="tv", season=1, episodes=[1]), media, season, 1
+    )
+    service.create_from_metadata(
+        CreateTask(media_id="42", kind="tv", season=1, episodes=[1]), media, season, 2
+    )
+    await worker.run_due()
+    service.edit(first, 1, paused=True)
+    await worker.sync_consumers()
+    infohash = next(iter(engine.handles))
+    assert not engine.paused[infohash]
+    assert [b.subtask_id for b in engine.plans[infohash].bindings] == [2]
+    engine.completed = {1, 2}
+    engine.uploaded = 100
+    await worker.poll()
+    assert engine.paused[infohash]
+    with db.session() as session:
+        assert session.scalar(select(Download)).state == "stopped"
+
+
+async def test_wrong_actual_audio_does_not_promote_version(core, media, season, worker_setup):
+    _, db, _, service = core
+    worker, engine, _ = worker_setup
+    service.create_from_metadata(
+        CreateTask(media_id="42", kind="tv", season=1, episodes=[1]), media, season, 1
+    )
+    await worker.run_due()
+
+    async def bad_probe(path, complete):
+        return {
+            "ok": True,
+            "streams": [
+                {"codec_type": "video", "width": 1920, "height": 1080},
+                {"codec_type": "audio", "tags": {"language": "eng"}},
+            ],
+        }
+
+    worker._probe = bad_probe
+    engine.completed = {1}
+    await worker.poll()
+    with db.session() as session:
+        assert not session.scalar(select(SubtaskAsset)).current
+        assert session.get(Subtask, 1).status == "needs_selection"
+        assert session.scalar(select(CandidateDecision)).action == "rejected"
+
+
+async def test_upgrade_preserves_old_download_for_other_consumer(core, media, season, worker_setup):
+    _, db, _, service = core
+    worker, engine, demo = worker_setup
+    service.create_from_metadata(
+        CreateTask(
+            media_id="42", kind="tv", season=1, episodes=[1], requirements=Requirements(max_resolution=2160)
+        ),
+        media,
+        season,
+        1,
+    )
+    service.create_from_metadata(
+        CreateTask(
+            media_id="42", kind="tv", season=1, episodes=[1], requirements=Requirements(max_resolution=1080)
+        ),
+        media,
+        season,
+        2,
+    )
+    await worker.run_due()
+    engine.completed = {1, 2}
+    await worker.poll()
+    old_hash = next(iter(engine.handles))
+    demo.quality = 2160
+    with db.session() as session:
+        session.get(Subtask, 1).next_search_at = 0
+    await worker.run_due()
+    await worker.poll()
+    with db.session() as session:
+        assert session.scalar(select(func.count()).select_from(Download)) == 2
+        current = session.scalar(
+            select(MediaAsset)
+            .join(SubtaskAsset)
+            .where(SubtaskAsset.subtask_id == 1, SubtaskAsset.current.is_(True))
+        )
+        assert current.resolution == 2160
+    assert not engine.paused[old_hash]
+    # Once the remaining old consumer changes requirements, the old torrent may stop; files stay.
+    service.edit(2, 2, requirements=Requirements(max_resolution=2160))
+    await worker.sync_consumers()
+    assert engine.paused[old_hash]
+
+
+async def test_future_dates_block_but_unknown_dates_search(core, media, season, worker_setup):
+    _, db, _, service = core
+    worker, engine, demo = worker_setup
+    service.create_from_metadata(
+        CreateTask(media_id="42", kind="tv", season=1, episodes=[1, 2]), media, season, 1
+    )
+    with db.session() as session:
+        session.get(Episode, 1).air_date = "2999-01-01"
+        session.get(Episode, 2).air_date = None
+    await worker.run_due()
+    with db.session() as session:
+        assert session.get(Subtask, 1).status == "waiting_release"
+        assert session.get(Subtask, 2).status == "starting"
+        plan = session.scalar(select(Download)).plan
+        assert [b["subtask_id"] for b in plan["bindings"]] == [2]
+
+
+async def test_restore_recreates_pending_download_without_duplication(core, media, season, worker_setup):
+    _, db, plugins, service = core
+    worker, engine, _ = worker_setup
+    service.create_from_metadata(
+        CreateTask(media_id="42", kind="tv", season=1, episodes=[1]), media, season, 1
+    )
+    await worker.run_due()
+
+    class RestoredEngine(FakeEngine):
+        def add(self, torrent, save_path, plan, paused=False, counters=None):
+            self.uploaded = counters["uploaded"]
+            self.downloaded = counters["downloaded"]
+            return super().add(torrent, save_path, plan, paused)
+
+    with db.session() as session:
+        row = session.scalar(select(Download))
+        row.uploaded = 75
+        row.downloaded = 100
+    restored = RestoredEngine()
+    second = Worker(db, plugins, service, restored, worker.config)
+    await second.restore()
+    assert len(restored.handles) == 1 and restored.uploaded == 75
+    await second.run_due()
+    with db.session() as session:
+        assert session.scalar(select(func.count()).select_from(Download)) == 1
+
+
+async def test_reselecting_current_candidate_is_idempotent(core, media, season, worker_setup):
+    _, db, _, service = core
+    worker, engine, _ = worker_setup
+    service.create_from_metadata(
+        CreateTask(media_id="42", kind="tv", season=1, episodes=[1]), media, season, 1
+    )
+    await worker.run_due()
+    engine.completed = {1}
+    await worker.poll()
+    with db.session() as session:
+        decision_id = session.scalar(select(CandidateDecision.id))
+    await worker.choose(decision_id, 1)
+    await worker.poll()
+    with db.session() as session:
+        link = session.scalar(select(SubtaskAsset))
+        assert link.current and not link.pending
+        assert session.get(Subtask, 1).status == "done"
+
+
+async def test_manual_choice_can_apply_one_release_to_all_matching_episodes(
+    core, media, season, worker_setup
+):
+    _, db, _, service = core
+    worker, engine, _ = worker_setup
+    task_id = service.create_from_metadata(
+        CreateTask(media_id="42", kind="tv", season=1, episodes=[1, 2, 3]),
+        media,
+        season,
+        1,
+    )
+    torrent = json.dumps(["Show.S01E01.1080p.mkv", "Show.S01E02.1080p.mkv"]).encode()
+    metadata = engine.inspect(DownloadSource(torrent=torrent))
+    item = candidate(provider="demo", id="manual-batch", evidence=[])
+    with db.session() as session:
+        requests = [
+            service.request_for(session, sub)
+            for sub in session.scalars(select(Subtask).where(Subtask.task_id == task_id))
+        ]
+    report = worker.matcher.evaluate(item, requests, metadata.files, metadata.infohash)
+    worker._record(item, metadata, report)
+    choices = service.task_candidates(task_id)
+    assert len(choices) == 1
+    assert choices[0]["matched"] == 2 and choices[0]["total"] == 3
+
+    result = await worker.choose_all(choices[0]["id"], 1)
+
+    assert result == {"selected": 2, "total": 3, "skipped": 1}
+    plan = engine.plans[metadata.infohash]
+    assert [binding.subtask_id for binding in plan.bindings] == [1, 2]
+    assert [binding.video_path for binding in plan.bindings] == [
+        "Show.S01E01.1080p.mkv",
+        "Show.S01E02.1080p.mkv",
+    ]
+    with db.session() as session:
+        assert session.get(Subtask, 1).status == "starting"
+        assert session.get(Subtask, 2).status == "starting"
+        assert session.get(Subtask, 3).status == "queued"
+        selected = list(
+            session.scalars(select(CandidateDecision).where(CandidateDecision.action == "selected"))
+        )
+        assert len(selected) == 2
+
+
+async def test_delete_task_preserves_shared_download_and_removes_last_consumer(
+    core, media, season, worker_setup
+):
+    from lazarr.deletion import delete_task
+    from lazarr.models import Task, Media
+
+    _, db, _, service = core
+    worker, engine, _ = worker_setup
+    engine.remove = lambda h: engine.handles.pop(h, None)
+    first = service.create_from_metadata(
+        CreateTask(media_id="42", kind="tv", season=1, episodes=[1]), media, season, 1
+    )
+    second = service.create_from_metadata(
+        CreateTask(media_id="42", kind="tv", season=1, episodes=[1]), media, season, 2
+    )
+    await worker.run_due()
+    with db.session() as session:
+        download = session.scalar(select(Download))
+        root = Path(download.save_path)
+    payload = root / "media.mkv"
+    payload.write_bytes(b"test media")
+    result = await delete_task(worker, first, 1, True)
+    assert result["shared_downloads_kept"] == 1
+    assert payload.exists() and engine.contains(download.infohash)
+    assert len(engine.plans[download.infohash].bindings) == 1
+    result = await delete_task(worker, second, 2, True)
+    assert not result["cleanup_pending"]
+    assert not root.exists() and not engine.contains(download.infohash)
+    with db.session() as session:
+        assert session.scalar(select(func.count()).select_from(Task)) == 0
+        assert session.scalar(select(func.count()).select_from(Download)) == 0
+        assert session.scalar(select(func.count()).select_from(Media)) == 1
+
+
+async def test_delete_task_without_media_keeps_files(core, media, season, worker_setup):
+    from lazarr.deletion import delete_task
+
+    _, db, _, service = core
+    worker, engine, _ = worker_setup
+    task = service.create_from_metadata(
+        CreateTask(media_id="42", kind="tv", season=1, episodes=[1]), media, season, 1
+    )
+    await worker.run_due()
+    with db.session() as session:
+        download = session.scalar(select(Download))
+    path = Path(download.save_path) / "keep.mkv"
+    path.write_bytes(b"keep")
+    await delete_task(worker, task, 1)
+    assert path.exists() and engine.paused[download.infohash]
+    with db.session() as session:
+        download = session.get(Download, download.id)
+        assert not download.plan["bindings"]
+
+
+async def test_delete_media_removes_download_record_but_preserves_files_by_default(
+    core, media, season, worker_setup
+):
+    from lazarr.deletion import delete_media
+    from lazarr.models import Media, Task
+
+    _, db, _, service = core
+    worker, engine, _ = worker_setup
+    service.create_from_metadata(
+        CreateTask(media_id="42", kind="tv", season=1, episodes=[1]), media, season, 1
+    )
+    await worker.run_due()
+    with db.session() as session:
+        identity = session.scalar(select(Media.id))
+        download = session.scalar(select(Download))
+        root = Path(download.save_path)
+        infohash = download.infohash
+    payload = root / "keep.mkv"
+    payload.write_bytes(b"keep")
+
+    result = await delete_media(worker, identity, 1)
+
+    assert result["tasks_deleted"] == 1
+    assert payload.exists() and not engine.contains(infohash)
+    with db.session() as session:
+        assert session.scalar(select(func.count()).select_from(Media)) == 0
+        assert session.scalar(select(func.count()).select_from(Task)) == 0
+        assert session.scalar(select(func.count()).select_from(Download)) == 0
+
+
+async def test_deletion_rejects_unsafe_paths(core, media, season, worker_setup, tmp_path):
+    from lazarr.deletion import delete_task
+    from lazarr.models import Task
+
+    _, db, _, service = core
+    worker, engine, _ = worker_setup
+    task = service.create_from_metadata(
+        CreateTask(media_id="42", kind="tv", season=1, episodes=[1]), media, season, 1
+    )
+    await worker.run_due()
+    with db.session() as session:
+        download = session.scalar(select(Download))
+        download.save_path = str(tmp_path)
+    with pytest.raises(ValueError, match="путь"):
+        await delete_task(worker, task, 1, True)
+    with db.session() as session:
+        assert session.get(Task, task) is not None
+    assert tmp_path.exists()
+
+
+async def test_failed_cleanup_retries_after_restart(core, media, season, worker_setup, monkeypatch):
+    from lazarr.deletion import delete_task, cleanup
+    import lazarr.deletion as deletion
+
+    _, db, _, service = core
+    worker, engine, _ = worker_setup
+    engine.remove = lambda h: engine.handles.pop(h, None)
+    task = service.create_from_metadata(
+        CreateTask(media_id="42", kind="tv", season=1, episodes=[1]), media, season, 1
+    )
+    await worker.run_due()
+    with db.session() as session:
+        root = Path(session.scalar(select(Download)).save_path)
+    original = deletion.shutil.rmtree
+
+    def fail(path):
+        raise PermissionError("busy")
+
+    monkeypatch.setattr(deletion.shutil, "rmtree", fail)
+    assert (await delete_task(worker, task, 1, True))["cleanup_pending"]
+    assert root.exists()
+    monkeypatch.setattr(deletion.shutil, "rmtree", original)
+    assert not cleanup(db)
+    assert not root.exists()
+
+
+async def test_cancelled_group_remains_due(core, media, season, worker_setup, monkeypatch):
+    import asyncio
+
+    _, db, _, service = core
+    worker, _, demo = worker_setup
+    service.create_from_metadata(
+        CreateTask(media_id="42", kind="tv", season=1, episodes=[1]), media, season, 1
+    )
+
+    async def interrupted(*args, **kwargs):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(demo, "search", interrupted)
+    with pytest.raises(asyncio.CancelledError):
+        await worker.run_due()
+    with db.session() as session:
+        sub = session.scalar(select(Subtask))
+        assert sub.next_search_at == 0 and sub.lease_until == 0
+
+
+async def test_description_language_does_not_replace_unknown_probe(core, media, season, worker_setup):
+    _, db, _, service = core
+    worker, engine, _ = worker_setup
+    service.create_from_metadata(
+        CreateTask(media_id="42", kind="tv", season=1, episodes=[1]), media, season, 1
+    )
+    await worker.run_due()
+    with db.session() as session:
+        link = session.scalar(select(SubtaskAsset))
+        report = dict(link.preflight)
+        report["binding"] = {
+            **report["binding"],
+            "tracks": [
+                {
+                    "kind": "audio",
+                    "language": "ru",
+                    "language_source": "description",
+                    "file_index": 1,
+                    "path": "external.mka",
+                    "embedded": False,
+                }
+            ],
+        }
+        link.preflight = report
+        asset = session.get(MediaAsset, link.asset_id)
+        download = session.get(Download, asset.download_id)
+
+    async def probe(path, complete):
+        return {
+            "ok": True,
+            "streams": [{"codec_type": "audio"}]
+            if str(path).endswith(".mka")
+            else [
+                {"codec_type": "video", "width": 1920, "height": 1080},
+                {"codec_type": "audio", "tags": {"language": "jpn"}},
+            ],
+        }
+
+    worker._probe = probe
+    await worker._verify(link.id, asset.id, link.subtask_id, download.save_path, {"complete": True})
+    with db.session() as session:
+        link = session.get(SubtaskAsset, link.id)
+        assert not link.current
+        assert next(c for c in link.verification["criteria"] if c["field"] == "audio")["result"] == "UNKNOWN"

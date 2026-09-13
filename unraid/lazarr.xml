@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Container version="2">
+  <Name>Lazarr</Name>
+  <Repository>drun555/lazarr:latest</Repository>
+  <Registry>https://hub.docker.com/r/drun555/lazarr</Registry>
+  <Network>bridge</Network>
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/Drun555/Lazarr/issues</Support>
+  <Project>https://github.com/Drun555/Lazarr</Project>
+  <Overview>Lightweight media manager with metadata search, per-episode matching, direct playback and an integrated libtorrent download engine.</Overview>
+  <Category>MediaApp:Video MediaServer:Other</Category>
+  <WebUI>http://[IP]:[PORT:8000]/</WebUI>
+  <TemplateURL>https://raw.githubusercontent.com/Drun555/Lazarr/main/unraid/lazarr.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/Drun555/Lazarr/main/unraid/lazarr-icon.png</Icon>
+  <ExtraParams>--stop-timeout 30</ExtraParams>
+  <PostArgs/>
+  <CPUset/>
+  <DateInstalled/>
+  <DonateText/>
+  <DonateLink/>
+  <Requires>Optional: a separately installed FlareSolverr container for providers protected by Cloudflare.</Requires>
+  <Config Name="WebUI" Target="8000" Default="8000" Mode="tcp" Description="Lazarr WebUI port." Type="Port" Display="always" Required="true" Mask="false">8000</Config>
+  <Config Name="BitTorrent TCP" Target="6881" Default="6881" Mode="tcp" Description="Incoming BitTorrent TCP port." Type="Port" Display="always" Required="true" Mask="false">6881</Config>
+  <Config Name="BitTorrent UDP" Target="6881" Default="6881" Mode="udp" Description="Incoming BitTorrent UDP port." Type="Port" Display="always" Required="true" Mask="false">6881</Config>
+  <Config Name="Application data" Target="/data" Default="/mnt/user/appdata/lazarr" Mode="rw" Description="Database, secrets and torrent resume data." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/lazarr</Config>
+  <Config Name="Plugins" Target="/plugins" Default="/mnt/user/appdata/lazarr/plugins" Mode="rw" Description="Downloaded provider plugin files." Type="Path" Display="advanced" Required="true" Mask="false">/mnt/user/appdata/lazarr/plugins</Config>
+  <Config Name="Downloads" Target="/downloads" Default="/mnt/user/downloads/lazarr" Mode="rw" Description="Downloaded movies and series." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/downloads/lazarr</Config>
+  <Config Name="Timezone" Target="TZ" Default="Etc/UTC" Mode="" Description="IANA timezone, for example Europe/Saratov." Type="Variable" Display="always" Required="true" Mask="false">Etc/UTC</Config>
+  <Config Name="FlareSolverr URL" Target="LAZARR_FLARESOLVERR_URL" Default="" Mode="" Description="Optional URL reachable from this container, for example http://192.168.1.10:8191." Type="Variable" Display="advanced" Required="false" Mask="false"></Config>
+  <Config Name="Secure cookie" Target="LAZARR_SECURE_COOKIE" Default="0" Mode="" Description="Set to 1 when Lazarr is exposed through an HTTPS reverse proxy." Type="Variable" Display="advanced" Required="true" Mask="false">0</Config>
+</Container>

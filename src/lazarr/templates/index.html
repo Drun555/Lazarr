@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block body %}
+<header class="topbar">
+  <nav aria-label="Основная навигация">
+    <button class="nav-tab active" data-tab="search">Поиск</button>
+    <button class="nav-tab" data-tab="library">Библиотеки</button>
+    <button class="nav-tab" data-tab="downloads">Загрузки <span class="nav-count" id="download-count">0</span></button>
+    <button class="nav-tab" data-tab="settings">Настройки</button>
+  </nav>
+  <div class="account"><span>{{ user.username }}</span><button class="icon-button" id="logout" title="Выйти" aria-label="Выйти">Выйти</button></div>
+</header>
+<main class="workspace">
+  <section id="tab-search" class="tab-panel">
+    <div class="search-hero">
+      <div class="search-box">
+        <svg width="23" height="23" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5" stroke="currentColor" stroke-width="1.7"/><path d="m16 16 5 5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+        <input id="media-search" name="q" aria-label="Название фильма, сериала или аниме" placeholder="Название фильма, сериала или аниме…" autocomplete="off" maxlength="200"
+          hx-get="/ui/search" hx-trigger="input changed delay:350ms" hx-target="#search-results" hx-sync="this:replace" hx-indicator="#search-indicator">
+        <span id="search-indicator" class="htmx-indicator spinner" aria-label="Поиск"></span><kbd> / </kbd>
+      </div>
+    </div>
+    <div id="search-results" class="search-results" aria-live="polite"></div>
+    <section id="selection" class="panel selection" hidden>
+      <div class="section-heading"><div><p class="eyebrow">Новая задача</p><h2 id="selection-title"></h2></div><button class="ghost" id="clear-selection">Отмена</button></div>
+      <p id="selection-overview" class="muted"></p>
+      <form id="task-form">
+        <div id="season-fields" class="form-grid" hidden><label>Сезон<select name="season" id="season-select"></select></label>
+          <label>Серии<input name="episodes" placeholder="Все серии сезона" aria-describedby="episodes-help"><small id="episodes-help">Пусто — весь сезон; либо 1, 2, 5–8</small></label></div>
+        <div id="task-requirements" class="requirements-fields"></div>
+        <div class="form-footer"><span class="fine">Субтитры можно будет дополнить позже.</span><button class="primary" type="submit">Создать задачу <span>＋</span></button></div>
+        <p class="form-error" role="alert"></p>
+      </form>
+    </section>
+    <section class="task-section">
+      <div class="section-heading"><div class="heading-row"><h2>Задачи</h2><span class="count" id="task-count">0</span></div></div>
+      <div id="task-list"><div class="empty"><p>Нет задач. Найдите произведение, чтобы добавить задачу.</p></div></div>
+    </section>
+  </section>
+  <section id="tab-library" class="tab-panel" hidden>
+    <div id="library-overview"><h2>Библиотеки</h2><div id="library-nav" class="library-nav" aria-label="Выбор библиотеки"></div><div id="library-items" class="library-grid"></div></div>
+    <div id="library-detail" hidden><div class="library-toolbar"><button id="library-back" class="ghost">← К библиотекам</button><div><button id="library-subtitles" class="primary">Загрузить субтитры</button> <button id="library-refresh" class="ghost">Обновить</button> <button id="library-delete" class="danger-button">Удалить</button></div></div><div id="library-detail-body"></div></div>
+  </section>
+  <section id="tab-downloads" class="tab-panel" hidden>
+    <div class="page-heading downloads-heading"><h1>Загрузки</h1><button type="button" class="primary" id="run-queue">Запустить очередь</button></div>
+    <section id="search-activity" class="panel search-activity" hidden><div class="search-activity-heading"><h2 id="search-state"></h2><span id="search-counts" class="fine"></span></div><div id="search-progress" class="progress" role="progressbar" aria-label="Прогресс поиска"><span></span></div><p id="search-current" role="status" aria-live="polite"></p><p id="search-query" class="fine"></p><div id="search-providers" class="search-providers"></div><details><summary>Ход поиска</summary><ol id="search-history"></ol></details></section>
+    <div id="engine-notice"></div><div id="download-list"></div>
+    <div class="section-heading"><h2>Статус эпизодов</h2></div><div id="episode-list"></div>
+  </section>
+  <section id="tab-settings" class="tab-panel" hidden>
+    <div class="page-heading"><h1>Настройки</h1></div>
+    <form id="settings-form" class="panel">
+      <h2>Медиа по умолчанию</h2><p class="muted small">Изменения применяются к новым задачам.</p><div id="settings-requirements"></div>
+      <div class="divider"></div><h2>Хранение и расписание</h2>
+      <div class="form-grid"><label>Папка фильмов<input name="movie_path" required></label><label>Папка сериалов<input name="series_path" required></label>
+        <label>Время начала поиска<input name="search_start" type="time" required><small>Ежедневно. Начавшийся поиск выполняется до завершения.</small></label>
+        <label>Коэффициент раздачи<input name="seed_ratio" type="number" min="0" step="0.1" placeholder="Без ограничения"><small>Пусто — без ограничения; 0 — до конца загрузки.</small></label>
+        <label>Каталог плагинов<input name="plugin_repository" type="url" placeholder="https://…/catalog.json"><small>Плагины обновляются автоматически.</small></label>
+      </div><div class="form-footer"><p class="form-error" role="alert"></p><button class="primary" type="submit">Сохранить настройки</button></div>
+    </form>
+    <div class="section-heading settings-heading"><h2>Провайдеры</h2></div>
+    <div id="provider-list" class="provider-grid"></div>
+    <section class="panel accounts-panel"><div class="section-heading"><div><h2>Учётные записи</h2><p class="muted small">Все аккаунты пока имеют права администратора.</p></div></div>
+      <div id="account-list"></div><form id="account-form" class="inline-form"><label>Новый логин<input name="username" required maxlength="80" autocomplete="off"></label><label>Пароль<input name="password" type="password" required minlength="10" autocomplete="new-password"></label><button class="primary" type="submit">Добавить</button><p class="form-error" role="alert"></p></form>
+    </section>
+  </section>
+</main>
+<dialog id="modal"><div class="modal-heading"><h2 id="modal-title"></h2><button class="icon-button" id="close-modal" aria-label="Закрыть">×</button></div><div id="modal-body"></div></dialog>
+{% endblock %}

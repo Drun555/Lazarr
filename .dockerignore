@@ -1,0 +1,14 @@
+.venv
+.runtime
+.ffmpeg*
+.git
+__pycache__
+.pytest_cache
+.ruff_cache
+data
+downloads
+.env
+tests
+docs
+
+node_modules/

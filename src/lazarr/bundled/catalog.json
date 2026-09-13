@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "plugins": [
+    {
+      "id": "tmdb",
+      "kind": "metadata",
+      "version": "1.0.3",
+      "sdk": ">=1.4,<2",
+      "url": "https://example.invalid/lazarr/providers/tmdb.py",
+      "sha256": "0add36a81fa6e03c1d478e6a54257844535b165d5195c5ce4604ed07cffa9eda"
+    },
+    {
+      "id": "nyaa",
+      "kind": "content",
+      "version": "1.0.3",
+      "sdk": ">=1.3,<2",
+      "url": "https://example.invalid/lazarr/providers/nyaa.py",
+      "sha256": "d493b4c12d3cb47f19983f90f4405b10e67cc2faaef8b2ca1447154ff673ae9f"
+    },
+    {
+      "id": "rutracker",
+      "kind": "content",
+      "version": "1.0.3",
+      "sdk": ">=1.3,<2",
+      "url": "https://example.invalid/lazarr/providers/rutracker.py",
+      "sha256": "913f49af78807b53ccdeab6d4c17091e053bb5e81806d368e84e38e4d142a548"
+    },
+    {
+      "id": "podnapisi",
+      "kind": "subtitle",
+      "version": "1.0.1",
+      "sdk": ">=1.5,<2",
+      "url": "https://example.invalid/lazarr/providers/podnapisi.py",
+      "sha256": "8a25334a463b0642e87c111b18944db6c4c4738d2c9699a734dfc85242dec5eb"
+    },
+    {
+      "id": "opensubtitles",
+      "kind": "subtitle",
+      "version": "1.0.1",
+      "sdk": ">=1.5,<2",
+      "url": "https://example.invalid/lazarr/providers/opensubtitles.py",
+      "sha256": "8608cfd3f8958b38f0e8d407c181851fd453b201ad65fb998fcdb2eb2eaf6a38"
+    }
+  ]
+}
