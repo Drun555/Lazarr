@@ -82,6 +82,8 @@ class EpisodeInfo(BaseModel):
     id: str
     number: int
     title: str = ""
+    overview: str = ""
+    still: str | None = None
     air_date: str | None = None
     absolute_number: int | None = None
 

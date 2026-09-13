@@ -167,6 +167,7 @@ class TaskService:
                 episode = Episode(season_id=season.id, number=item.number)
                 db.add(episode)
             episode.external_id, episode.title, episode.air_date = item.id, item.title, item.air_date
+            episode.overview, episode.still = item.overview, item.still
             episode.absolute_number = item.absolute_number
         db.flush()
         return season

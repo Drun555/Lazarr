@@ -60,15 +60,63 @@ class LibraryService:
                     # Existing local library remains usable when metadata is offline.
                     continue
 
+    async def enrich_media(self, identity):
+        """Refresh old episode rows once after the episode-metadata migration."""
+        async with self.refresh_lock:
+            with self.db.session() as db:
+                media = db.get(Media, identity)
+                pending = [
+                    (season.id, season.number)
+                    for season in db.scalars(select(Season).where(Season.media_id == identity))
+                    if season.refreshed_at == 0
+                ]
+                provider_id = media.provider if media else None
+                external_id = media.external_id if media else None
+            if not media or provider_id not in self.plugins.available("metadata"):
+                return
+            for season_id, number in pending:
+                try:
+                    async with self.plugins.open(provider_id) as provider:
+                        info = await provider.get_season(external_id, number)
+                    with self.db.session() as db:
+                        current = db.get(Season, season_id)
+                        if current:
+                            self.service._upsert_season(db, identity, info)
+                except Exception:
+                    # A metadata outage must not hide the local library.
+                    continue
+
     def list(self):
         with self.db.session() as db:
             items = list(db.scalars(select(Media).order_by(Media.title, Media.id)))
+            active = {"starting", "downloading"}
+            summaries = {}
+            for media in items:
+                downloads = {
+                    download.id: download
+                    for download in db.scalars(
+                        select(Download)
+                        .join(MediaAsset, MediaAsset.download_id == Download.id)
+                        .where(MediaAsset.media_id == media.id, Download.state.in_(active))
+                    )
+                }
+                if downloads:
+                    values = [min(1.0, max(0.0, float((d.stats or {}).get("progress", 0)))) for d in downloads.values()]
+                    summaries[media.id] = {
+                        "state": "downloading",
+                        "progress": sum(values) / len(values),
+                        "download_rate": sum((d.stats or {}).get("download_rate", 0) or 0 for d in downloads.values()),
+                    }
             return [
-                {"id": key, "name": name, "items": [self.tile(m) for m in items if library_kind(m) == key]}
+                {
+                    "id": key,
+                    "name": name,
+                    "items": [self.tile(m, summaries.get(m.id)) for m in items if library_kind(m) == key],
+                }
                 for key, name in LIBRARIES
             ]
 
-    def tile(self, media):
+    def tile(self, media, download=None):
         return {
             "id": media.id,
             "title": media.title,
@@ -77,6 +125,7 @@ class LibraryService:
             "kind": media.kind,
             "library": library_kind(media),
             "taxonomy_known": bool(media.metadata_json.get("taxonomy_known")),
+            "download": download,
         }
 
     def detail(self, identity):
@@ -154,6 +203,7 @@ class LibraryService:
                     "pending": link.pending,
                     "verified": bool(link.current and link.verification.get("complete")),
                     "download_state": download.state,
+                    "download": self._download_info(download, link.subtask_id),
                     "release": {
                         "provider": release.provider,
                         "title": release.data.get("title", ""),
@@ -200,14 +250,25 @@ class LibraryService:
                         "canonical_season": canonical,
                         "canonical_episode": episode.number if episode else None,
                         "title": episode.title if episode else media.title,
+                        "overview": episode.overview if episode else media.metadata_json.get("overview", ""),
+                        "still": episode.still if episode else media.metadata_json.get("poster"),
                         "air_date": date,
                         "released": released(date, timezone),
                         "statuses": sorted(
                             set("paused" if tasks[s.task_id].paused else s.status for s in related)
                         ),
                         "requested": bool(related),
+                        "subtasks": [
+                            {
+                                "id": sub.id,
+                                "task_id": sub.task_id,
+                                "status": "paused" if tasks[sub.task_id].paused else sub.status,
+                            }
+                            for sub in related
+                        ],
                         "last_search_at": max((s.last_search_at or 0 for s in related), default=0) or None,
                         "files": list(files.values()),
+                        "download": self._part_download(list(files.values())),
                     }
                 )
             parts.sort(key=lambda p: (p["season"] or 0, p["episode"] or 0))
@@ -218,3 +279,30 @@ class LibraryService:
                 "last_search_at": max((s.last_search_at or 0 for s in subs), default=0) or None,
                 "task_count": len(tasks),
             }
+
+    @staticmethod
+    def _download_info(download, subtask_id):
+        stats = download.stats or {}
+        part = (stats.get("bindings") or {}).get(str(subtask_id), {})
+        downloaded = download.downloaded or 0
+        return {
+            "id": download.id,
+            "state": download.state,
+            "progress": min(1.0, max(0.0, float(part.get("progress", stats.get("progress", 0)) or 0))),
+            "eta": part.get("eta", stats.get("eta")),
+            "download_rate": stats.get("download_rate", 0) or 0,
+            "upload_rate": stats.get("upload_rate", 0) or 0,
+            "ratio": download.uploaded / downloaded if downloaded else 0,
+            "seed_ratio": download.seed_ratio,
+            "seeds": stats.get("seeds", 0) or 0,
+            "peers": stats.get("peers", 0) or 0,
+            "error": stats.get("error"),
+        }
+
+    @staticmethod
+    def _part_download(files):
+        active = [file["download"] for file in files if file.get("download")]
+        if not active:
+            return None
+        current = next((item for item in active if item["state"] in {"starting", "downloading", "paused"}), active[0])
+        return current

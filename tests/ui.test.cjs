@@ -84,7 +84,7 @@ test('language autocomplete pills, aliases, keyboard, removal, and no duplicates
   }finally{dom.window.close();}
 });
 
-test('create task sends canonical picks and immediately opens Downloads with live activity',async()=>{
+test('create task sends canonical picks and immediately opens Libraries with live activity',async()=>{
   const {dom,w,document:d,errors,calls}=await setup();
   try{
     d.querySelector('#search-results').innerHTML='<button data-media-id="42" data-provider="tmdb" data-kind="tv">Test</button>';
@@ -94,7 +94,7 @@ test('create task sends canonical picks and immediately opens Downloads with liv
     d.querySelector('#task-form').dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}));await settle();await settle();
     const created=calls.find(c=>c.url==='/api/v1/tasks'&&c.method==='POST');
     assert.deepEqual(created.payload.requirements.audio_languages,['ru','ja']);
-    assert.equal(d.querySelector('#tab-downloads').hidden,false);
+    assert.equal(d.querySelector('#tab-library').hidden,false);
     assert.equal(d.querySelector('#tab-search').hidden,true);
     assert.equal(d.querySelector('#search-activity').hidden,false);
     assert.equal(d.querySelector('#search-current').textContent,'Чтение описания');
@@ -109,7 +109,7 @@ test('create task sends canonical picks and immediately opens Downloads with liv
 test('manual queue button starts search without waiting for results',async()=>{
   const {dom,document:d,calls,errors}=await setup();
   try{
-    d.querySelector('[data-tab=downloads]').click();await settle();
+    d.querySelector('[data-tab=library]').click();await settle();
     assert.equal(d.querySelector('#run-queue').disabled,false);
     d.querySelector('#run-queue').click();await settle();await settle();
     assert.equal(calls.filter(c=>c.url==='/api/v1/search/run').length,1);
@@ -125,7 +125,7 @@ test('failed search shows cooldown cause and disabled provider separately',async
       {id:'nyaa',name:'Nyaa',state:'cooldown',reason:'Временная пауза после ошибки: HTTP 504',retry_at:2000000000,requests:0,candidates:0},
       {id:'rutracker',name:'Rutracker',state:'disabled',reason:'Выключен в настройках',requests:0,candidates:0}
     ]});
-    d.querySelector('[data-tab=downloads]').click();await settle();await settle();
+    d.querySelector('[data-tab=library]').click();await settle();await settle();
     assert.equal(d.querySelector('#search-state').textContent,'Поиск не выполнен');
     assert.equal(d.querySelectorAll('.search-provider').length,2);
     assert.match(d.querySelector('#search-providers').textContent,/Nyaa.*504.*Rutracker.*Выключен/s);
@@ -159,19 +159,21 @@ test('activity distinguishes actual checks, filtering, failures and delayed retr
   const {dom,document:d,setActivity}=await setup();
   try{
     setActivity({running:false,state:'queued',pending_requests:1,next_attempt_at:Date.now()/1000+120,groups_total:1,groups_done:1,candidates_found:50,candidates_checked:7,candidates_filtered:26,candidates_failed:1,candidates_deferred:16,message:'Повтор поиска запланирован после паузы провайдера',history:[]});
-    d.querySelector('[data-tab=downloads]').click();await settle();
+    d.querySelector('[data-tab=library]').click();await settle();
     assert.match(d.querySelector('#search-counts').textContent,/Найдено: 50.*Проверено: 7.*Отсеяно: 26.*Отложено: 16.*Ошибки проверки: 1/);
     assert.match(d.querySelector('#search-current').textContent,/Не раньше/);
   }finally{dom.window.close();}
 });
 
 test('one release can be selected for every matching episode in a task',async()=>{
-  const {dom,document:d,calls,errors,setTasks,setTaskChoices}=await setup();
+  const {dom,document:d,calls,errors,setTasks,setTaskChoices,setLibrary}=await setup();
   try{
     const subtasks=Array.from({length:8},(_,index)=>({id:index+1,episode:index+1,title:`Эпизод ${index+1}`,status:'needs_selection',missing_subtitle_languages:[],error:null}));
-    setTasks([{id:7,title:'Nathan for You',season:1,subtasks,requirements:{audio_languages:['ru'],subtitle_languages:[],min_resolution:720,max_resolution:1080},paused:false}]);
+    setTasks([{id:7,media_id:7,title:'Nathan for You',season:1,subtasks,requirements:{audio_languages:['ru'],subtitle_languages:[],min_resolution:720,max_resolution:1080},paused:false}]);
+    setLibrary([{id:'series',name:'Сериалы',items:[{id:7,title:'Nathan for You',year:2013,taxonomy_known:true}]},{id:'movies',name:'Кино',items:[]},{id:'anime',name:'Аниме',items:[]}],{title:'Nathan for You',year:2013,metadata:{overview:'',genres:[]},task_count:1,last_search_at:1,episodes:subtasks.map(part=>({id:part.id,season:1,episode:part.episode,title:part.title,air_date:'2013-01-01',released:true,statuses:[part.status],subtasks:[{id:part.id,task_id:7,status:part.status}],files:[]}))});
     setTaskChoices([{id:91,total:8,matched:8,candidate:{title:'Nathan For You S01 1080p',provider:'demo',url:'https://example.org/release',size:1024,seeds:10}}]);
-    d.querySelector('[data-tab=downloads]').click();await settle();await settle();
+    d.querySelector('[data-tab=library]').click();await settle();await settle();
+    d.querySelector('[data-library-media="7"]').click();await settle();await settle();
     const button=d.querySelector('[data-task-candidates="7"]');
     assert.equal(button.textContent,'Выбрать для всех серий');
     button.click();await settle();await settle();
@@ -188,15 +190,20 @@ test('one release can be selected for every matching episode in a task',async()=
 test('libraries switch categories, show details and delete media',async()=>{
   const {dom,w,document:d,errors,calls,setLibrary}=await setup();
   try{
-    setLibrary([{id:'series',name:'Сериалы',items:[]},{id:'movies',name:'Кино',items:[]},{id:'anime',name:'Аниме',items:[{id:2,title:'Re:Zero',year:2016,taxonomy_known:true}]}],{title:'Re:Zero',year:2016,metadata:{overview:'Описание',original_title:'Original',genres:['Анимация']},task_count:2,last_search_at:1,episodes:[{season:2,episode:14,title:'Пари',air_date:'2021-01-06',released:true,statuses:['downloading'],last_search_at:1,files:[{current:false,pending:true,verified:false,path:'episode.mkv',directory:'/downloads',resolution:1080,size:1024,tracks:[{kind:'audio',language:'ja',external:false}],release:{provider:'rutracker',title:'Selected release',url:'https://example.org/topic'},missing_subtitle_languages:['ru'],download_state:'downloading'}]}]});
+    const download={id:5,state:'downloading',progress:.42,eta:120,download_rate:2048,upload_rate:128,ratio:.1,seed_ratio:1,seeds:3,peers:4};
+    setLibrary([{id:'series',name:'Сериалы',items:[]},{id:'movies',name:'Кино',items:[]},{id:'anime',name:'Аниме',items:[{id:2,title:'Re:Zero',year:2016,taxonomy_known:true,download:{progress:.42,download_rate:2048}}]}],{title:'Re:Zero',year:2016,metadata:{overview:'Описание',original_title:'Original',genres:['Анимация']},task_count:2,last_search_at:1,episodes:[{id:14,season:2,episode:14,title:'Пари',overview:'Описание серии',still:'https://image.tmdb.org/t/p/w342/still.jpg',air_date:'2021-01-06',released:true,statuses:['downloading'],subtasks:[{id:11,task_id:7,status:'downloading'}],download,last_search_at:1,files:[{current:false,pending:true,verified:false,path:'episode.mkv',directory:'/downloads',resolution:1080,size:1024,tracks:[{kind:'audio',language:'ja',external:false}],release:{provider:'rutracker',title:'Selected release',url:'https://example.org/topic'},missing_subtitle_languages:['ru'],download_state:'downloading',download}]}]});
     d.querySelector('[data-tab=library]').click();await settle();await settle();
     assert.equal(d.querySelectorAll('[data-library]').length,3);
     d.querySelector('[data-library=anime]').click();
+    assert.equal(d.querySelector('.library-tile .progress').getAttribute('aria-valuenow'),'42.0');
     d.querySelector('[data-library-media="2"]').click();await settle();await settle();
     assert.equal(d.querySelector('#library-overview').hidden,true);
     const detail=d.querySelector('#library-detail-body').textContent;
-    assert.match(detail,/Описание/);assert.match(detail,/Календарь выхода/);assert.match(detail,/Сезон 2 · Серия 14/);
+    assert.match(detail,/Описание серии/);assert.match(detail,/Календарь выхода/);assert.match(detail,/14\. Пари/);
     assert.match(detail,/1080p/);assert.match(detail,/Японский/);assert.match(detail,/Selected release/);assert.match(detail,/Предварительные сведения/);
+    assert.equal(d.querySelector('.episode-still').getAttribute('src'),'/api/v1/posters/tmdb/still.jpg');
+    assert.equal(d.querySelector('.episode-download .progress').getAttribute('aria-valuenow'),'42.0');
+    assert.equal(d.querySelector('[data-candidates="11"]').textContent,'Выбрать раздачу');
     d.querySelector('#library-delete').click();
     assert.equal(d.querySelector('#modal').open,true);
     const form=d.querySelector('#delete-media-form');

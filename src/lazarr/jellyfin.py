@@ -123,9 +123,12 @@ def user_dto(ctx, user):
     }
 
 
-def poster_tag(media):
-    value = media.metadata_json.get("poster")
+def image_tag(value):
     return hashlib.sha256(value.encode()).hexdigest()[:16] if value else None
+
+
+def poster_tag(media):
+    return image_tag(media.metadata_json.get("poster"))
 
 
 def provider_ids(media):
@@ -411,7 +414,10 @@ def media_streams(ctx, playable, item_id, media_source_id):
 
 def media_source(ctx, playable, item_id):
     asset, path = playable["asset"], playable["path"]
-    source_id = object_id("asset", asset.id)
+    # Fladder requests /Videos/{MediaSource.Id}/stream. Keeping the source id
+    # equal to the public item id makes that URL resolve without exposing a
+    # filesystem path or requiring the client to know Lazarr's asset ids.
+    source_id = item_id
     streams, audio_index, subtitle_index = media_streams(ctx, playable, item_id, source_id)
     duration = duration_ticks(asset)
     return {
@@ -426,7 +432,7 @@ def media_source(ctx, playable, item_id):
         "ETag": f"{path.stat().st_mtime_ns:x}-{path.stat().st_size:x}",
         "RunTimeTicks": duration,
         "SupportsTranscoding": False,
-        "SupportsDirectStream": False,
+        "SupportsDirectStream": True,
         "SupportsDirectPlay": True,
         "SupportsProbing": False,
         "VideoType": "VideoFile",
@@ -434,6 +440,7 @@ def media_source(ctx, playable, item_id):
         "DefaultAudioStreamIndex": audio_index,
         "DefaultSubtitleStreamIndex": subtitle_index,
         "RequiredHttpHeaders": {},
+        "DirectStreamUrl": f"/Videos/{item_id}/stream?Static=true&mediaSourceId={source_id}",
     }
 
 
@@ -467,8 +474,12 @@ def episode_dto(ctx, media, episode_data, user=None):
     if not playable:
         return None
     season_number = episode_data["season"]
+    still = episode_data.get("still")
+    still_tag = image_tag(still)
+    episode_number = episode_data["episode"]
+    title = episode_data["title"] or f"Серия {episode_number}"
     result = {
-        "Name": episode_data["title"] or f"Серия {episode_data['episode']}",
+        "Name": title,
         "ServerId": server_id(ctx),
         "Id": object_id("episode", episode_data["id"]),
         "SeriesName": media.title,
@@ -476,7 +487,7 @@ def episode_dto(ctx, media, episode_data, user=None):
         "SeasonName": f"Сезон {season_number}",
         "SeasonId": object_id("season", media.id, season_number),
         "ParentId": object_id("season", media.id, season_number),
-        "IndexNumber": episode_data["episode"],
+        "IndexNumber": episode_number,
         "ParentIndexNumber": season_number,
         "PremiereDate": iso_date(episode_data["air_date"]),
         "ProductionYear": int(episode_data["air_date"][:4]) if episode_data["air_date"] else None,
@@ -484,7 +495,9 @@ def episode_dto(ctx, media, episode_data, user=None):
         "Type": "Episode",
         "MediaType": "Video",
         "LocationType": "FileSystem",
-        "ImageTags": {},
+        "Overview": episode_data.get("overview") or "",
+        "ImageTags": {"Primary": still_tag} if still_tag else {},
+        "PrimaryImageAspectRatio": 16 / 9 if still_tag else None,
         "SeriesPrimaryImageTag": poster_tag(media),
         "UserData": {},
     }
@@ -795,6 +808,7 @@ def install_jellyfin_api(app, context):
             media = db.get(Media, identity) if kind == "media" else None
         if not media or media.kind != "tv":
             raise HTTPException(404, "Series not found")
+        await context(request).library.enrich_media(identity)
         params = request.query_params
         season = params.get("season") or params.get("Season")
         season_id = params.get("seasonId") or params.get("SeasonId")
@@ -943,6 +957,7 @@ def install_jellyfin_api(app, context):
             raise HTTPException(404, "Image not found")
         ctx = context(request)
         kind, identity, _ = parse_object_id(item_id)
+        episode = None
         with ctx.db.session() as db:
             if kind == "media":
                 media = db.get(Media, identity)
@@ -954,8 +969,9 @@ def install_jellyfin_api(app, context):
                 media = db.get(Media, identity)
             else:
                 media = None
-        poster = media.metadata_json.get("poster") if media else None
-        filename = poster.rsplit("/", 1)[-1] if poster else None
+        image = episode.still if kind == "episode" and episode and episode.still else None
+        image = image or (media.metadata_json.get("poster") if media else None)
+        filename = image.rsplit("/", 1)[-1] if image else None
         if not filename:
             raise HTTPException(404, "Image not found")
         return FileResponse(await fetch_poster(ctx, filename))

@@ -3,7 +3,7 @@ from sqlalchemy import select
 from fastapi.testclient import TestClient
 from lazarr.app import create_app
 from lazarr.library import LibraryService, library_kind
-from lazarr.models import Media, SubtaskAsset, MediaAsset
+from lazarr.models import Media, SubtaskAsset, MediaAsset, Download
 from lazarr.sdk import MetadataItem, ProviderError
 from lazarr.services import CreateTask
 from test_api import login
@@ -33,6 +33,8 @@ async def test_shared_media_detail_tracks_release_calendar_last_search(core, med
     media.genre_ids = [16]
     media.original_language = "ja"
     media.episode_numbering = {"1:1": [{"season": 2, "episode": 14}]}
+    season.episodes[0].overview = "Описание серии"
+    season.episodes[0].still = "https://image.tmdb.org/t/p/w342/still.jpg"
     service.create_from_metadata(
         CreateTask(media_id="42", kind="tv", season=1, episodes=[1]), media, season, 1
     )
@@ -55,6 +57,8 @@ async def test_shared_media_detail_tracks_release_calendar_last_search(core, med
     detail = library.detail(identity)
     assert detail["last_search_at"] and detail["last_search_at"] <= time.time()
     first = next(e for e in detail["episodes"] if e["episode"] == 1)
+    assert first["overview"] == "Описание серии" and first["still"].endswith("/still.jpg")
+    assert first["subtasks"] and first["subtasks"][0]["id"]
     assert len(first["files"]) == 1  # Shared physical asset, two users.
     file = first["files"][0]
     assert file["pending"] and not file["verified"]
@@ -62,6 +66,17 @@ async def test_shared_media_detail_tracks_release_calendar_last_search(core, med
     assert first["air_date"] == "2020-01-01"
     with db.session() as session:
         asset = session.get(MediaAsset, file["id"])
+        download = session.get(Download, asset.download_id)
+        subtask_ids = [item["id"] for item in first["subtasks"]]
+        download.state = "downloading"
+        download.stats = {
+            "progress": 0.4,
+            "download_rate": 2048,
+            "bindings": {
+                str(subtask_identity): {"progress": 0.25, "eta": 90}
+                for subtask_identity in subtask_ids
+            },
+        }
         asset.probe = {
             "streams": [
                 {"codec_type": "audio", "codec_name": "aac", "channels": 2, "tags": {"language": "rus"}}
@@ -71,6 +86,10 @@ async def test_shared_media_detail_tracks_release_calendar_last_search(core, med
             link.current = True
             link.pending = False
             link.verification = {"complete": True}
+    tile = library.list()[2]["items"][0]
+    assert tile["download"] == {"state": "downloading", "progress": 0.4, "download_rate": 2048}
+    first = next(e for e in library.detail(identity)["episodes"] if e["episode"] == 1)
+    assert first["download"]["progress"] == 0.25 and first["download"]["eta"] == 90
     file = next(e for e in library.detail(identity)["episodes"] if e["episode"] == 1)["files"][0]
     assert file["verified"] and file["tracks"][0]["language"] == "ru" and file["tracks"][0]["codec"] == "aac"
 

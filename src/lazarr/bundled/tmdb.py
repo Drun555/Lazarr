@@ -18,7 +18,7 @@ class Plugin(MetadataProvider):
         id="tmdb",
         name="TMDB",
         kind="metadata",
-        version="1.0.3",
+        version="1.0.4",
         sdk=">=1.4,<2",
         config_fields=[
             ConfigField(name="api_key", label="API key или Read Access Token", secret=True, required=True),
@@ -158,6 +158,10 @@ class Plugin(MetadataProvider):
                     id=str(e["id"]),
                     number=e["episode_number"],
                     title=e.get("name", ""),
+                    overview=e.get("overview", ""),
+                    still=f"https://image.tmdb.org/t/p/w342{e['still_path']}"
+                    if e.get("still_path")
+                    else None,
                     air_date=e.get("air_date"),
                 )
                 for e in data.get("episodes", [])

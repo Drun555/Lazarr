@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import httpx
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
@@ -15,6 +16,8 @@ def playable_episode(core, media, season):
     media.genre_ids = [16]
     media.original_language = "ja"
     media.episode_numbering = {"1:1": [{"season": 2, "episode": 14}]}
+    season.episodes[0].overview = "Описание первой серии"
+    season.episodes[0].still = "https://image.tmdb.org/t/p/w342/episode-still.jpg"
     service.create_from_metadata(
         CreateTask(media_id="42", kind="tv", season=1, episodes=[1]), media, season, 1
     )
@@ -164,6 +167,9 @@ def test_jellyfin_auth_libraries_navigation_and_read_only_api(core, media, seaso
             ],
         ).json()["Items"]
         assert len(episodes) == 1 and episodes[0]["IndexNumber"] == 14
+        assert episodes[0]["Name"] == "Episode 1"
+        assert episodes[0]["Overview"] == "Описание первой серии"
+        assert episodes[0]["ImageTags"]["Primary"]
         audio = next(stream for stream in episodes[0]["MediaStreams"] if stream["Type"] == "Audio")
         assert audio["Channels"] == 2
         assert audio["SampleRate"] == 48_000
@@ -187,7 +193,10 @@ def test_jellyfin_direct_play_range_languages_and_external_subtitles(core, media
         episode = client.get(f"/Shows/{series['Id']}/Episodes", params={"Season": 2}).json()["Items"][0]
         playback = client.post(f"/Items/{episode['Id']}/PlaybackInfo", json={}).json()
         source = playback["MediaSources"][0]
+        assert source["Id"] == episode["Id"]
         assert source["SupportsDirectPlay"] is True
+        assert source["SupportsDirectStream"] is True
+        assert source["DirectStreamUrl"].startswith(f"/Videos/{episode['Id']}/stream")
         assert source["SupportsTranscoding"] is False and "TranscodingUrl" not in source
         streams = source["MediaStreams"]
         assert (
@@ -195,7 +204,14 @@ def test_jellyfin_direct_play_range_languages_and_external_subtitles(core, media
         )
         selected_subtitle = next(s for s in streams if s["Index"] == source["DefaultSubtitleStreamIndex"])
         assert selected_subtitle["Language"] == "rus" and selected_subtitle["IsExternal"]
-        response = client.get(f"/Videos/{episode['Id']}/stream", headers={"Range": "bytes=2-5"})
+        client.app.state.ctx.poster_transport = httpx.MockTransport(
+            lambda request: httpx.Response(
+                200, content=b"\xff\xd8\xffepisode", headers={"content-type": "image/jpeg"}
+            )
+        )
+        preview = client.get(f"/Items/{episode['Id']}/Images/Primary")
+        assert preview.status_code == 200 and preview.content == b"\xff\xd8\xffepisode"
+        response = client.get(f"/Videos/{source['Id']}/stream", headers={"Range": "bytes=2-5"})
         assert response.status_code == 206 and response.content == video.read_bytes()[2:6]
         assert client.get(f"/Videos/{episode['Id']}/stream.mp4").status_code == 415
         response = client.get(selected_subtitle["DeliveryUrl"])

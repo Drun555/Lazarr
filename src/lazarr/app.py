@@ -554,7 +554,9 @@ def create_app(config: RuntimeConfig | None = None):
 
     @app.get("/api/v1/libraries/media/{identity}")
     async def library_media(identity: int, request: Request, user=Depends(permission("library"))):
-        result = context(request).library.detail(identity)
+        ctx = context(request)
+        await ctx.library.enrich_media(identity)
+        result = ctx.library.detail(identity)
         if result is None:
             raise HTTPException(404, "Произведение не найдено")
         return result

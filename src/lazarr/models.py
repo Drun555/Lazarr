@@ -73,6 +73,8 @@ class Episode(Base):
     number: Mapped[int]
     external_id: Mapped[str | None] = mapped_column(nullable=True)
     title: Mapped[str] = mapped_column(default="")
+    overview: Mapped[str] = mapped_column(Text, default="")
+    still: Mapped[str | None] = mapped_column(Text, nullable=True)
     air_date: Mapped[str | None] = mapped_column(nullable=True)
     absolute_number: Mapped[int | None] = mapped_column(nullable=True)
 

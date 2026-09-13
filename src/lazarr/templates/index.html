@@ -4,7 +4,6 @@
   <nav aria-label="Основная навигация">
     <button class="nav-tab active" data-tab="search">Поиск</button>
     <button class="nav-tab" data-tab="library">Библиотеки</button>
-    <button class="nav-tab" data-tab="downloads">Загрузки <span class="nav-count" id="download-count">0</span></button>
     <button class="nav-tab" data-tab="settings">Настройки</button>
   </nav>
   <div class="account"><span>{{ user.username }}</span><button class="icon-button" id="logout" title="Выйти" aria-label="Выйти">Выйти</button></div>
@@ -37,14 +36,11 @@
     </section>
   </section>
   <section id="tab-library" class="tab-panel" hidden>
-    <div id="library-overview"><h2>Библиотеки</h2><div id="library-nav" class="library-nav" aria-label="Выбор библиотеки"></div><div id="library-items" class="library-grid"></div></div>
-    <div id="library-detail" hidden><div class="library-toolbar"><button id="library-back" class="ghost">← К библиотекам</button><div><button id="library-subtitles" class="primary">Загрузить субтитры</button> <button id="library-refresh" class="ghost">Обновить</button> <button id="library-delete" class="danger-button">Удалить</button></div></div><div id="library-detail-body"></div></div>
-  </section>
-  <section id="tab-downloads" class="tab-panel" hidden>
-    <div class="page-heading downloads-heading"><h1>Загрузки</h1><button type="button" class="primary" id="run-queue">Запустить очередь</button></div>
+    <div class="library-page-heading"><h2>Библиотеки</h2><button type="button" class="ghost" id="run-queue">Запустить очередь</button></div>
     <section id="search-activity" class="panel search-activity" hidden><div class="search-activity-heading"><h2 id="search-state"></h2><span id="search-counts" class="fine"></span></div><div id="search-progress" class="progress" role="progressbar" aria-label="Прогресс поиска"><span></span></div><p id="search-current" role="status" aria-live="polite"></p><p id="search-query" class="fine"></p><div id="search-providers" class="search-providers"></div><details><summary>Ход поиска</summary><ol id="search-history"></ol></details></section>
-    <div id="engine-notice"></div><div id="download-list"></div>
-    <div class="section-heading"><h2>Статус эпизодов</h2></div><div id="episode-list"></div>
+    <div id="engine-notice"></div>
+    <div id="library-overview"><div id="library-nav" class="library-nav" aria-label="Выбор библиотеки"></div><div id="library-items" class="library-grid"></div></div>
+    <div id="library-detail" hidden><div class="library-toolbar"><button id="library-back" class="ghost">← К библиотекам</button><div><button id="library-subtitles" class="primary">Загрузить субтитры</button> <button id="library-refresh" class="ghost">Обновить</button> <button id="library-delete" class="danger-button">Удалить</button></div></div><div id="library-detail-body"></div></div>
   </section>
   <section id="tab-settings" class="tab-panel" hidden>
     <div class="page-heading"><h1>Настройки</h1></div>
