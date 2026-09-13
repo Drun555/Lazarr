@@ -9,6 +9,7 @@ from lazarr.models import (
     Download,
     MediaAsset,
     SubtaskAsset,
+    LibraryAsset,
     CandidateDecision,
     Episode,
 )
@@ -169,6 +170,7 @@ async def test_grouped_subtasks_share_one_download(core, media, season, worker_s
     with db.session() as session:
         assert all(s.status == "done" for s in session.scalars(select(Subtask)))
         assert all(link.current for link in session.scalars(select(SubtaskAsset)))
+        assert session.scalar(select(func.count()).select_from(LibraryAsset)) == 2
 
 
 async def test_shared_download_survives_one_task_pause_and_stops_at_ratio(core, media, season, worker_setup):

@@ -10,6 +10,7 @@ from lazarr.models import (
     Task,
     Subtask,
     SubtaskAsset,
+    LibraryAsset,
     MediaAsset,
     Download,
     CandidateDecision,
@@ -93,6 +94,12 @@ async def delete_task(worker, identity, user_id, delete_media=False):
                         await asyncio.to_thread(worker.engine.pause, download.infohash)
             db.execute(delete(CandidateDecision).where(CandidateDecision.subtask_id.in_(ids)))
             db.execute(delete(SubtaskAsset).where(SubtaskAsset.subtask_id.in_(ids)))
+            removable_ids = {download.id for download in removable}
+            removable_asset_ids = set(
+                db.scalars(select(MediaAsset.id).where(MediaAsset.download_id.in_(removable_ids)))
+            )
+            if delete_media and removable_asset_ids:
+                db.execute(delete(LibraryAsset).where(LibraryAsset.asset_id.in_(removable_asset_ids)))
             for download in affected:
                 download.plan = {
                     **download.plan,
@@ -181,6 +188,7 @@ async def delete_media(worker, identity, user_id, delete_files=False):
                 db.execute(delete(SubtaskAsset).where(SubtaskAsset.subtask_id.in_(subtask_ids)))
             if asset_ids:
                 db.execute(delete(SubtaskAsset).where(SubtaskAsset.asset_id.in_(asset_ids)))
+                db.execute(delete(LibraryAsset).where(LibraryAsset.asset_id.in_(asset_ids)))
             removable_ids = {d.id for d in removable}
             for download in affected:
                 if download.id in removable_ids:

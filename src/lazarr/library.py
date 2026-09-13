@@ -2,7 +2,18 @@
 
 import asyncio
 from sqlalchemy import select
-from lazarr.models import Media, Season, Episode, Task, Subtask, SubtaskAsset, MediaAsset, Download, Release
+from lazarr.models import (
+    Media,
+    Season,
+    Episode,
+    Task,
+    Subtask,
+    SubtaskAsset,
+    LibraryAsset,
+    MediaAsset,
+    Download,
+    Release,
+)
 from lazarr.calendar import released
 from lazarr.sdk import language
 
@@ -137,83 +148,37 @@ class LibraryService:
             episodes = list(db.scalars(select(Episode).where(Episode.season_id.in_(seasons))))
             tasks = {t.id: t for t in db.scalars(select(Task).where(Task.media_id == identity))}
             subs = list(db.scalars(select(Subtask).where(Subtask.task_id.in_(tasks))))
-            versions = {}
+            stored_versions = {}
             for link, asset, download, release in db.execute(
-                select(SubtaskAsset, MediaAsset, Download, Release)
-                .join(MediaAsset, MediaAsset.id == SubtaskAsset.asset_id)
+                select(LibraryAsset, MediaAsset, Download, Release)
+                .join(MediaAsset, MediaAsset.id == LibraryAsset.asset_id)
                 .join(Download, Download.id == MediaAsset.download_id)
                 .join(Release, Release.id == Download.release_id)
-                .where(SubtaskAsset.subtask_id.in_([s.id for s in subs]))
+                .where(LibraryAsset.media_id == identity)
             ):
-                binding = link.preflight.get("binding") or {}
-                streams = asset.probe.get("streams", [])
-                tracks = [
-                    {
-                        "kind": s["codec_type"],
-                        "language": language(s.get("tags", {}).get("language")),
-                        "codec": s.get("codec_name"),
-                        "channels": s.get("channels"),
-                        "title": s.get("tags", {}).get("title"),
-                        "external": False,
-                        "verified": True,
-                    }
-                    for s in streams
-                    if s.get("codec_type") in {"audio", "subtitle"}
-                ]
-                for track in binding.get("tracks", []):
-                    external = track.get("file_index") is not None
-                    if external or not streams:
-                        tracks.append(
-                            {
-                                "kind": track["kind"],
-                                "language": track["language"],
-                                "codec": None,
-                                "path": track.get("path"),
-                                "external": external,
-                                "verified": bool(link.verification.get("complete") and link.current),
-                            }
-                        )
-                for track in asset.tracks or []:
-                    tracks.append(
-                        {
-                            "kind": track.get("kind", "subtitle"),
-                            "language": language(track.get("language")),
-                            "codec": track.get("codec"),
-                            "path": track.get("path"),
-                            "external": bool(track.get("external", True)),
-                            "verified": bool(track.get("verified", True)),
-                            "source": track.get("source"),
-                        }
-                    )
-                video = next((s for s in streams if s.get("codec_type") == "video"), {})
-                file = next(
-                    (f for f in download.plan.get("files", []) if f["index"] == asset.video_index), {}
+                stored_versions.setdefault(link.episode_id, []).append(
+                    self._version(link, asset, download, release, current=True, pending=False)
                 )
-                version = {
-                    "id": asset.id,
-                    "path": asset.path,
-                    "directory": download.save_path,
-                    "size": file.get("size"),
-                    "resolution": asset.resolution or binding.get("resolution"),
-                    "codec": video.get("codec_name"),
-                    "width": video.get("width"),
-                    "height": video.get("height"),
-                    "tracks": tracks,
-                    "current": link.current,
-                    "pending": link.pending,
-                    "verified": bool(link.current and link.verification.get("complete")),
-                    "download_state": download.state,
-                    "download": self._download_info(download, link.subtask_id),
-                    "release": {
-                        "provider": release.provider,
-                        "title": release.data.get("title", ""),
-                        "url": release.data.get("url", ""),
-                    },
-                    "missing_subtitle_languages": link.verification.get(
-                        "missing_subtitle_languages", binding.get("missing_subtitle_languages", [])
-                    ),
-                }
-                versions.setdefault(link.subtask_id, []).append(version)
+            task_versions = {}
+            if subs:
+                for link, asset, download, release in db.execute(
+                    select(SubtaskAsset, MediaAsset, Download, Release)
+                    .join(MediaAsset, MediaAsset.id == SubtaskAsset.asset_id)
+                    .join(Download, Download.id == MediaAsset.download_id)
+                    .join(Release, Release.id == Download.release_id)
+                    .where(SubtaskAsset.subtask_id.in_([s.id for s in subs]))
+                ):
+                    task_versions.setdefault(link.subtask_id, []).append(
+                        self._version(
+                            link,
+                            asset,
+                            download,
+                            release,
+                            current=link.current,
+                            pending=link.pending,
+                            subtask_id=link.subtask_id,
+                        )
+                    )
             timezone = self.service.settings().timezone
             parts = []
             for episode in episodes if media.kind == "tv" else [None]:
@@ -230,9 +195,9 @@ class LibraryService:
                     else {"season": canonical, "episode": episode.number if episode else None}
                 )
                 date = episode.air_date if episode else media.metadata_json.get("release_date")
-                files = {}
+                files = {version["id"]: version for version in stored_versions.get(episode.id if episode else None, [])}
                 for sub in related:
-                    for version in versions.get(sub.id, []):
+                    for version in task_versions.get(sub.id, []):
                         old = files.get(version["id"])
                         if old:
                             version = {
@@ -279,6 +244,77 @@ class LibraryService:
                 "last_search_at": max((s.last_search_at or 0 for s in subs), default=0) or None,
                 "task_count": len(tasks),
             }
+
+    def _version(self, link, asset, download, release, *, current, pending, subtask_id=None):
+        binding = link.preflight.get("binding") or {}
+        verification = link.verification or {}
+        streams = asset.probe.get("streams", [])
+        tracks = [
+            {
+                "kind": stream["codec_type"],
+                "language": language(stream.get("tags", {}).get("language")),
+                "codec": stream.get("codec_name"),
+                "channels": stream.get("channels"),
+                "title": stream.get("tags", {}).get("title"),
+                "external": False,
+                "verified": True,
+            }
+            for stream in streams
+            if stream.get("codec_type") in {"audio", "subtitle"}
+        ]
+        for track in binding.get("tracks", []):
+            external = track.get("file_index") is not None
+            if external or not streams:
+                tracks.append(
+                    {
+                        "kind": track["kind"],
+                        "language": track["language"],
+                        "codec": None,
+                        "path": track.get("path"),
+                        "external": external,
+                        "verified": bool(verification.get("complete") and current),
+                    }
+                )
+        for track in asset.tracks or []:
+            tracks.append(
+                {
+                    "kind": track.get("kind", "subtitle"),
+                    "language": language(track.get("language")),
+                    "codec": track.get("codec"),
+                    "path": track.get("path"),
+                    "external": bool(track.get("external", True)),
+                    "verified": bool(track.get("verified", True)),
+                    "source": track.get("source"),
+                }
+            )
+        video = next((stream for stream in streams if stream.get("codec_type") == "video"), {})
+        file = next(
+            (item for item in download.plan.get("files", []) if item["index"] == asset.video_index), {}
+        )
+        return {
+            "id": asset.id,
+            "path": asset.path,
+            "directory": download.save_path,
+            "size": file.get("size"),
+            "resolution": asset.resolution or binding.get("resolution"),
+            "codec": video.get("codec_name"),
+            "width": video.get("width"),
+            "height": video.get("height"),
+            "tracks": tracks,
+            "current": current,
+            "pending": pending,
+            "verified": bool(current and verification.get("complete")),
+            "download_state": download.state,
+            "download": self._download_info(download, subtask_id),
+            "release": {
+                "provider": release.provider,
+                "title": release.data.get("title", ""),
+                "url": release.data.get("url", ""),
+            },
+            "missing_subtitle_languages": verification.get(
+                "missing_subtitle_languages", binding.get("missing_subtitle_languages", [])
+            ),
+        }
 
     @staticmethod
     def _download_info(download, subtask_id):

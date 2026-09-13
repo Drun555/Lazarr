@@ -6,7 +6,7 @@ from sqlalchemy import select
 
 from lazarr.app import create_app
 from lazarr.config import Requirements
-from lazarr.models import Download, Media, MediaAsset, Release, Subtask, SubtaskAsset
+from lazarr.models import Download, LibraryAsset, Media, MediaAsset, Release, Subtask, SubtaskAsset, Task
 from lazarr.services import CreateTask
 
 
@@ -116,6 +116,27 @@ def playable_episode(core, media, season):
                 },
             )
         )
+        session.add(
+            LibraryAsset(
+                media_id=row.id,
+                episode_id=subtask.episode_id,
+                part_key=f"episode:{subtask.episode_id}",
+                asset_id=asset.id,
+                preflight={
+                    "binding": {
+                        "tracks": [
+                            {
+                                "kind": "subtitle",
+                                "language": "ru",
+                                "file_index": 1,
+                                "path": subtitle.name,
+                            }
+                        ]
+                    }
+                },
+                verification={"complete": True},
+            )
+        )
     return video, subtitle
 
 
@@ -216,6 +237,32 @@ def test_jellyfin_direct_play_range_languages_and_external_subtitles(core, media
         assert client.get(f"/Videos/{episode['Id']}/stream.mp4").status_code == 415
         response = client.get(selected_subtitle["DeliveryUrl"])
         assert response.status_code == 200 and response.content == subtitle.read_bytes()
+
+
+async def test_jellyfin_keeps_verified_episode_after_task_is_deleted(core, media, season):
+    from lazarr.deletion import delete_task
+
+    playable_episode(core, media, season)
+    config, db, _, _ = core
+    with db.session() as session:
+        task_id = session.scalar(select(Task.id))
+    with TestClient(create_app(config)) as client:
+        await delete_task(client.app.state.ctx.worker, task_id, 1)
+        auth = jellyfin_login(client)
+        anime = next(
+            item
+            for item in client.get("/UserViews", params={"userId": auth["User"]["Id"]}).json()["Items"]
+            if item["Name"] == "Аниме"
+        )
+        series = client.get("/Items", params={"ParentId": anime["Id"]}).json()["Items"][0]
+        seasons = client.get(f"/Shows/{series['Id']}/Seasons").json()["Items"]
+        episodes = client.get(f"/Shows/{series['Id']}/Episodes", params={"Season": 2}).json()["Items"]
+        assert [item["IndexNumber"] for item in seasons] == [2]
+        assert len(episodes) == 1
+        assert client.get(f"/Videos/{episodes[0]['Id']}/stream").content == b"0123456789"
+    with db.session() as session:
+        assert session.scalar(select(Task.id)) is None
+        assert session.scalar(select(LibraryAsset.id)) is not None
 
 
 def test_jellyfin_tracks_progress_per_user_and_returns_resume_items(core, media, season):

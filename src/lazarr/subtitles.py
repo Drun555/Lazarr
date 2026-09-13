@@ -12,6 +12,7 @@ from lazarr.models import (
     AuditEvent,
     Download,
     Episode,
+    LibraryAsset,
     Media,
     MediaAsset,
     Season,
@@ -35,21 +36,28 @@ class SubtitleService:
             media = db.get(Media, media_id)
             if not media:
                 return None, []
+            task_requirements = {}
+            for subtask, task in db.execute(
+                select(Subtask, Task)
+                .join(Task, Task.id == Subtask.task_id)
+                .where(Task.media_id == media_id)
+            ):
+                task_requirements.setdefault(subtask.episode_id, set()).update(
+                    task.requirements.get("subtitle_languages", [])
+                )
             rows = list(
                 db.execute(
-                    select(SubtaskAsset, MediaAsset, Download, Subtask, Task, Episode, Season)
-                    .join(MediaAsset, MediaAsset.id == SubtaskAsset.asset_id)
+                    select(LibraryAsset, MediaAsset, Download, Episode, Season)
+                    .join(MediaAsset, MediaAsset.id == LibraryAsset.asset_id)
                     .join(Download, Download.id == MediaAsset.download_id)
-                    .join(Subtask, Subtask.id == SubtaskAsset.subtask_id)
-                    .join(Task, Task.id == Subtask.task_id)
-                    .outerjoin(Episode, Episode.id == Subtask.episode_id)
+                    .outerjoin(Episode, Episode.id == LibraryAsset.episode_id)
                     .outerjoin(Season, Season.id == Episode.season_id)
-                    .where(Task.media_id == media_id, SubtaskAsset.current.is_(True))
+                    .where(LibraryAsset.media_id == media_id)
                     .order_by(Season.number, Episode.number, MediaAsset.id)
                 )
             )
             grouped = {}
-            for link, asset, download, subtask, task, episode, season in rows:
+            for link, asset, download, episode, season in rows:
                 if not link.verification.get("complete"):
                     continue
                 root = Path(download.save_path).resolve()
@@ -83,7 +91,7 @@ class SubtitleService:
                         "present": set(),
                     },
                 )
-                target["requirements"].update(task.requirements.get("subtitle_languages", []))
+                target["requirements"].update(task_requirements.get(episode.id if episode else None, []))
                 for stream in asset.probe.get("streams", []):
                     if stream.get("codec_type") == "subtitle":
                         target["present"].add(language((stream.get("tags") or {}).get("language")))
@@ -184,6 +192,14 @@ class SubtitleService:
                 subtask.missing_subtitle_languages = [
                     value for value in subtask.missing_subtitle_languages if language(value) != language_code
                 ]
+            for link in db.scalars(select(LibraryAsset).where(LibraryAsset.asset_id == asset.id)):
+                verification = dict(link.verification)
+                verification["missing_subtitle_languages"] = [
+                    value
+                    for value in verification.get("missing_subtitle_languages", [])
+                    if language(value) != language_code
+                ]
+                link.verification = verification
             db.add(
                 AuditEvent(
                     user_id=user_id,

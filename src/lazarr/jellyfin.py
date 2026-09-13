@@ -19,13 +19,11 @@ from lazarr.models import (
     Download,
     Episode,
     LoginSession,
+    LibraryAsset,
     Media,
     MediaAsset,
     PlaybackProgress,
     Season,
-    Subtask,
-    SubtaskAsset,
-    Task,
     User,
 )
 from lazarr.posters import fetch_poster
@@ -271,18 +269,18 @@ def available_seasons(ctx, media):
 def playable_asset(ctx, kind, identity):
     with ctx.db.session() as db:
         statement = (
-            select(SubtaskAsset, MediaAsset, Download)
-            .join(MediaAsset, MediaAsset.id == SubtaskAsset.asset_id)
+            select(LibraryAsset, MediaAsset, Download)
+            .join(MediaAsset, MediaAsset.id == LibraryAsset.asset_id)
             .join(Download, Download.id == MediaAsset.download_id)
-            .join(Subtask, Subtask.id == SubtaskAsset.subtask_id)
-            .join(Task, Task.id == Subtask.task_id)
-            .where(SubtaskAsset.current.is_(True))
             .order_by(MediaAsset.id.desc())
         )
         if kind == "episode":
-            statement = statement.where(Subtask.episode_id == identity)
+            statement = statement.where(LibraryAsset.episode_id == identity)
         else:
-            statement = statement.where(Task.media_id == identity, Subtask.episode_id.is_(None))
+            statement = statement.where(
+                LibraryAsset.media_id == identity,
+                LibraryAsset.episode_id.is_(None),
+            )
         for link, asset, download in db.execute(statement):
             if not link.verification.get("complete"):
                 continue

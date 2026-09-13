@@ -292,18 +292,32 @@ input[role="switch"]{appearance:none;width:36px;height:21px;border-radius:12px;p
 .library-page-heading h2 { margin:0; }
 .library-tile-download { width:100%; display:flex; justify-content:space-between; color:var(--muted); font-size:11px; font-variant-numeric:tabular-nums; }
 .library-tile .progress { width:100%; margin:0; }
-.library-tile img,.library-poster-empty { width:100%; aspect-ratio:2/3; object-fit:cover; background:#262626; }
-.library-poster-empty { display:grid; place-items:center; color:#999; }
+.library-poster-frame { position:relative; display:block; width:100%; aspect-ratio:2/3; overflow:hidden; background:#202020; }
+.library-poster-frame>img,.library-poster-empty { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }
+.library-poster-frame>img.failed { display:none; }
+.library-poster-empty { display:grid; place-content:center; gap:.65rem; text-align:center; color:#aaa; background:radial-gradient(circle at 30% 20%,#393939 0,#242424 42%,#1a1a1a 100%); }
+.library-poster-empty b { font-size:3rem; font-weight:500; color:#d4d4d4; }
+.library-poster-empty small { font-size:11px; text-transform:uppercase; letter-spacing:.08em; }
 .library-heading { display:flex; gap:1.5rem; margin:1rem 0 2rem; }
 .library-heading img { width:180px; height:270px; object-fit:cover; border-radius:4px; }
 .library-heading h2 { margin-top:0; }
-.library-calendar,.library-episode { border:1px solid #363636; border-radius:5px; padding:1rem; margin-bottom:1rem; }
+.library-calendar,.library-season,.library-episode { border:1px solid #363636; border-radius:5px; padding:1rem; margin-bottom:1rem; }
+.library-season>summary { display:flex; align-items:center; justify-content:space-between; gap:1rem; cursor:pointer; list-style-position:outside; }
+.library-season>summary strong { font-size:1.05rem; }
+.library-season-episodes { margin-top:1rem; }
+.library-season .library-episode { margin-left:.25rem; margin-right:.25rem; background:#191919; }
 .library-episode summary { display:flex; flex-direction:column; gap:.5rem; cursor:pointer; }
 .episode-summary { display:grid; grid-template-columns:minmax(0,180px) 1fr; align-items:center; gap:1rem; }
 .episode-summary>div { min-width:0; }
 .episode-summary strong,.episode-summary span { display:block; }
 .episode-summary .progress { max-width:460px; }
-.episode-still { width:180px; aspect-ratio:16/9; object-fit:cover; border-radius:4px; background:#262626; }
+.episode-visual { position:relative; display:block; width:180px; aspect-ratio:16/9; overflow:hidden; border-radius:4px; background:#242424; }
+.episode-still,.episode-still-empty { position:absolute; inset:0; width:100%; height:100%; }
+.episode-still { object-fit:cover; background:#262626; }
+.episode-still.failed { display:none; }
+.episode-still-empty { display:grid; place-content:center; gap:.25rem; text-align:center; color:#aaa; background:linear-gradient(145deg,#303030,#1d1d1d 70%); }
+.episode-still-empty b { font-size:1.65rem; font-weight:500; color:#d0d0d0; }
+.episode-still-empty small { font-size:10px; text-transform:uppercase; letter-spacing:.1em; }
 .episode-overview { max-width:850px; color:#c8c8c8; }
 .episode-meta,.episode-actions,.episode-download-heading { display:flex; align-items:center; gap:.75rem; flex-wrap:wrap; }
 .episode-meta { justify-content:space-between; margin:.9rem 0; }
@@ -321,4 +335,4 @@ input[role="switch"]{appearance:none;width:36px;height:21px;border-radius:12px;p
 .library-file dt { color:#aaa; }
 .library-file dd { margin:0; overflow-wrap:anywhere; }
 .library-file a { color:#ddd; text-decoration:underline; }
-@media(max-width:600px){.library-heading{display:block}.library-heading img{width:120px;height:180px;margin-bottom:1rem}.library-file dl{grid-template-columns:1fr}.library-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.episode-summary{grid-template-columns:1fr}.episode-still{width:100%}.library-page-heading{padding-top:1.5rem}}
+@media(max-width:600px){.library-heading{display:block}.library-heading img{width:120px;height:180px;margin-bottom:1rem}.library-file dl{grid-template-columns:1fr}.library-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.episode-summary{grid-template-columns:1fr}.episode-visual{width:100%}.library-page-heading{padding-top:1.5rem}.library-season{padding:.75rem}.library-season .library-episode{margin-left:0;margin-right:0}}

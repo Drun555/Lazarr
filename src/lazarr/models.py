@@ -163,6 +163,21 @@ class SubtaskAsset(Base):
     override: Mapped[bool] = mapped_column(default=False)
 
 
+class LibraryAsset(Base):
+    """A verified media file retained independently from the task that found it."""
+
+    __tablename__ = "library_assets"
+    __table_args__ = (UniqueConstraint("media_id", "part_key", "asset_id"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    media_id: Mapped[int] = mapped_column(ForeignKey("media.id"))
+    episode_id: Mapped[int | None] = mapped_column(ForeignKey("episodes.id"), nullable=True)
+    part_key: Mapped[str] = mapped_column(String(80))
+    asset_id: Mapped[int] = mapped_column(ForeignKey("media_assets.id"))
+    preflight: Mapped[dict] = mapped_column(JSON, default=dict)
+    verification: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[float] = mapped_column(default=time.time)
+
+
 class CandidateDecision(Base):
     __tablename__ = "candidate_decisions"
     __table_args__ = (UniqueConstraint("subtask_id", "release_id"),)

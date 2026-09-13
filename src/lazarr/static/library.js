@@ -18,7 +18,9 @@ function renderLibraries(){
   const selected=libraries.find(l=>l.id===librarySelection);
   $('#library-items').innerHTML=selected?.items.length?selected.items.map(m=>{
     const download=m.download;
-    return `<button class="library-tile" data-library-media="${m.id}">${m.poster?`<img src="${esc(posterUrl(m.poster))}" alt="" loading="lazy">`:'<span class="library-poster-empty">Нет обложки</span>'}<strong>${esc(m.title)}</strong><span class="fine">${m.year||'Год неизвестен'}${m.taxonomy_known?'':' · Классификация уточняется'}</span>${download?`<div class="library-tile-download"><span>${(progressPercent(download.progress)).toFixed(1)}%</span><span>${bytes(download.download_rate)}/с</span></div>${progressBar(download.progress,`Загрузка ${m.title}`)}`:''}</button>`;
+    const initial=esc((m.title||'?').trim().charAt(0).toUpperCase()||'?');
+    const poster=`<span class="library-poster-frame"><span class="library-poster-empty" aria-hidden="true"><b>${initial}</b><small>Нет обложки</small></span>${m.poster?`<img src="${esc(posterUrl(m.poster))}" alt="" loading="lazy">`:''}</span>`;
+    return `<button class="library-tile" data-library-media="${m.id}">${poster}<strong>${esc(m.title)}</strong><span class="fine">${m.year||'Год неизвестен'}${m.taxonomy_known?'':' · Классификация уточняется'}</span>${download?`<div class="library-tile-download"><span>${(progressPercent(download.progress)).toFixed(1)}%</span><span>${bytes(download.download_rate)}/с</span></div>${progressBar(download.progress,`Загрузка ${m.title}`)}`:''}</button>`;
   }).join(''):'<p class="muted">В этой библиотеке пока нет произведений.</p>';
 }
 function downloadDetails(download){
@@ -43,12 +45,30 @@ function mediaTaskActions(identity){
 }
 function renderEpisode(episode){
   const number=episode.episode==null?'Фильм':`${episode.episode}.`;
-  const image=episode.still?`<img class="episode-still" src="${esc(posterUrl(episode.still))}" alt="" loading="lazy">`:'';
+  const visual=`<span class="episode-visual"><span class="episode-still-empty" aria-hidden="true"><b>${episode.episode==null?'▶':esc(episode.episode)}</b><small>${episode.episode==null?'Видео':'Серия'}</small></span>${episode.still?`<img class="episode-still" src="${esc(posterUrl(episode.still))}" alt="" loading="lazy">`:''}</span>`;
   const status=episode.statuses?.length?episode.statuses.map(s=>esc(statuses[s]||s)).join(', '):episode.released?'Не запрошено':'Ожидание выхода';
-  return `<details class="library-episode" data-episode="${esc(episode.id)}"><summary><div class="episode-summary">${image}<div><strong>${esc(number)} ${esc(episode.title)}</strong><span class="fine">${libraryDate(episode.air_date)} · ${status}</span>${episode.download?progressBar(episode.download.progress,'Прогресс серии'):''}</div></div></summary>${episode.overview?`<p class="episode-overview">${esc(episode.overview)}</p>`:''}<div class="episode-meta"><span class="fine">Последний поиск: ${searchDate(episode.last_search_at)}</span>${episodeActions(episode)}</div>${episode.files?.length?episode.files.map(libraryFile).join(''):'<p class="muted">Файл и раздача пока не выбраны.</p>'}</details>`;
+  return `<details class="library-episode" data-episode="${esc(episode.id)}"><summary><div class="episode-summary">${visual}<div><strong>${esc(number)} ${esc(episode.title)}</strong><span class="fine">${libraryDate(episode.air_date)} · ${status}</span>${episode.download?progressBar(episode.download.progress,'Прогресс серии'):''}</div></div></summary>${episode.overview?`<p class="episode-overview">${esc(episode.overview)}</p>`:''}<div class="episode-meta"><span class="fine">Последний поиск: ${searchDate(episode.last_search_at)}</span>${episodeActions(episode)}</div>${episode.files?.length?episode.files.map(libraryFile).join(''):'<p class="muted">Файл и раздача пока не выбраны.</p>'}</details>`;
+}
+function renderSeason(number,episodes){
+  const ready=episodes.filter(episode=>episode.files?.some(file=>file.verified)).length;
+  const downloading=episodes.filter(episode=>episode.download&&['starting','downloading'].includes(episode.download.state)).length;
+  const activity=downloading?` · загружается ${downloading}`:ready?` · готово ${ready}`:'';
+  const label=number==null?'Без сезона':number===0?'Дополнительно':`Сезон ${number}`;
+  return `<details class="library-season" name="library-seasons" data-season="${esc(number??'none')}"><summary><strong>${esc(label)}</strong><span class="fine">${episodes.length} серий${activity}</span></summary><div class="library-season-episodes">${episodes.map(renderEpisode).join('')}</div></details>`;
+}
+function renderEpisodeGroups(item){
+  if(item.kind!=='tv')return item.episodes.map(renderEpisode).join('');
+  const groups=new Map();
+  for(const episode of item.episodes){
+    const season=episode.season??episode.canonical_season??null;
+    if(!groups.has(season))groups.set(season,[]);
+    groups.get(season).push(episode);
+  }
+  return [...groups.entries()].sort(([left],[right])=>(left??-1)-(right??-1)).map(([season,episodes])=>renderSeason(season,episodes)).join('');
 }
 async function openLibraryMedia(identity,silent=false){
   const opened=new Set($$('.library-episode[open]').map(node=>node.dataset.episode));
+  const openedSeasons=new Set($$('.library-season[open]').map(node=>node.dataset.season));
   const generation=++libraryGeneration;libraryMedia=identity;
   $('#library-detail').hidden=false;$('#library-overview').hidden=true;
   if(!silent)$('#library-detail-body').textContent='Загрузка…';
@@ -56,7 +76,10 @@ async function openLibraryMedia(identity,silent=false){
   const meta=item.metadata;
   const calendar=[...item.episodes].sort((a,b)=>(a.air_date||'9999').localeCompare(b.air_date||'9999'));
   const allActions=mediaTaskActions(identity);
-  $('#library-detail-body').innerHTML=`<div class="library-heading">${item.poster?`<img src="${esc(posterUrl(item.poster))}" alt="">`:''}<div><h2>${esc(item.title)}</h2><p class="fine">${esc(meta.original_title||'')} · ${item.year||'—'}</p><p>${esc(meta.overview||'Описание отсутствует.')}</p><p class="fine">${esc((meta.genres||[]).join(', '))}</p><p>Последний поиск: ${searchDate(item.last_search_at)}</p><p class="fine">Задач: ${item.task_count} · Источник: ${esc(meta.provider||'tmdb')} · ID: ${esc(meta.id)}</p>${allActions?`<div class="media-task-actions">${allActions}</div>`:''}</div></div><details class="library-calendar"><summary>Календарь выхода · ${calendar.length}</summary><ol>${calendar.map(e=>`<li><time>${libraryDate(e.air_date)}</time> — ${e.episode==null?'Фильм':`S${e.season} · E${e.episode}`} · ${esc(e.title)}${e.air_date&&!e.released?' · Ожидается':''}</li>`).join('')}</ol></details><div class="library-episodes">${item.episodes.map(renderEpisode).join('')||'<p>Сведения об эпизодах ещё не получены.</p>'}</div>`;
+  $('#library-detail-body').innerHTML=`<div class="library-heading">${item.poster?`<img src="${esc(posterUrl(item.poster))}" alt="">`:''}<div><h2>${esc(item.title)}</h2><p class="fine">${esc(meta.original_title||'')} · ${item.year||'—'}</p><p>${esc(meta.overview||'Описание отсутствует.')}</p><p class="fine">${esc((meta.genres||[]).join(', '))}</p><p>Последний поиск: ${searchDate(item.last_search_at)}</p><p class="fine">Задач: ${item.task_count} · Источник: ${esc(meta.provider||'tmdb')} · ID: ${esc(meta.id)}</p>${allActions?`<div class="media-task-actions">${allActions}</div>`:''}</div></div><details class="library-calendar"><summary>Календарь выхода · ${calendar.length}</summary><ol>${calendar.map(e=>`<li><time>${libraryDate(e.air_date)}</time> — ${e.episode==null?'Фильм':`S${e.season} · E${e.episode}`} · ${esc(e.title)}${e.air_date&&!e.released?' · Ожидается':''}</li>`).join('')}</ol></details><div class="library-episodes">${renderEpisodeGroups(item)||'<p>Сведения об эпизодах ещё не получены.</p>'}</div>`;
+  const seasons=$$('.library-season');
+  for(const node of seasons)if(openedSeasons.has(node.dataset.season))node.open=true;
+  if(!silent&&!openedSeasons.size&&seasons.length)seasons[0].open=true;
   for(const node of $$('.library-episode'))if(opened.has(node.dataset.episode))node.open=true;
 }
 async function refreshLibraryView(){

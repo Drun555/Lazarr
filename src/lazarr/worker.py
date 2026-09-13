@@ -19,6 +19,7 @@ from lazarr.models import (
     Download,
     MediaAsset,
     SubtaskAsset,
+    LibraryAsset,
     CandidateDecision,
     ConfigEntry,
 )
@@ -1045,5 +1046,23 @@ class Worker:
                 ):
                     old.current, old.pending = False, False
                 link.current, link.pending = True, False
+                part_key = f"episode:{sub.episode_id}" if sub.episode_id else "movie"
+                library_asset = db.scalar(
+                    select(LibraryAsset).where(
+                        LibraryAsset.media_id == task.media_id,
+                        LibraryAsset.part_key == part_key,
+                        LibraryAsset.asset_id == asset.id,
+                    )
+                )
+                if library_asset is None:
+                    library_asset = LibraryAsset(
+                        media_id=task.media_id,
+                        episode_id=sub.episode_id,
+                        part_key=part_key,
+                        asset_id=asset.id,
+                    )
+                    db.add(library_asset)
+                library_asset.preflight = dict(link.preflight)
+                library_asset.verification = dict(link.verification)
         if state["complete"]:
             await self.sync_consumers()
