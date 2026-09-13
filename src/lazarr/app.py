@@ -610,23 +610,31 @@ def create_app(config: RuntimeConfig | None = None):
     async def auth_provider(
         identity: str, payload: AuthInput, request: Request, user=Depends(permission("providers"))
     ):
-        async with context(request).plugins.open(identity, allow_disabled=True) as provider:
+        async with context(request).plugins.open(
+            identity, allow_disabled=True, bypass_cooldown=True
+        ) as provider:
             return await provider.authenticate(payload.values)
 
     @app.get("/api/v1/providers/{identity}/auth")
     async def provider_auth_status(identity: str, request: Request, user=Depends(permission("providers"))):
-        async with context(request).plugins.open(identity, allow_disabled=True) as provider:
+        async with context(request).plugins.open(
+            identity, allow_disabled=True, bypass_cooldown=True
+        ) as provider:
             return await provider.auth_status()
 
     @app.delete("/api/v1/providers/{identity}/auth")
     async def provider_logout(identity: str, request: Request, user=Depends(permission("providers"))):
-        async with context(request).plugins.open(identity, allow_disabled=True) as provider:
+        async with context(request).plugins.open(
+            identity, allow_disabled=True, bypass_cooldown=True
+        ) as provider:
             await provider.logout()
         return {"ok": True}
 
     @app.post("/api/v1/providers/{identity}/health")
     async def provider_health(identity: str, request: Request, user=Depends(permission("providers"))):
-        async with context(request).plugins.open(identity, allow_disabled=True) as provider:
+        async with context(request).plugins.open(
+            identity, allow_disabled=True, bypass_cooldown=True
+        ) as provider:
             return await provider.healthcheck()
 
     @app.get("/api/v1/plugin-catalog")

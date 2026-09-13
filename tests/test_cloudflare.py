@@ -18,6 +18,14 @@ async def test_solver_retries_binary_with_clearance_and_browser_agent():
         return challenge()
 
     def solver(request):
+        assert request.extensions["timeout"]["read"] == 190
+        assert request.extensions["timeout"]["write"] == 190
+        assert request.extensions["timeout"]["connect"] == 190
+        assert request.extensions["timeout"]["pool"] == 190
+        assert request.extensions["timeout"]
+        import json
+
+        assert json.loads(request.content)["maxTimeout"] == 180000
         assert not request.headers.get("cookie")
         return httpx.Response(
             200,

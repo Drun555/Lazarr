@@ -338,7 +338,7 @@ class PluginManager:
                 row.last_error = None
 
     @asynccontextmanager
-    async def open(self, plugin_id, *, allow_disabled=False):
+    async def open(self, plugin_id, *, allow_disabled=False, bypass_cooldown=False):
         # Pin a class before awaiting; updates cannot replace an in-flight generation.
         cls = self.classes.get(plugin_id)
         if not cls:
@@ -349,7 +349,7 @@ class PluginManager:
                 row = db.get(ProviderConfig, plugin_id)
                 if not row or (not row.enabled and not allow_disabled):
                     raise ProviderError("configuration", "Provider disabled")
-                if row.retry_at > time.time():
+                if row.retry_at > time.time() and not bypass_cooldown:
                     delay = int(row.retry_at - time.time()) + 1
                     raise ProviderError(
                         "rate_limited",

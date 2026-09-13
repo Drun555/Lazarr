@@ -46,7 +46,7 @@ async def solve(context, method, url, kwargs, *, html, form_encoding="utf-8"):
             for c in context.http.cookies.jar
             if hostname == c.domain.lstrip(".") or hostname.endswith("." + c.domain.lstrip("."))
         ]
-        payload = {"cmd": command, "url": target, "maxTimeout": 60000, "cookies": cookies}
+        payload = {"cmd": command, "url": target, "maxTimeout": 180000, "cookies": cookies}
         if command == "request.post":
             body = kwargs.get("content", b"")
             encoded = body.decode("ascii") if isinstance(body, bytes) else body
@@ -55,7 +55,7 @@ async def solve(context, method, url, kwargs, *, html, form_encoding="utf-8"):
             )
         try:
             # A separate client prevents provider cookies and Authorization from reaching the solver endpoint.
-            async with httpx.AsyncClient(timeout=70, transport=context.solver_transport) as client:
+            async with httpx.AsyncClient(timeout=190, transport=context.solver_transport) as client:
                 response = await client.post(endpoint, json=payload)
                 response.raise_for_status()
                 data = response.json()

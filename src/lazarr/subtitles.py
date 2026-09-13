@@ -226,7 +226,7 @@ class SubtitleService:
             provider_errors = []
             for provider_id in providers:
                 try:
-                    async with self.plugins.open(provider_id) as provider:
+                    async with self.plugins.open(provider_id, bypass_cooldown=True) as provider:
                         for target in targets:
                             wanted = sorted(pending[target["asset_id"]])
                             if not wanted:

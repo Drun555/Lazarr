@@ -1,7 +1,8 @@
 import re
+import time
 from fastapi.testclient import TestClient
 from lazarr.app import create_app
-from lazarr.models import User
+from lazarr.models import ProviderConfig, User
 
 
 def login(client):
@@ -85,6 +86,24 @@ def test_permissions_are_enforced_centrally(core):
         assert client.get("/api/v1/accounts").status_code == 403
         assert client.get("/api/v1/settings").status_code == 403
         assert client.get("/api/v1/tasks").status_code == 200
+
+
+def test_manual_provider_controls_bypass_cooldown(core):
+    config, _, _, _ = core
+    with TestClient(create_app(config)) as client:
+        login(client)
+        ctx = client.app.state.ctx
+        ctx.plugins.configure("rutracker", {"session_cookie": "private-session"}, True)
+        with ctx.db.session() as session:
+            row = session.get(ProviderConfig, "rutracker")
+            row.retry_at = time.time() + 300
+            row.last_error = "unavailable: temporary outage"
+
+        response = client.post(
+            "/api/v1/providers/rutracker/authenticate", json={"values": {}}
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["status"] == "authenticated"
 
 
 def test_delete_api_requires_auth_and_csrf(core, media, season):

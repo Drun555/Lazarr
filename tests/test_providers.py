@@ -1,8 +1,10 @@
 from pathlib import Path
+import time
 import httpx
 import pytest
 from lazarr.sdk import SearchQuery, ProviderError
 from lazarr.config import Requirements
+from lazarr.models import ProviderConfig
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -87,6 +89,24 @@ async def test_interactive_captcha_and_rate_limit(core):
         async with manager.open("rutracker") as provider:
             await provider.healthcheck()
     assert error.value.retry_after == 90
+
+
+async def test_manual_provider_action_bypasses_automatic_cooldown(core):
+    _, db, manager, _ = core
+    manager.configure("rutracker", {"session_cookie": "private-session"}, True)
+    with db.session() as session:
+        row = session.get(ProviderConfig, "rutracker")
+        row.retry_at = time.time() + 300
+        row.last_error = "unavailable: temporary outage"
+
+    with pytest.raises(ProviderError, match="Повтор через"):
+        async with manager.open("rutracker"):
+            pass
+
+    async with manager.open(
+        "rutracker", allow_disabled=True, bypass_cooldown=True
+    ) as provider:
+        assert (await provider.authenticate({})).status == "authenticated"
 
 
 def test_description_tracks_survive_html_label_boundaries():
