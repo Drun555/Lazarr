@@ -27,6 +27,8 @@
   <Config Name="Plugins" Target="/plugins" Default="/mnt/user/appdata/lazarr/plugins" Mode="rw" Description="Downloaded provider plugin files." Type="Path" Display="advanced" Required="true" Mask="false">/mnt/user/appdata/lazarr/plugins</Config>
   <Config Name="Downloads" Target="/downloads" Default="/mnt/user/downloads/lazarr" Mode="rw" Description="Downloaded movies and series." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/downloads/lazarr</Config>
   <Config Name="Timezone" Target="TZ" Default="Etc/UTC" Mode="" Description="IANA timezone, for example Europe/Saratov." Type="Variable" Display="always" Required="true" Mask="false">Etc/UTC</Config>
+  <Config Name="User ID" Target="PUID" Default="99" Mode="" Description="UID used for Lazarr files. Unraid normally uses 99 (nobody)." Type="Variable" Display="advanced" Required="true" Mask="false">99</Config>
+  <Config Name="Group ID" Target="PGID" Default="100" Mode="" Description="GID used for Lazarr files. Unraid normally uses 100 (users)." Type="Variable" Display="advanced" Required="true" Mask="false">100</Config>
   <Config Name="FlareSolverr URL" Target="LAZARR_FLARESOLVERR_URL" Default="" Mode="" Description="Optional URL reachable from this container, for example http://192.168.1.10:8191." Type="Variable" Display="advanced" Required="false" Mask="false"></Config>
   <Config Name="Secure cookie" Target="LAZARR_SECURE_COOKIE" Default="0" Mode="" Description="Set to 1 when Lazarr is exposed through an HTTPS reverse proxy." Type="Variable" Display="advanced" Required="true" Mask="false">0</Config>
 </Container>
