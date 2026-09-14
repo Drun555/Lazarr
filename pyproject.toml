@@ -11,6 +11,7 @@ dependencies = [
   "fastapi>=0.115,<1", "uvicorn>=0.30,<1", "sqlalchemy>=2,<3", "alembic>=1.14,<2",
   "pydantic>=2.10,<3", "httpx>=0.27,<1", "jinja2>=3.1,<4", "python-multipart>=0.0.18,<1",
   "cryptography>=44", "argon2-cffi>=23", "beautifulsoup4>=4.12,<5", "packaging>=24",
+  "websockets>=15,<18",
 ]
 [project.optional-dependencies]
 dev = ["pytest>=8", "pytest-asyncio>=0.24", "ruff>=0.9"]

@@ -2,6 +2,7 @@
 
 import asyncio
 import hashlib
+import json
 import mimetypes
 import re
 import time
@@ -9,7 +10,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import Depends, HTTPException, Request
+from fastapi import Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, Response
 from sqlalchemy import select, delete
 
@@ -632,14 +633,17 @@ def token_from(request):
 
 
 def install_jellyfin_api(app, context):
-    def authenticated(request: Request):
-        token = token_from(request)
-        with context(request).db.session() as db:
+    def user_for_token(ctx, token):
+        with ctx.db.session() as db:
             session = db.get(LoginSession, hash_token(token or ""))
             user = db.get(User, session.user_id) if session and session.expires_at > time.time() else None
-            if not user or not user.active:
-                raise HTTPException(401, "Invalid authentication token")
-            return user
+            return user if user and user.active else None
+
+    def authenticated(request: Request):
+        user = user_for_token(context(request), token_from(request))
+        if not user:
+            raise HTTPException(401, "Invalid authentication token")
+        return user
 
     def require_user_id(user_id, user):
         kind, identity, _ = parse_object_id(user_id)
@@ -669,6 +673,10 @@ def install_jellyfin_api(app, context):
     @app.get("/QuickConnect/Enabled")
     async def jellyfin_quick_connect():
         return False
+
+    @app.get("/Branding/Configuration")
+    async def jellyfin_branding_configuration():
+        return {"LoginDisclaimer": "", "CustomCss": "", "SplashscreenEnabled": False}
 
     @app.post("/Users/AuthenticateByName")
     async def jellyfin_login(payload: dict, request: Request):
@@ -851,6 +859,7 @@ def install_jellyfin_api(app, context):
         raw_limit = params.get("limit") or params.get("Limit")
         return query_result(items, start, int(raw_limit) if raw_limit else None)
 
+    @app.get("/Items/")
     @app.get("/Items")
     async def jellyfin_items(request: Request, user=Depends(authenticated)):
         return await jellyfin_items_impl(request, user)
@@ -1146,6 +1155,35 @@ def install_jellyfin_api(app, context):
         if start_position_ticks < 0:
             raise HTTPException(400, "Invalid subtitle start position")
         return subtitle_response(item_id, media_source_id, index, subtitle_format, request)
+
+    @app.websocket("/socket")
+    async def jellyfin_socket(websocket: WebSocket):
+        if not user_for_token(context(websocket), token_from(websocket)):
+            await websocket.close(code=1008)
+            return
+        await websocket.accept()
+        await websocket.send_json(
+            {"MessageType": "ForceKeepAlive", "MessageId": uuid.uuid4().hex, "Data": 60}
+        )
+        try:
+            while True:
+                message = await websocket.receive()
+                if message["type"] == "websocket.disconnect":
+                    return
+                raw = message.get("bytes") or message.get("text")
+                try:
+                    payload = json.loads(raw) if raw else {}
+                except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
+                    continue
+                if payload.get("MessageType") == "KeepAlive":
+                    await websocket.send_json(
+                        {
+                            "MessageType": "KeepAlive",
+                            "MessageId": payload.get("MessageId") or uuid.uuid4().hex,
+                        }
+                    )
+        except WebSocketDisconnect:
+            return
 
     @app.post("/Sessions/Capabilities", status_code=204)
     @app.post("/Sessions/Capabilities/Full", status_code=204)

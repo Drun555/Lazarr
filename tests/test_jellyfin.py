@@ -227,6 +227,7 @@ def test_jellyfin_auth_libraries_navigation_and_read_only_api(core, media, seaso
         )
         auth = jellyfin_login(client)
         assert client.get("/Users/Me").json()["Id"] == auth["User"]["Id"]
+        assert client.get("/Branding/Configuration").json()["SplashscreenEnabled"] is False
         assert client.get("/UserViews/GroupingOptions", params={"userId": auth["User"]["Id"]}).json() == []
         assert client.get("/Plugins").json() == []
         preferences = client.get(
@@ -238,6 +239,18 @@ def test_jellyfin_auth_libraries_navigation_and_read_only_api(core, media, seaso
         assert preferences.json()["CustomPrefs"] == {}
         views = client.get("/UserViews", params={"userId": auth["User"]["Id"]}).json()["Items"]
         assert [item["Name"] for item in views] == ["Сериалы", "Кино", "Аниме"]
+        root_items = client.get("/Items/")
+        assert root_items.status_code == 200
+        assert [item["Name"] for item in root_items.json()["Items"]] == ["Сериалы", "Кино", "Аниме"]
+        with client.websocket_connect(
+            "/socket", params={"api_key": auth["AccessToken"], "deviceId": "swiftfin-test"}
+        ) as socket:
+            force_keep_alive = socket.receive_json()
+            assert force_keep_alive["MessageType"] == "ForceKeepAlive"
+            assert force_keep_alive["Data"] == 60
+            socket.send_json({"MessageType": "KeepAlive", "MessageId": "swiftfin-keepalive"}, mode="binary")
+            keep_alive = socket.receive_json()
+            assert keep_alive == {"MessageType": "KeepAlive", "MessageId": "swiftfin-keepalive"}
         anime = next(item for item in views if item["Name"] == "Аниме")
         series = client.get("/Items", params={"ParentId": anime["Id"]}).json()["Items"]
         assert len(series) == 1 and series[0]["Type"] == "Series"
