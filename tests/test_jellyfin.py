@@ -1,4 +1,5 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 from fastapi.testclient import TestClient
@@ -6,6 +7,7 @@ from sqlalchemy import select
 
 from lazarr.app import create_app
 from lazarr.config import Requirements
+from lazarr.jellyfin import user_object_id
 from lazarr.models import Download, LibraryAsset, Media, MediaAsset, Release, Subtask, SubtaskAsset, Task
 from lazarr.services import CreateTask
 
@@ -167,6 +169,14 @@ def jellyfin_login(client, username="alice", password="a-safe-password"):
     return payload
 
 
+def test_jellyfin_user_ids_are_namespaced_per_server(tmp_path):
+    first = SimpleNamespace(config=SimpleNamespace(data_dir=tmp_path / "first"))
+    second = SimpleNamespace(config=SimpleNamespace(data_dir=tmp_path / "second"))
+
+    assert user_object_id(first, 1) == user_object_id(first, 1)
+    assert user_object_id(first, 1) != user_object_id(second, 1)
+
+
 def test_jellyfin_lists_starting_and_downloading_episodes_without_playback(core, media, season):
     config, db, _, service = core
     service.create_from_metadata(
@@ -187,6 +197,10 @@ def test_jellyfin_lists_starting_and_downloading_episodes_without_playback(core,
         assert [item["IndexNumber"] for item in seasons] == [1]
         episodes = client.get(f"/Shows/{series[0]['Id']}/Episodes").json()["Items"]
         assert [item["IndexNumber"] for item in episodes] == [1, 2]
+        swiftfin_episodes = client.get(
+            f"/Shows/{seasons[0]['Id']}/Episodes", params={"seasonId": seasons[0]["Id"]}
+        )
+        assert [item["IndexNumber"] for item in swiftfin_episodes.json()["Items"]] == [1, 2]
         assert all(item["PlayAccess"] == "None" and item["MediaSources"] == [] for item in episodes)
         assert client.get(f"/Items/{episodes[0]['Id']}").status_code == 200
         assert client.get(f"/Items/{episodes[0]['Id']}/PlaybackInfo").status_code == 404
@@ -239,6 +253,7 @@ def test_jellyfin_auth_libraries_navigation_and_read_only_api(core, media, seaso
         assert preferences.json()["CustomPrefs"] == {}
         views = client.get("/UserViews", params={"userId": auth["User"]["Id"]}).json()["Items"]
         assert [item["Name"] for item in views] == ["Сериалы", "Кино", "Аниме"]
+        assert all(item["UserData"]["Key"] == item["Id"] for item in views)
         root_items = client.get("/Items/")
         assert root_items.status_code == 200
         assert [item["Name"] for item in root_items.json()["Items"]] == ["Сериалы", "Кино", "Аниме"]
@@ -303,6 +318,10 @@ def test_jellyfin_direct_play_range_languages_and_external_subtitles(core, media
         )
         series = client.get("/Items", params={"ParentId": anime["Id"]}).json()["Items"][0]
         episode = client.get(f"/Shows/{series['Id']}/Episodes", params={"Season": 2}).json()["Items"][0]
+        bitrate_test = client.get("/Playback/BitrateTest", params={"size": 1024})
+        assert bitrate_test.status_code == 200
+        assert bitrate_test.headers["content-type"] == "application/octet-stream"
+        assert len(bitrate_test.content) == 1024
         playback = client.post(f"/Items/{episode['Id']}/PlaybackInfo", json={}).json()
         source = playback["MediaSources"][0]
         assert source["Id"] == episode["Id"]
@@ -311,11 +330,15 @@ def test_jellyfin_direct_play_range_languages_and_external_subtitles(core, media
         assert source["DirectStreamUrl"].startswith(f"/Videos/{episode['Id']}/stream")
         assert source["SupportsTranscoding"] is False and "TranscodingUrl" not in source
         streams = source["MediaStreams"]
+        assert all(stream["DisplayTitle"] != "Не определён" for stream in streams)
+        assert streams[0]["Type"] == "Subtitle" and streams[0]["IsExternal"] is True
+        assert [stream["Index"] for stream in streams if stream["Type"] == "Audio"] == [2, 3]
         assert (
             next(s for s in streams if s["Index"] == source["DefaultAudioStreamIndex"])["Language"] == "jpn"
         )
         selected_subtitle = next(s for s in streams if s["Index"] == source["DefaultSubtitleStreamIndex"])
         assert selected_subtitle["Language"] == "rus" and selected_subtitle["IsExternal"]
+        assert "Русский" in selected_subtitle["DisplayTitle"]
         assert selected_subtitle["IsForced"] is False
         image_requests = []
 
@@ -333,18 +356,111 @@ def test_jellyfin_direct_play_range_languages_and_external_subtitles(core, media
         assert client.get(f"/Items/{series['Id']}/Images/Backdrop/1").status_code == 404
         response = client.get(f"/Videos/{source['Id']}/stream", headers={"Range": "bytes=2-5"})
         assert response.status_code == 206 and response.content == video.read_bytes()[2:6]
+        access_token = client.headers.pop("X-Emby-Token")
+        assert client.get(f"/Videos/{source['Id']}/stream").status_code == 401
+        response = client.get(
+            f"/Videos/{source['Id']}/stream",
+            params={"playSessionId": playback["PlaySessionId"]},
+            headers={"Range": "bytes=2-5"},
+        )
+        assert response.status_code == 206 and response.content == video.read_bytes()[2:6]
+        client.headers["X-Emby-Token"] = access_token
         assert client.get(f"/Videos/{episode['Id']}/stream.mp4").status_code == 415
         subtitle_format = subtitle.suffix.lstrip(".")
         assert (
             f"/Subtitles/{selected_subtitle['Index']}/0/Stream.{subtitle_format}"
             in selected_subtitle["DeliveryUrl"]
         )
+        subtitle.write_bytes("Привет, Swiftfin!\r\n".encode("cp1251"))
+        client.headers.pop("X-Emby-Token")
         response = client.get(selected_subtitle["DeliveryUrl"])
-        assert response.status_code == 200 and response.content == subtitle.read_bytes()
+        assert response.status_code == 200
+        assert response.headers["content-type"] == "text/plain; charset=utf-8"
+        assert response.content == "Привет, Swiftfin!\r\n".encode()
+        client.headers["X-Emby-Token"] = access_token
         legacy = selected_subtitle["DeliveryUrl"].replace(
             f"/{selected_subtitle['Index']}/0/", f"/{selected_subtitle['Index']}/"
         )
-        assert client.get(legacy).content == subtitle.read_bytes()
+        assert client.get(legacy).content == "Привет, Swiftfin!\r\n".encode()
+
+        configuration = dict(auth["User"]["Configuration"])
+        configuration.update(
+            {
+                "AudioLanguagePreference": "rus",
+                "SubtitleLanguagePreference": "rus",
+                "SubtitleMode": "None",
+            }
+        )
+        response = client.post(
+            "/Users/Configuration",
+            params={"userId": auth["User"]["Id"]},
+            json=configuration,
+        )
+        assert response.status_code == 204
+        assert client.get("/Users/Me").json()["Configuration"]["AudioLanguagePreference"] == "rus"
+        updated_source = client.post(f"/Items/{episode['Id']}/PlaybackInfo", json={}).json()["MediaSources"][
+            0
+        ]
+        assert updated_source["DefaultAudioStreamIndex"] == next(
+            stream["Index"]
+            for stream in updated_source["MediaStreams"]
+            if stream["Type"] == "Audio" and stream["Language"] == "rus"
+        )
+        assert updated_source["DefaultSubtitleStreamIndex"] is None
+
+        japanese = next(
+            stream
+            for stream in updated_source["MediaStreams"]
+            if stream["Type"] == "Audio" and stream["Language"] == "jpn"
+        )
+        russian_subtitle = next(
+            stream
+            for stream in updated_source["MediaStreams"]
+            if stream["Type"] == "Subtitle" and stream["Language"] == "rus" and stream["IsExternal"]
+        )
+        assert (
+            client.post(
+                "/Sessions/Playing/Progress",
+                json={
+                    "ItemId": episode["Id"],
+                    "PositionTicks": 10,
+                    "AudioStreamIndex": japanese["Index"],
+                    "SubtitleStreamIndex": russian_subtitle["Index"],
+                },
+            ).status_code
+            == 204
+        )
+        remembered_source = client.post(f"/Items/{episode['Id']}/PlaybackInfo", json={}).json()[
+            "MediaSources"
+        ][0]
+        assert remembered_source["DefaultAudioStreamIndex"] == japanese["Index"]
+        assert remembered_source["DefaultSubtitleStreamIndex"] == russian_subtitle["Index"]
+
+        client.post(
+            "/Sessions/Playing/Progress",
+            json={"ItemId": episode["Id"], "PositionTicks": 20, "SubtitleStreamIndex": -1},
+        )
+        remembered_source = client.post(f"/Items/{episode['Id']}/PlaybackInfo", json={}).json()[
+            "MediaSources"
+        ][0]
+        assert remembered_source["DefaultAudioStreamIndex"] == japanese["Index"]
+        assert remembered_source["DefaultSubtitleStreamIndex"] is None
+
+        russian_audio = next(
+            stream
+            for stream in remembered_source["MediaStreams"]
+            if stream["Type"] == "Audio" and stream["Language"] == "rus"
+        )
+        query_selected = client.post(
+            f"/Items/{episode['Id']}/PlaybackInfo",
+            params={
+                "audioStreamIndex": russian_audio["Index"],
+                "subtitleStreamIndex": russian_subtitle["Index"],
+            },
+            json={"AudioStreamIndex": japanese["Index"], "SubtitleStreamIndex": -1},
+        ).json()["MediaSources"][0]
+        assert query_selected["DefaultAudioStreamIndex"] == russian_audio["Index"]
+        assert query_selected["DefaultSubtitleStreamIndex"] == russian_subtitle["Index"]
 
 
 def test_jellyfin_can_keep_forced_subtitle_priority(core, media, season):

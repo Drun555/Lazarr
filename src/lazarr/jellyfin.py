@@ -15,10 +15,11 @@ from fastapi.responses import FileResponse, Response
 from sqlalchemy import select, delete
 
 from lazarr.library import LIBRARIES, library_kind
-from lazarr.languages import CODES, language
+from lazarr.languages import CODES, language, language_name
 from lazarr.models import (
     Download,
     Episode,
+    ConfigEntry,
     LoginSession,
     LibraryAsset,
     Media,
@@ -62,6 +63,12 @@ def server_id(ctx):
     return uuid.uuid5(uuid.NAMESPACE_URL, f"lazarr:{ctx.config.data_dir.resolve()}").hex
 
 
+def user_object_id(ctx, identity):
+    # Swiftfin keys saved users globally by User.Id rather than by (ServerId, User.Id).
+    # Keep the local database identity reversible while namespacing its low bits per server.
+    return object_id("user", identity, int(server_id(ctx)[:8], 16))
+
+
 def library_ids(ctx):
     namespace = uuid.UUID(server_id(ctx))
     return {key: str(uuid.uuid5(namespace, f"library:{key}")) for key, _ in LIBRARIES}
@@ -84,29 +91,38 @@ def jellyfin_language(value):
     return next((code for code in CODES[normalized].split() if len(code) == 3), normalized)
 
 
-def user_dto(ctx, user):
+def user_configuration(ctx, user):
     defaults = ctx.service.settings().defaults
+    configuration = {
+        "AudioLanguagePreference": jellyfin_language(defaults.audio_languages[0])
+        if defaults.audio_languages
+        else None,
+        "SubtitleLanguagePreference": jellyfin_language(defaults.subtitle_languages[0])
+        if defaults.subtitle_languages
+        else None,
+        "PlayDefaultAudioTrack": True,
+        "SubtitleMode": "Default" if defaults.subtitle_languages else "None",
+        "RememberAudioSelections": False,
+        "RememberSubtitleSelections": False,
+        "EnableNextEpisodeAutoPlay": True,
+    }
+    with ctx.db.session() as db:
+        stored = db.get(ConfigEntry, f"jellyfin.user.{user.id}")
+        if stored:
+            configuration.update(stored.value)
+    return configuration
+
+
+def user_dto(ctx, user):
     return {
         "Name": user.username,
         "ServerId": server_id(ctx),
         "ServerName": "Lazarr",
-        "Id": object_id("user", user.id),
+        "Id": user_object_id(ctx, user.id),
         "HasPassword": True,
         "HasConfiguredPassword": True,
         "EnableAutoLogin": False,
-        "Configuration": {
-            "AudioLanguagePreference": jellyfin_language(defaults.audio_languages[0])
-            if defaults.audio_languages
-            else None,
-            "SubtitleLanguagePreference": jellyfin_language(defaults.subtitle_languages[0])
-            if defaults.subtitle_languages
-            else None,
-            "PlayDefaultAudioTrack": True,
-            "SubtitleMode": "Default" if defaults.subtitle_languages else "None",
-            "RememberAudioSelections": False,
-            "RememberSubtitleSelections": False,
-            "EnableNextEpisodeAutoPlay": True,
-        },
+        "Configuration": user_configuration(ctx, user),
         "Policy": {
             "IsAdministrator": user.role == "admin",
             "IsHidden": True,
@@ -146,7 +162,14 @@ def provider_ids(media):
 
 def user_data(ctx, user, item_id, runtime_ticks=0):
     if user is None:
-        return {"PlaybackPositionTicks": 0, "PlayCount": 0, "IsFavorite": False, "Played": False}
+        return {
+            "ItemId": item_id,
+            "Key": item_id,
+            "PlaybackPositionTicks": 0,
+            "PlayCount": 0,
+            "IsFavorite": False,
+            "Played": False,
+        }
     with ctx.db.session() as db:
         row = db.scalar(
             select(PlaybackProgress).where(
@@ -202,7 +225,7 @@ def media_dto(ctx, media, user=None):
     playable = playable_asset(ctx, "media", media.id) if media.kind == "movie" else None
     if playable:
         result.update(playable_item_fields(playable))
-        source = media_source(ctx, playable, result["Id"])
+        source = media_source(ctx, playable, result["Id"], user)
         result["MediaSources"] = [source]
         result["MediaStreams"] = source["MediaStreams"]
         result["HasSubtitles"] = any(s["Type"] == "Subtitle" for s in source["MediaStreams"])
@@ -226,7 +249,7 @@ def library_dto(ctx, key, name):
         "LocationType": "FileSystem",
         "ImageTags": {},
         "BackdropImageTags": [],
-        "UserData": {"PlaybackPositionTicks": 0, "PlayCount": 0, "IsFavorite": False, "Played": False},
+        "UserData": user_data(ctx, None, identity),
     }
 
 
@@ -237,10 +260,11 @@ def season_dto(ctx, media, number):
         if episode["season"] == number and episode_is_visible(ctx, episode)
     )
     backdrop = backdrop_tag(media)
+    identity = object_id("season", media.id, number)
     return {
         "Name": f"Сезон {number}",
         "ServerId": server_id(ctx),
-        "Id": object_id("season", media.id, number),
+        "Id": identity,
         "SeriesName": media.title,
         "SeriesId": object_id("media", media.id),
         "ParentId": object_id("media", media.id),
@@ -257,7 +281,7 @@ def season_dto(ctx, media, number):
         "ImageTags": {},
         "BackdropImageTags": [backdrop] if backdrop else [],
         "SeriesPrimaryImageTag": poster_tag(media),
-        "UserData": {"PlaybackPositionTicks": 0, "PlayCount": 0, "IsFavorite": False, "Played": False},
+        "UserData": user_data(ctx, None, identity),
     }
 
 
@@ -359,11 +383,94 @@ def language_rank(value, priorities):
         return len(priorities) + 1
 
 
-def media_streams(ctx, playable, item_id, media_source_id):
+def stream_display_title(language_value, title, codec):
+    normalized = language(language_value)
+    parts = [language_name(normalized)] if normalized != "und" else []
+    if title and title.casefold() not in {part.casefold() for part in parts}:
+        parts.append(title)
+    if codec:
+        parts.append(codec.upper())
+    return " — ".join(parts) or "Не определён"
+
+
+def media_identity_for_item(ctx, item_id):
+    kind, identity, _ = parse_object_id(item_id)
+    if kind == "media":
+        return identity
+    if kind == "episode":
+        with ctx.db.session() as db:
+            episode = db.get(Episode, identity)
+            season = db.get(Season, episode.season_id) if episode else None
+            return season.media_id if season else None
+    return None
+
+
+def playback_selection(ctx, user, item_id):
+    media_id = media_identity_for_item(ctx, item_id)
+    if media_id is None or user is None:
+        return {}
+    with ctx.db.session() as db:
+        row = db.get(ConfigEntry, f"jellyfin.selection.{user.id}.{media_id}")
+        return dict(row.value) if row else {}
+
+
+def stream_selector(stream, streams):
+    signature = {
+        "language": stream.get("Language"),
+        "title": stream.get("Title"),
+        "codec": stream.get("Codec"),
+        "external": bool(stream.get("IsExternal")),
+        "forced": bool(stream.get("IsForced")),
+    }
+    matching = [candidate for candidate in streams if candidate.get("Type") == stream.get("Type")]
+    signature["ordinal"] = matching.index(stream)
+    return signature
+
+
+def selected_stream(streams, stream_type, selector):
+    if not selector:
+        return None
+    candidates = [stream for stream in streams if stream["Type"] == stream_type]
+    exact = [
+        stream
+        for stream in candidates
+        if stream.get("Language") == selector.get("language")
+        and stream.get("Title") == selector.get("title")
+        and stream.get("Codec") == selector.get("codec")
+        and bool(stream.get("IsExternal")) == selector.get("external")
+        and bool(stream.get("IsForced")) == selector.get("forced")
+    ]
+    if exact:
+        return exact[0]
+    language_matches = [stream for stream in candidates if stream.get("Language") == selector.get("language")]
+    if language_matches:
+        return language_matches[0]
+    ordinal = selector.get("ordinal")
+    return candidates[ordinal] if isinstance(ordinal, int) and 0 <= ordinal < len(candidates) else None
+
+
+def media_streams(ctx, playable, item_id, media_source_id, user=None, play_session_id=None):
     asset, link, download = playable["asset"], playable["link"], playable["download"]
     settings = ctx.service.settings()
     defaults = settings.defaults
-    streams = []
+    configuration = user_configuration(ctx, user) if user else {}
+    audio_priorities = list(
+        dict.fromkeys(
+            [
+                jellyfin_language(configuration.get("AudioLanguagePreference")),
+                *[jellyfin_language(value) for value in defaults.audio_languages],
+            ]
+        )
+    )
+    subtitle_priorities = list(
+        dict.fromkeys(
+            [
+                jellyfin_language(configuration.get("SubtitleLanguagePreference")),
+                *[jellyfin_language(value) for value in defaults.subtitle_languages],
+            ]
+        )
+    )
+    internal_streams = []
     for raw in asset.probe.get("streams", []):
         stream_type = raw.get("codec_type")
         if stream_type not in {"video", "audio", "subtitle"}:
@@ -373,22 +480,26 @@ def media_streams(ctx, playable, item_id, media_source_id):
             "Codec": raw.get("codec_name"),
             "Language": jellyfin_language(tags.get("language", "und")),
             "Title": tags.get("title"),
+            "DisplayTitle": stream_display_title(
+                tags.get("language"), tags.get("title"), raw.get("codec_name")
+            ),
             "Type": stream_type.capitalize(),
-            "Index": integer(raw.get("index")) if raw.get("index") is not None else len(streams),
+            "Index": (integer(raw.get("index")) if raw.get("index") is not None else len(internal_streams)),
             "IsExternal": False,
             "IsDefault": bool(raw.get("disposition", {}).get("default")),
             "IsForced": bool(raw.get("disposition", {}).get("forced")),
             "Width": integer(raw.get("width")),
             "Height": integer(raw.get("height")),
             "Channels": integer(raw.get("channels")),
+            "ChannelLayout": raw.get("channel_layout"),
             "SampleRate": integer(raw.get("sample_rate")),
             "BitRate": integer(raw.get("bit_rate")),
         }
-        streams.append(entry)
-    next_index = max((s["Index"] for s in streams), default=-1) + 1
+        internal_streams.append(entry)
     external_tracks = list((link.preflight.get("binding") or {}).get("tracks", []))
     external_tracks.extend(asset.tracks or [])
     seen_external = set()
+    external_streams = []
     for track in external_tracks:
         relative = track.get("path")
         # A direct HTTP video response cannot combine a separate audio file.
@@ -406,39 +517,52 @@ def media_streams(ctx, playable, item_id, media_source_id):
         entry = {
             "Codec": suffix,
             "Language": jellyfin_language(track.get("language", "und")),
+            "Title": track.get("title"),
+            "DisplayTitle": stream_display_title(track.get("language"), track.get("title"), suffix),
             "Type": track["kind"].capitalize(),
-            "Index": next_index,
+            "Index": len(external_streams),
             "IsExternal": True,
             "IsDefault": False,
             "IsForced": False,
             "Path": str(path),
         }
-        if track["kind"] == "subtitle":
-            entry.update(
-                {
-                    "DeliveryMethod": "External",
-                    "DeliveryUrl": (
-                        f"/Videos/{item_id}/{media_source_id}/Subtitles/{next_index}/0/Stream.{suffix}"
-                    ),
-                    "IsExternalUrl": False,
-                    "IsTextSubtitleStream": suffix in {"srt", "ass", "ssa", "vtt"},
-                    "SupportsExternalStream": True,
-                }
-            )
-        streams.append(entry)
-        next_index += 1
+        entry.update(
+            {
+                "DeliveryMethod": "External",
+                "IsExternalUrl": False,
+                "IsTextSubtitleStream": suffix in {"srt", "ass", "ssa", "vtt"},
+                "SupportsExternalStream": True,
+            }
+        )
+        external_streams.append(entry)
+
+    # Swiftfin 1.6 expects Jellyfin sidecars to occupy the first public
+    # stream indexes and offsets embedded container indexes by their count.
+    # Current Swiftfin maps tracks by media type and accepts the same layout.
+    external_count = len(external_streams)
+    for stream in internal_streams:
+        stream["Index"] += external_count
+    for stream in external_streams:
+        index = stream["Index"]
+        suffix = Path(stream["Path"]).suffix.lower().lstrip(".")
+        delivery_url = f"/Videos/{item_id}/{media_source_id}/Subtitles/{index}/0/Stream.{suffix}"
+        if play_session_id:
+            delivery_url += f"?playSessionId={play_session_id}"
+        stream["DeliveryUrl"] = delivery_url
+    streams = external_streams + internal_streams
     audio = sorted(
         (s for s in streams if s["Type"] == "Audio"),
         key=lambda s: (
-            language_rank(s["Language"], [jellyfin_language(v) for v in defaults.audio_languages]),
+            language_rank(s["Language"], audio_priorities),
             s["Index"],
         ),
     )
     subtitles = sorted(
         (s for s in streams if s["Type"] == "Subtitle"),
         key=lambda s: (
-            language_rank(s["Language"], [jellyfin_language(v) for v in defaults.subtitle_languages]),
+            language_rank(s["Language"], subtitle_priorities),
             bool(s["IsForced"]) if settings.prefer_full_subtitles else False,
+            bool(s["IsExternal"]),
             s["Index"],
         ),
     )
@@ -447,22 +571,39 @@ def media_streams(ctx, playable, item_id, media_source_id):
             stream["IsDefault"] = False
     if audio:
         audio[0]["IsDefault"] = True
-    if subtitles and defaults.subtitle_languages:
+    subtitles_enabled = configuration.get("SubtitleMode", "Default") != "None"
+    subtitles_requested = any(value != "und" for value in subtitle_priorities)
+    if subtitles and subtitles_requested and subtitles_enabled:
         subtitles[0]["IsDefault"] = True
     return (
         streams,
         audio[0]["Index"] if audio else None,
-        subtitles[0]["Index"] if subtitles and defaults.subtitle_languages else None,
+        subtitles[0]["Index"] if subtitles and subtitles_requested and subtitles_enabled else None,
     )
 
 
-def media_source(ctx, playable, item_id):
+def media_source(ctx, playable, item_id, user=None, play_session_id=None):
     asset, path = playable["asset"], playable["path"]
     # Fladder requests /Videos/{MediaSource.Id}/stream. Keeping the source id
     # equal to the public item id makes that URL resolve without exposing a
     # filesystem path or requiring the client to know Lazarr's asset ids.
     source_id = item_id
-    streams, audio_index, subtitle_index = media_streams(ctx, playable, item_id, source_id)
+    streams, audio_index, subtitle_index = media_streams(
+        ctx, playable, item_id, source_id, user, play_session_id
+    )
+    remembered = playback_selection(ctx, user, item_id)
+    if "audio" in remembered:
+        selected_audio = selected_stream(streams, "Audio", remembered["audio"])
+        if selected_audio:
+            audio_index = selected_audio["Index"]
+    if "subtitle" in remembered:
+        selected_subtitle = selected_stream(streams, "Subtitle", remembered["subtitle"])
+        subtitle_index = selected_subtitle["Index"] if selected_subtitle else None
+    for stream in streams:
+        if stream["Type"] == "Audio":
+            stream["IsDefault"] = stream["Index"] == audio_index
+        elif stream["Type"] == "Subtitle":
+            stream["IsDefault"] = stream["Index"] == subtitle_index
     duration = duration_ticks(asset)
     return {
         "Protocol": "File",
@@ -552,7 +693,7 @@ def episode_dto(ctx, media, episode_data, user=None):
     }
     if playable:
         result.update(playable_item_fields(playable))
-        source = media_source(ctx, playable, result["Id"])
+        source = media_source(ctx, playable, result["Id"], user)
         result["MediaSources"] = [source]
         result["MediaStreams"] = source["MediaStreams"]
         result["HasSubtitles"] = any(s["Type"] == "Subtitle" for s in source["MediaStreams"])
@@ -623,6 +764,56 @@ def save_progress(ctx, user, item_id, position_ticks=None, played=None, touch=Tr
     return user_data(ctx, user, item_id, runtime)
 
 
+def save_playback_selection(ctx, user, item_id, payload):
+    fields = {
+        "audio": ("AudioStreamIndex", "audioStreamIndex"),
+        "subtitle": ("SubtitleStreamIndex", "subtitleStreamIndex"),
+    }
+    supplied = {
+        kind: next((payload[key] for key in keys if key in payload), None)
+        for kind, keys in fields.items()
+        if any(key in payload for key in keys)
+    }
+    if not supplied:
+        return
+    media_id = media_identity_for_item(ctx, item_id)
+    playable = playback_for_item(ctx, item_id)
+    if media_id is None or not playable:
+        return
+    streams = media_source(ctx, playable, item_id, user)["MediaStreams"]
+    key = f"jellyfin.selection.{user.id}.{media_id}"
+    with ctx.db.session() as db:
+        row = db.get(ConfigEntry, key)
+        value = dict(row.value) if row else {}
+        for kind, raw_index in supplied.items():
+            try:
+                index = int(raw_index) if raw_index is not None else -1
+            except (TypeError, ValueError):
+                continue
+            stream_type = kind.capitalize()
+            stream = next(
+                (
+                    candidate
+                    for candidate in streams
+                    if candidate["Type"] == stream_type and candidate["Index"] == index
+                ),
+                None,
+            )
+            if stream:
+                value[kind] = stream_selector(stream, streams)
+            elif kind == "subtitle" and index == -1:
+                value[kind] = None
+        if row:
+            row.value = value
+        else:
+            db.add(ConfigEntry(key=key, value=value))
+
+
+def playback_for_item(ctx, item_id):
+    kind, identity, _ = parse_object_id(item_id)
+    return playable_asset(ctx, kind, identity) if kind in {"media", "episode"} else None
+
+
 def token_from(request):
     token = request.headers.get("X-Emby-Token") or request.headers.get("X-MediaBrowser-Token")
     if not token:
@@ -633,6 +824,8 @@ def token_from(request):
 
 
 def install_jellyfin_api(app, context):
+    play_sessions = {}
+
     def user_for_token(ctx, token):
         with ctx.db.session() as db:
             session = db.get(LoginSession, hash_token(token or ""))
@@ -730,6 +923,45 @@ def install_jellyfin_api(app, context):
     async def jellyfin_user(user_id: str, request: Request, user=Depends(authenticated)):
         require_user_id(user_id, user)
         return user_dto(context(request), user)
+
+    @app.post("/Users/Configuration", status_code=204)
+    async def jellyfin_update_user_configuration(
+        payload: dict,
+        request: Request,
+        userId: str | None = None,
+        user=Depends(authenticated),
+    ):
+        if userId:
+            require_user_id(userId, user)
+        allowed = {
+            "AudioLanguagePreference",
+            "CastReceiverId",
+            "EnableLocalPassword",
+            "EnableNextEpisodeAutoPlay",
+            "GroupedFolders",
+            "DisplayCollectionsView",
+            "DisplayMissingEpisodes",
+            "HidePlayedInLatest",
+            "PlayDefaultAudioTrack",
+            "RememberAudioSelections",
+            "RememberSubtitleSelections",
+            "LatestItemsExcludes",
+            "MyMediaExcludes",
+            "OrderedViews",
+            "SubtitleLanguagePreference",
+            "SubtitleMode",
+        }
+        ctx = context(request)
+        key = f"jellyfin.user.{user.id}"
+        with ctx.db.session() as db:
+            row = db.get(ConfigEntry, key)
+            value = dict(row.value) if row else {}
+            value.update({name: setting for name, setting in payload.items() if name in allowed})
+            if row:
+                row.value = value
+            else:
+                db.add(ConfigEntry(key=key, value=value))
+        return Response(status_code=204)
 
     @app.get("/UserViews")
     async def jellyfin_views(request: Request, userId: str | None = None, user=Depends(authenticated)):
@@ -910,18 +1142,25 @@ def install_jellyfin_api(app, context):
 
     @app.get("/Shows/{series_id}/Episodes")
     async def jellyfin_episodes(series_id: str, request: Request, user=Depends(authenticated)):
-        kind, identity, _ = parse_object_id(series_id)
+        kind, identity, secondary = parse_object_id(series_id)
+        if kind not in {"media", "season"}:
+            raise HTTPException(404, "Series not found")
+        implied_season = secondary if kind == "season" else None
         with context(request).db.session() as db:
-            media = db.get(Media, identity) if kind == "media" else None
+            media = db.get(Media, identity)
         if not media or media.kind != "tv":
             raise HTTPException(404, "Series not found")
         await context(request).library.enrich_media(identity)
         params = request.query_params
-        season = params.get("season") or params.get("Season")
+        season = params.get("season") or params.get("Season") or implied_season
         season_id = params.get("seasonId") or params.get("SeasonId")
         if season_id:
             season_kind, season_media, season_number = parse_object_id(season_id)
-            if season_kind != "season" or season_media != identity:
+            if (
+                season_kind != "season"
+                or season_media != identity
+                or (implied_season is not None and season_number != implied_season)
+            ):
                 raise HTTPException(404, "Season not found")
             season = season_number
         detail = context(request).library.detail(identity)
@@ -1019,28 +1258,63 @@ def install_jellyfin_api(app, context):
         return query_result(items, start, int(raw_limit) if raw_limit else None)
 
     def playback_for(ctx, item_id):
-        kind, identity, _ = parse_object_id(item_id)
-        playable = playable_asset(ctx, kind, identity) if kind in {"media", "episode"} else None
+        playable = playback_for_item(ctx, item_id)
         if not playable:
             raise HTTPException(404, "Playable file not found")
         return playable
 
-    def playback_info_response(item_id, request):
+    def playback_info_response(item_id, request, user):
         playable = playback_for(context(request), item_id)
+        play_session_id = uuid.uuid4().hex
+        play_sessions[play_session_id] = (item_id, time.time() + 6 * 60 * 60)
         return {
-            "MediaSources": [media_source(context(request), playable, item_id)],
-            "PlaySessionId": uuid.uuid4().hex,
+            "MediaSources": [media_source(context(request), playable, item_id, user, play_session_id)],
+            "PlaySessionId": play_session_id,
         }
+
+    @app.get("/Playback/BitrateTest")
+    async def jellyfin_bitrate_test(size: int = 100_000, user=Depends(authenticated)):
+        # Swiftfin measures this response before it asks for PlaybackInfo. Keep the
+        # allocation bounded to Jellyfin clients' largest advertised test size.
+        return Response(content=bytes(max(0, min(size, 10_000_000))), media_type="application/octet-stream")
 
     @app.get("/Items/{item_id}/PlaybackInfo")
     async def jellyfin_playback_info_get(item_id: str, request: Request, user=Depends(authenticated)):
-        return playback_info_response(item_id, request)
+        return playback_info_response(item_id, request, user)
 
     @app.post("/Items/{item_id}/PlaybackInfo")
-    async def jellyfin_playback_info_post(item_id: str, request: Request, user=Depends(authenticated)):
-        return playback_info_response(item_id, request)
+    async def jellyfin_playback_info_post(
+        item_id: str, payload: dict, request: Request, user=Depends(authenticated)
+    ):
+        # Jellyfin keeps the legacy query arguments for generated clients and
+        # gives them precedence over the newer PlaybackInfoDto body. Fladder
+        # currently sends its selected tracks through those query arguments.
+        selection = dict(payload)
+        for query_name, body_name in (
+            ("audioStreamIndex", "AudioStreamIndex"),
+            ("subtitleStreamIndex", "SubtitleStreamIndex"),
+        ):
+            if query_name in request.query_params:
+                selection[body_name] = request.query_params[query_name]
+        save_playback_selection(context(request), user, item_id, selection)
+        return playback_info_response(item_id, request, user)
+
+    def authorize_playback_request(item_id, request):
+        token = token_from(request)
+        authenticated_user = user_for_token(context(request), token) if token else None
+        play_session_id = request.query_params.get("playSessionId") or request.query_params.get(
+            "PlaySessionId"
+        )
+        now = time.time()
+        expired = [key for key, (_, expires_at) in play_sessions.items() if expires_at <= now]
+        for key in expired:
+            play_sessions.pop(key, None)
+        session = play_sessions.get(play_session_id)
+        if not authenticated_user and (not session or session[0] != item_id):
+            raise HTTPException(401, "Invalid authentication token")
 
     def stream_response(item_id, request, container=None):
+        authorize_playback_request(item_id, request)
         playable = playback_for(context(request), item_id)
         path = playable["path"]
         if container and container.casefold() != path.suffix.lstrip(".").casefold():
@@ -1049,16 +1323,12 @@ def install_jellyfin_api(app, context):
 
     @app.get("/Videos/{item_id}/stream")
     @app.get("/Videos/{item_id}/stream.{container}")
-    async def jellyfin_stream(
-        item_id: str, request: Request, container: str | None = None, user=Depends(authenticated)
-    ):
+    async def jellyfin_stream(item_id: str, request: Request, container: str | None = None):
         return stream_response(item_id, request, container)
 
     @app.head("/Videos/{item_id}/stream", include_in_schema=False)
     @app.head("/Videos/{item_id}/stream.{container}", include_in_schema=False)
-    async def jellyfin_stream_head(
-        item_id: str, request: Request, container: str | None = None, user=Depends(authenticated)
-    ):
+    async def jellyfin_stream_head(item_id: str, request: Request, container: str | None = None):
         return stream_response(item_id, request, container)
 
     async def image_response(item_id, image_type, request):
@@ -1112,6 +1382,7 @@ def install_jellyfin_api(app, context):
         return await image_response(item_id, image_type, request)
 
     def subtitle_response(item_id, media_source_id, index, subtitle_format, request):
+        authorize_playback_request(item_id, request)
         playable = playback_for(context(request), item_id)
         source = media_source(context(request), playable, item_id)
         if source["Id"] != media_source_id:
@@ -1127,7 +1398,18 @@ def install_jellyfin_api(app, context):
         path = Path(stream["Path"]) if stream else None
         if not path or subtitle_format.casefold() != path.suffix.lstrip(".").casefold():
             raise HTTPException(415, "Subtitle conversion is disabled")
-        return FileResponse(path, media_type=mimetypes.guess_type(path.name)[0] or "text/plain")
+        if path.suffix.casefold() in {".srt", ".ass", ".ssa", ".vtt"}:
+            raw = path.read_bytes()
+            for encoding in ("utf-8-sig", "cp1251"):
+                try:
+                    text = raw.decode(encoding)
+                    break
+                except UnicodeDecodeError:
+                    continue
+            else:
+                text = raw.decode("utf-8", errors="replace")
+            return Response(content=text.encode("utf-8"), media_type="text/plain; charset=utf-8")
+        return FileResponse(path, media_type=mimetypes.guess_type(path.name)[0] or "application/octet-stream")
 
     @app.get("/Videos/{item_id}/{media_source_id}/Subtitles/{index}/Stream.{subtitle_format}")
     async def jellyfin_subtitle_legacy(
@@ -1136,7 +1418,6 @@ def install_jellyfin_api(app, context):
         index: int,
         subtitle_format: str,
         request: Request,
-        user=Depends(authenticated),
     ):
         return subtitle_response(item_id, media_source_id, index, subtitle_format, request)
 
@@ -1150,7 +1431,6 @@ def install_jellyfin_api(app, context):
         start_position_ticks: int,
         subtitle_format: str,
         request: Request,
-        user=Depends(authenticated),
     ):
         if start_position_ticks < 0:
             raise HTTPException(400, "Invalid subtitle start position")
@@ -1197,5 +1477,6 @@ def install_jellyfin_api(app, context):
     async def jellyfin_session_progress(payload: dict, request: Request, user=Depends(authenticated)):
         item_id = payload.get("ItemId") or (payload.get("Item") or {}).get("Id")
         if item_id:
+            save_playback_selection(context(request), user, item_id, payload)
             save_progress(context(request), user, item_id, payload.get("PositionTicks"))
         return Response(status_code=204)
