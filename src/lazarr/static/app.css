@@ -290,6 +290,7 @@ input[role="switch"]{appearance:none;width:36px;height:21px;border-radius:12px;p
 .library-tile { display:flex; flex-direction:column; gap:.6rem; text-align:left; padding:.75rem; background:#1b1b1b; border:1px solid #363636; border-radius:6px; color:inherit; }
 .library-page-heading { display:flex; align-items:center; justify-content:space-between; gap:1rem; padding-top:2.25rem; }
 .library-page-heading h2 { margin:0; }
+.library-tile-status { display:flex; flex-direction:column; gap:.6rem; width:100%; margin-top:auto; }
 .library-tile-download { width:100%; display:flex; justify-content:space-between; color:var(--muted); font-size:11px; font-variant-numeric:tabular-nums; }
 .library-tile .progress { width:100%; margin:0; }
 .library-poster-frame { position:relative; display:block; width:100%; aspect-ratio:2/3; overflow:hidden; background:#202020; }
@@ -304,6 +305,11 @@ input[role="switch"]{appearance:none;width:36px;height:21px;border-radius:12px;p
 .library-calendar,.library-season,.library-episode { border:1px solid #363636; border-radius:5px; padding:1rem; margin-bottom:1rem; }
 .library-season>summary { display:flex; align-items:center; justify-content:space-between; gap:1rem; cursor:pointer; list-style-position:outside; }
 .library-season>summary strong { font-size:1.05rem; }
+.library-season.is-disabled { background:#171717; border-color:#2d2d2d; color:#888; }
+.library-season.is-disabled>summary { cursor:default; }
+.library-season.is-disabled>summary::marker { color:#555; }
+.library-season-summary { display:flex; align-items:center; justify-content:flex-end; gap:1rem; margin-left:auto; }
+.library-season.is-disabled .primary { color:#151515; }
 .library-season-episodes { margin-top:1rem; }
 .library-season .library-episode { margin-left:.25rem; margin-right:.25rem; background:#191919; }
 .library-episode summary { display:flex; flex-direction:column; gap:.5rem; cursor:pointer; }
@@ -335,4 +341,4 @@ input[role="switch"]{appearance:none;width:36px;height:21px;border-radius:12px;p
 .library-file dt { color:#aaa; }
 .library-file dd { margin:0; overflow-wrap:anywhere; }
 .library-file a { color:#ddd; text-decoration:underline; }
-@media(max-width:600px){.library-heading{display:block}.library-heading img{width:120px;height:180px;margin-bottom:1rem}.library-file dl{grid-template-columns:1fr}.library-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.episode-summary{grid-template-columns:1fr}.episode-visual{width:100%}.library-page-heading{padding-top:1.5rem}.library-season{padding:.75rem}.library-season .library-episode{margin-left:0;margin-right:0}}
+@media(max-width:600px){.library-heading{display:block}.library-heading img{width:120px;height:180px;margin-bottom:1rem}.library-file dl{grid-template-columns:1fr}.library-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.episode-summary{grid-template-columns:1fr}.episode-visual{width:100%}.library-page-heading{padding-top:1.5rem}.library-season{padding:.75rem}.library-season .library-episode{margin-left:0;margin-right:0}.library-season-summary{gap:.6rem}.library-season-summary .fine{display:none}}

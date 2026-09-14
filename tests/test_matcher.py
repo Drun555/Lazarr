@@ -32,6 +32,42 @@ def test_external_tracks_match_episode_not_just_language(media):
     assert [t.file_index for t in first.binding.tracks] == [3]
 
 
+def test_all_episode_subtitles_are_bound_and_title_assigns_unknown_language(media):
+    paths = files(
+        "Nathan For You s01/Nathan For You - s01e01.mkv",
+        "Nathan For You s01/Nathan For You - s01e01.srt",
+        "Nathan For You s01/Subs/EN/Nathan For You - s01e01.ass",
+    )
+    item = candidate(
+        title="Nathan For You / Сезон: 01 / Серии: 1-8 + rus Sub",
+        evidence=[audio_claim(paths[0].path)],
+    )
+    result = (
+        Matcher()
+        .evaluate(
+            item,
+            [request(media, subtitle_languages=["ru"])],
+            paths,
+        )
+        .evaluations[0]
+    )
+    subtitles = [track for track in result.binding.tracks if track.kind == "subtitle"]
+    assert [(track.file_index, track.language) for track in subtitles] == [(1, "ru"), (2, "en")]
+    assert subtitles[0].language_source == "title"
+    assert result.binding.missing_subtitle_languages == []
+
+
+def test_unknown_unrequested_subtitle_is_still_bound(media):
+    paths = files("Show.S01E01.1080p.mkv", "Show.S01E01.srt")
+    result = (
+        Matcher()
+        .evaluate(candidate(evidence=[audio_claim(paths[0].path)]), [request(media)], paths)
+        .evaluations[0]
+    )
+    subtitle = next(track for track in result.binding.tracks if track.kind == "subtitle")
+    assert subtitle.file_index == 1 and subtitle.language == "und"
+
+
 def test_missing_subtitles_are_nonblocking(media):
     path = files("Show.S01E01.1080p.mkv")
     result = Matcher().evaluate(

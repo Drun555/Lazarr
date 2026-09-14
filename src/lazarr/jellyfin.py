@@ -24,6 +24,9 @@ from lazarr.models import (
     MediaAsset,
     PlaybackProgress,
     Season,
+    Subtask,
+    SubtaskAsset,
+    Task,
     User,
 )
 from lazarr.posters import fetch_poster
@@ -35,6 +38,7 @@ TICKS_PER_SECOND = 10_000_000
 KINDS = {"media": 1, "season": 2, "episode": 3, "asset": 4, "user": 5}
 KIND_NAMES = {value: key for key, value in KINDS.items()}
 LIBRARY_COLLECTIONS = {"series": "tvshows", "movies": "movies", "anime": "tvshows"}
+VISIBLE_DOWNLOAD_STATES = {"starting", "downloading", "ready"}
 
 
 def object_id(kind, identity, secondary=0):
@@ -129,6 +133,10 @@ def poster_tag(media):
     return image_tag(media.metadata_json.get("poster"))
 
 
+def backdrop_tag(media):
+    return image_tag(media.metadata_json.get("backdrop"))
+
+
 def provider_ids(media):
     values = {str(k).capitalize(): str(v) for k, v in media.metadata_json.get("external_ids", {}).items()}
     values.setdefault(media.provider.capitalize(), str(media.external_id))
@@ -164,6 +172,7 @@ def user_data(ctx, user, item_id, runtime_ticks=0):
 
 def media_dto(ctx, media, user=None):
     image = poster_tag(media)
+    backdrop = backdrop_tag(media)
     kind = "Movie" if media.kind == "movie" else "Series"
     data = media.metadata_json
     result = {
@@ -186,7 +195,7 @@ def media_dto(ctx, media, user=None):
         "MediaType": "Video" if media.kind == "movie" else "Unknown",
         "LocationType": "FileSystem",
         "ImageTags": {"Primary": image} if image else {},
-        "BackdropImageTags": [],
+        "BackdropImageTags": [backdrop] if backdrop else [],
         "UserData": {},
     }
     playable = playable_asset(ctx, "media", media.id) if media.kind == "movie" else None
@@ -224,8 +233,9 @@ def season_dto(ctx, media, number):
     count = sum(
         1
         for episode in ctx.library.detail(media.id)["episodes"]
-        if episode["season"] == number and playable_asset(ctx, "episode", episode["id"])
+        if episode["season"] == number and episode_is_visible(ctx, episode)
     )
+    backdrop = backdrop_tag(media)
     return {
         "Name": f"Сезон {number}",
         "ServerId": server_id(ctx),
@@ -240,8 +250,11 @@ def season_dto(ctx, media, number):
         "RecursiveItemCount": count,
         "ParentPrimaryImageItemId": object_id("media", media.id),
         "ParentPrimaryImageTag": poster_tag(media),
+        "ParentBackdropItemId": object_id("media", media.id),
+        "ParentBackdropImageTags": [backdrop] if backdrop else [],
         "LocationType": "FileSystem",
         "ImageTags": {},
+        "BackdropImageTags": [backdrop] if backdrop else [],
         "SeriesPrimaryImageTag": poster_tag(media),
         "UserData": {"PlaybackPositionTicks": 0, "PlayCount": 0, "IsFavorite": False, "Played": False},
     }
@@ -258,11 +271,7 @@ def playable_path(download, relative):
 def available_seasons(ctx, media):
     detail = ctx.library.detail(media.id)
     return sorted(
-        {
-            e["season"]
-            for e in detail["episodes"]
-            if e["season"] is not None and playable_asset(ctx, "episode", e["id"])
-        }
+        {e["season"] for e in detail["episodes"] if e["season"] is not None and episode_is_visible(ctx, e)}
     )
 
 
@@ -292,7 +301,39 @@ def playable_asset(ctx, kind, identity):
                     "link": link,
                     "path": path,
                 }
+        partial = (
+            select(SubtaskAsset, Subtask, MediaAsset, Download)
+            .join(Subtask, Subtask.id == SubtaskAsset.subtask_id)
+            .join(MediaAsset, MediaAsset.id == SubtaskAsset.asset_id)
+            .join(Download, Download.id == MediaAsset.download_id)
+            .where(Subtask.status == "ready")
+            .order_by(SubtaskAsset.current.desc(), SubtaskAsset.id.desc())
+        )
+        if kind == "episode":
+            partial = partial.where(Subtask.episode_id == identity)
+        elif kind == "media":
+            partial = partial.join(Task, Task.id == Subtask.task_id).where(
+                Task.media_id == identity, Subtask.episode_id.is_(None)
+            )
+        else:
+            return None
+        for link, subtask, asset, download in db.execute(partial):
+            binding = (download.stats or {}).get("bindings", {}).get(str(subtask.id), {})
+            path = playable_path(download, asset.path)
+            if binding.get("buffer_ready") and path:
+                return {
+                    "asset": asset,
+                    "download": download,
+                    "link": link,
+                    "path": path,
+                }
     return None
+
+
+def episode_is_visible(ctx, episode_data):
+    return bool(VISIBLE_DOWNLOAD_STATES.intersection(episode_data.get("statuses", []))) or bool(
+        playable_asset(ctx, "episode", episode_data["id"])
+    )
 
 
 def duration_ticks(asset):
@@ -319,7 +360,8 @@ def language_rank(value, priorities):
 
 def media_streams(ctx, playable, item_id, media_source_id):
     asset, link, download = playable["asset"], playable["link"], playable["download"]
-    defaults = ctx.service.settings().defaults
+    settings = ctx.service.settings()
+    defaults = settings.defaults
     streams = []
     for raw in asset.probe.get("streams", []):
         stream_type = raw.get("codec_type")
@@ -374,7 +416,9 @@ def media_streams(ctx, playable, item_id, media_source_id):
             entry.update(
                 {
                     "DeliveryMethod": "External",
-                    "DeliveryUrl": f"/Videos/{item_id}/{media_source_id}/Subtitles/{next_index}/Stream.{suffix}",
+                    "DeliveryUrl": (
+                        f"/Videos/{item_id}/{media_source_id}/Subtitles/{next_index}/0/Stream.{suffix}"
+                    ),
                     "IsExternalUrl": False,
                     "IsTextSubtitleStream": suffix in {"srt", "ass", "ssa", "vtt"},
                     "SupportsExternalStream": True,
@@ -393,6 +437,7 @@ def media_streams(ctx, playable, item_id, media_source_id):
         (s for s in streams if s["Type"] == "Subtitle"),
         key=lambda s: (
             language_rank(s["Language"], [jellyfin_language(v) for v in defaults.subtitle_languages]),
+            bool(s["IsForced"]) if settings.prefer_full_subtitles else False,
             s["Index"],
         ),
     )
@@ -455,11 +500,7 @@ def playable_item_fields(playable):
         "MediaSourceCount": 1,
         "Width": integer(
             next(
-                (
-                    s.get("width")
-                    for s in asset.probe.get("streams", [])
-                    if s.get("codec_type") == "video"
-                ),
+                (s.get("width") for s in asset.probe.get("streams", []) if s.get("codec_type") == "video"),
                 None,
             )
         ),
@@ -469,13 +510,14 @@ def playable_item_fields(playable):
 
 def episode_dto(ctx, media, episode_data, user=None):
     playable = playable_asset(ctx, "episode", episode_data["id"])
-    if not playable:
+    if not playable and not VISIBLE_DOWNLOAD_STATES.intersection(episode_data.get("statuses", [])):
         return None
     season_number = episode_data["season"]
     still = episode_data.get("still")
     still_tag = image_tag(still)
     episode_number = episode_data["episode"]
     title = episode_data["title"] or f"Серия {episode_number}"
+    backdrop = backdrop_tag(media)
     result = {
         "Name": title,
         "ServerId": server_id(ctx),
@@ -497,14 +539,23 @@ def episode_dto(ctx, media, episode_data, user=None):
         "ImageTags": {"Primary": still_tag} if still_tag else {},
         "PrimaryImageAspectRatio": 16 / 9 if still_tag else None,
         "SeriesPrimaryImageTag": poster_tag(media),
-        "UserData": {},
+        "ParentBackdropItemId": object_id("media", media.id),
+        "ParentBackdropImageTags": [backdrop] if backdrop else [],
+        "CanDownload": False,
+        "PlayAccess": "None",
+        "MediaSourceCount": 0,
+        "MediaSources": [],
+        "MediaStreams": [],
+        "HasSubtitles": False,
+        "UserData": user_data(ctx, user, object_id("episode", episode_data["id"])),
     }
-    result.update(playable_item_fields(playable))
-    source = media_source(ctx, playable, result["Id"])
-    result["MediaSources"] = [source]
-    result["MediaStreams"] = source["MediaStreams"]
-    result["HasSubtitles"] = any(s["Type"] == "Subtitle" for s in source["MediaStreams"])
-    result["UserData"] = user_data(ctx, user, result["Id"], result["RunTimeTicks"])
+    if playable:
+        result.update(playable_item_fields(playable))
+        source = media_source(ctx, playable, result["Id"])
+        result["MediaSources"] = [source]
+        result["MediaStreams"] = source["MediaStreams"]
+        result["HasSubtitles"] = any(s["Type"] == "Subtitle" for s in source["MediaStreams"])
+        result["UserData"] = user_data(ctx, user, result["Id"], result["RunTimeTicks"])
     return result
 
 
@@ -679,6 +730,46 @@ def install_jellyfin_api(app, context):
         ctx = context(request)
         return query_result([library_dto(ctx, key, name) for key, name in LIBRARIES])
 
+    @app.get("/UserViews/GroupingOptions")
+    async def jellyfin_grouping_options(userId: str | None = None, user=Depends(authenticated)):
+        if userId:
+            require_user_id(userId, user)
+        return []
+
+    @app.get("/Plugins")
+    async def jellyfin_plugins(user=Depends(authenticated)):
+        # Infuse probes installed plugins while checking a Jellyfin connection.
+        # An empty list selects its regular full-sync path; InfuseSync is optional.
+        return []
+
+    @app.get("/DisplayPreferences/{display_preferences_id}")
+    async def jellyfin_display_preferences(
+        display_preferences_id: str,
+        request: Request,
+        client: str,
+        userId: str | None = None,
+        user=Depends(authenticated),
+    ):
+        if userId:
+            require_user_id(userId, user)
+        identity = uuid.uuid5(
+            uuid.UUID(server_id(context(request))),
+            f"display:{display_preferences_id}:{client}",
+        )
+        return {
+            "Id": str(identity),
+            "Client": client,
+            "CustomPrefs": {},
+            "SortBy": "SortName",
+            "SortOrder": "Ascending",
+            "IndexBy": None,
+            "RememberIndexing": False,
+            "RememberSorting": False,
+            "ScrollDirection": "Horizontal",
+            "ShowBackdrop": True,
+            "ShowSidebar": False,
+        }
+
     @app.get("/Library/MediaFolders")
     async def jellyfin_media_folders(request: Request, user=Depends(authenticated)):
         ctx = context(request)
@@ -743,6 +834,7 @@ def install_jellyfin_api(app, context):
         return items
 
     async def jellyfin_items_impl(request, user, parent_id=None):
+        await context(request).library.enrich()
         params = request.query_params
         requested_user = params.get("userId") or params.get("UserId")
         if requested_user:
@@ -780,6 +872,7 @@ def install_jellyfin_api(app, context):
 
     @app.get("/Items/Latest")
     async def jellyfin_latest(request: Request, user=Depends(authenticated)):
+        await context(request).library.enrich()
         params = request.query_params
         items = items_response(context(request), user, params.get("parentId") or params.get("ParentId"))
         return items[: int(params.get("limit") or params.get("Limit") or 20)]
@@ -791,6 +884,7 @@ def install_jellyfin_api(app, context):
 
     @app.get("/Shows/{series_id}/Seasons")
     async def jellyfin_seasons(series_id: str, request: Request, user=Depends(authenticated)):
+        await context(request).library.enrich()
         kind, identity, _ = parse_object_id(series_id)
         with context(request).db.session() as db:
             media = db.get(Media, identity) if kind == "media" else None
@@ -798,6 +892,12 @@ def install_jellyfin_api(app, context):
             raise HTTPException(404, "Series not found")
         numbers = available_seasons(context(request), media)
         return query_result([season_dto(context(request), media, number) for number in numbers])
+
+    @app.get("/Shows/NextUp")
+    async def jellyfin_next_up(request: Request, userId: str | None = None, user=Depends(authenticated)):
+        if userId:
+            require_user_id(userId, user)
+        return query_result([])
 
     @app.get("/Shows/{series_id}/Episodes")
     async def jellyfin_episodes(series_id: str, request: Request, user=Depends(authenticated)):
@@ -829,11 +929,13 @@ def install_jellyfin_api(app, context):
 
     @app.get("/Items/{item_id}")
     async def jellyfin_item(item_id: str, request: Request, user=Depends(authenticated)):
+        await context(request).library.enrich()
         return item_dto(context(request), item_id, user)
 
     @app.get("/Users/{user_id}/Items/{item_id}")
     async def jellyfin_legacy_item(user_id: str, item_id: str, request: Request, user=Depends(authenticated)):
         require_user_id(user_id, user)
+        await context(request).library.enrich()
         return item_dto(context(request), item_id, user)
 
     @app.get("/UserItems/{item_id}/UserData")
@@ -951,9 +1053,11 @@ def install_jellyfin_api(app, context):
         return stream_response(item_id, request, container)
 
     async def image_response(item_id, image_type, request):
-        if image_type.casefold() != "primary":
+        image_type = image_type.casefold()
+        if image_type not in {"primary", "backdrop"}:
             raise HTTPException(404, "Image not found")
         ctx = context(request)
+        await ctx.library.enrich()
         kind, identity, _ = parse_object_id(item_id)
         episode = None
         with ctx.db.session() as db:
@@ -967,30 +1071,38 @@ def install_jellyfin_api(app, context):
                 media = db.get(Media, identity)
             else:
                 media = None
-        image = episode.still if kind == "episode" and episode and episode.still else None
-        image = image or (media.metadata_json.get("poster") if media else None)
+        image = None
+        if image_type == "backdrop":
+            image = media.metadata_json.get("backdrop") if media else None
+        else:
+            image = episode.still if kind == "episode" and episode and episode.still else None
+            image = image or (media.metadata_json.get("poster") if media else None)
         filename = image.rsplit("/", 1)[-1] if image else None
         if not filename:
             raise HTTPException(404, "Image not found")
-        return FileResponse(await fetch_poster(ctx, filename))
+        return FileResponse(await fetch_poster(ctx, filename, "w1280" if image_type == "backdrop" else None))
 
     @app.get("/Items/{item_id}/Images/{image_type}")
     async def jellyfin_image_get(item_id: str, image_type: str, request: Request):
+        return await image_response(item_id, image_type, request)
+
+    @app.get("/Items/{item_id}/Images/{image_type}/{index}")
+    async def jellyfin_image_indexed_get(item_id: str, image_type: str, index: int, request: Request):
+        if index != 0:
+            raise HTTPException(404, "Image not found")
         return await image_response(item_id, image_type, request)
 
     @app.head("/Items/{item_id}/Images/{image_type}", include_in_schema=False)
     async def jellyfin_image_head(item_id: str, image_type: str, request: Request):
         return await image_response(item_id, image_type, request)
 
-    @app.get("/Videos/{item_id}/{media_source_id}/Subtitles/{index}/Stream.{subtitle_format}")
-    async def jellyfin_subtitle(
-        item_id: str,
-        media_source_id: str,
-        index: int,
-        subtitle_format: str,
-        request: Request,
-        user=Depends(authenticated),
-    ):
+    @app.head("/Items/{item_id}/Images/{image_type}/{index}", include_in_schema=False)
+    async def jellyfin_image_indexed_head(item_id: str, image_type: str, index: int, request: Request):
+        if index != 0:
+            raise HTTPException(404, "Image not found")
+        return await image_response(item_id, image_type, request)
+
+    def subtitle_response(item_id, media_source_id, index, subtitle_format, request):
         playable = playback_for(context(request), item_id)
         source = media_source(context(request), playable, item_id)
         if source["Id"] != media_source_id:
@@ -1007,6 +1119,33 @@ def install_jellyfin_api(app, context):
         if not path or subtitle_format.casefold() != path.suffix.lstrip(".").casefold():
             raise HTTPException(415, "Subtitle conversion is disabled")
         return FileResponse(path, media_type=mimetypes.guess_type(path.name)[0] or "text/plain")
+
+    @app.get("/Videos/{item_id}/{media_source_id}/Subtitles/{index}/Stream.{subtitle_format}")
+    async def jellyfin_subtitle_legacy(
+        item_id: str,
+        media_source_id: str,
+        index: int,
+        subtitle_format: str,
+        request: Request,
+        user=Depends(authenticated),
+    ):
+        return subtitle_response(item_id, media_source_id, index, subtitle_format, request)
+
+    @app.get(
+        "/Videos/{item_id}/{media_source_id}/Subtitles/{index}/{start_position_ticks}/Stream.{subtitle_format}"
+    )
+    async def jellyfin_subtitle(
+        item_id: str,
+        media_source_id: str,
+        index: int,
+        start_position_ticks: int,
+        subtitle_format: str,
+        request: Request,
+        user=Depends(authenticated),
+    ):
+        if start_position_ticks < 0:
+            raise HTTPException(400, "Invalid subtitle start position")
+        return subtitle_response(item_id, media_source_id, index, subtitle_format, request)
 
     @app.post("/Sessions/Capabilities", status_code=204)
     @app.post("/Sessions/Capabilities/Full", status_code=204)

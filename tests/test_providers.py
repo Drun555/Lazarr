@@ -9,6 +9,33 @@ from lazarr.models import ProviderConfig
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
+async def test_tmdb_exposes_large_backdrop(core):
+    _, _, manager, _ = core
+    manager.configure("tmdb", {"api_key": "a" * 32}, True)
+    manager.transport = httpx.MockTransport(
+        lambda request: httpx.Response(
+            200,
+            json={
+                "id": 42,
+                "name": "Example Show",
+                "original_name": "Example Show",
+                "first_air_date": "2020-01-01",
+                "poster_path": "/poster.jpg",
+                "backdrop_path": "/backdrop.jpg",
+                "genres": [],
+                "external_ids": {},
+                "alternative_titles": {"results": []},
+                "episode_groups": {"results": []},
+                "seasons": [],
+            },
+        )
+    )
+    async with manager.open("tmdb") as provider:
+        item = await provider.get_media("tv", "42")
+    assert item.poster == "https://image.tmdb.org/t/p/w342/poster.jpg"
+    assert item.backdrop == "https://image.tmdb.org/t/p/w1280/backdrop.jpg"
+
+
 async def test_nyaa_search_inspect_and_download(core, media):
     _, _, manager, _ = core
     manager.configure("nyaa", {}, True)
@@ -103,9 +130,7 @@ async def test_manual_provider_action_bypasses_automatic_cooldown(core):
         async with manager.open("rutracker"):
             pass
 
-    async with manager.open(
-        "rutracker", allow_disabled=True, bypass_cooldown=True
-    ) as provider:
+    async with manager.open("rutracker", allow_disabled=True, bypass_cooldown=True) as provider:
         assert (await provider.authenticate({})).status == "authenticated"
 
 
@@ -154,7 +179,7 @@ def test_anime_search_uses_latin_alias_not_original_japanese():
 
 def test_language_aliases_and_adjectives():
     from lazarr.config import Requirements
-    from lazarr.provider_utils import description_evidence
+    from lazarr.provider_utils import description_evidence, title_subtitle_evidence
 
     assert Requirements(
         audio_languages=["ru", "rus", "russian", "Русский", "ja", "jap", "japanese", "Японский"]
@@ -163,6 +188,8 @@ def test_language_aliases_and_adjectives():
     assert description_evidence("Аудио: Русская озвучка")[0].value == ["ru"]
     assert description_evidence("Описание: Японские школьники\nВидео: HEVC") == []
     assert description_evidence("MediaInfo\nАудио: RUS AAC") == []
+    title = "Nathan For You / Сезон: 01 / Серии: 1-8 + rus Sub"
+    assert title_subtitle_evidence(title)[0].value == ["ru"]
 
 
 async def test_rutracker_uses_requested_text_and_exposes_category(core, media):

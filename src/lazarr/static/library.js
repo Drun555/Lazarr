@@ -1,4 +1,4 @@
-let librarySelection='series',libraryMedia=null,libraryGeneration=0;
+let librarySelection='series',libraryMedia=null,libraryItem=null,libraryGeneration=0;
 const libraryDate=value=>value?new Date(value.length===10?value+'T12:00:00':value).toLocaleDateString('ru-RU'):'Дата неизвестна';
 const searchDate=value=>value?new Date(value*1000).toLocaleString('ru-RU'):'Не записана';
 const progressPercent=value=>Math.min(100,Math.max(0,(Number(value)||0)*100));
@@ -20,7 +20,7 @@ function renderLibraries(){
     const download=m.download;
     const initial=esc((m.title||'?').trim().charAt(0).toUpperCase()||'?');
     const poster=`<span class="library-poster-frame"><span class="library-poster-empty" aria-hidden="true"><b>${initial}</b><small>Нет обложки</small></span>${m.poster?`<img src="${esc(posterUrl(m.poster))}" alt="" loading="lazy">`:''}</span>`;
-    return `<button class="library-tile" data-library-media="${m.id}">${poster}<strong>${esc(m.title)}</strong><span class="fine">${m.year||'Год неизвестен'}${m.taxonomy_known?'':' · Классификация уточняется'}</span>${download?`<div class="library-tile-download"><span>${(progressPercent(download.progress)).toFixed(1)}%</span><span>${bytes(download.download_rate)}/с</span></div>${progressBar(download.progress,`Загрузка ${m.title}`)}`:''}</button>`;
+    return `<button class="library-tile" data-library-media="${m.id}">${poster}<strong>${esc(m.title)}</strong><span class="fine">${m.year||'Год неизвестен'}${m.taxonomy_known?'':' · Классификация уточняется'}</span>${download?`<div class="library-tile-status"><div class="library-tile-download"><span>${(progressPercent(download.progress)).toFixed(1)}%</span><span>${bytes(download.download_rate)}/с</span></div>${progressBar(download.progress,`Загрузка ${m.title}`)}</div>`:''}</button>`;
   }).join(''):'<p class="muted">В этой библиотеке пока нет произведений.</p>';
 }
 function downloadDetails(download){
@@ -49,22 +49,28 @@ function renderEpisode(episode){
   const status=episode.statuses?.length?episode.statuses.map(s=>esc(statuses[s]||s)).join(', '):episode.released?'Не запрошено':'Ожидание выхода';
   return `<details class="library-episode" data-episode="${esc(episode.id)}"><summary><div class="episode-summary">${visual}<div><strong>${esc(number)} ${esc(episode.title)}</strong><span class="fine">${libraryDate(episode.air_date)} · ${status}</span>${episode.download?progressBar(episode.download.progress,'Прогресс серии'):''}</div></div></summary>${episode.overview?`<p class="episode-overview">${esc(episode.overview)}</p>`:''}<div class="episode-meta"><span class="fine">Последний поиск: ${searchDate(episode.last_search_at)}</span>${episodeActions(episode)}</div>${episode.files?.length?episode.files.map(libraryFile).join(''):'<p class="muted">Файл и раздача пока не выбраны.</p>'}</details>`;
 }
-function renderSeason(number,episodes){
+function renderSeason(item,number,episodes,info={}){
   const ready=episodes.filter(episode=>episode.files?.some(file=>file.verified)).length;
   const downloading=episodes.filter(episode=>episode.download&&['starting','downloading'].includes(episode.download.state)).length;
   const activity=downloading?` · загружается ${downloading}`:ready?` · готово ${ready}`:'';
   const label=number==null?'Без сезона':number===0?'Дополнительно':`Сезон ${number}`;
+  const count=info.episode_count??episodes.length;
+  const hasTask=(state.tasks||[]).some(task=>task.media_id===item.id&&Number(task.canonical_season??task.season)===number);
+  const hasFiles=episodes.some(episode=>episode.files?.length);
+  if(number!==null&&!hasTask&&!hasFiles)return `<details class="library-season is-disabled" name="library-seasons" data-season="${esc(number)}" aria-disabled="true"><summary><strong>${esc(label)}</strong><span class="library-season-summary"><span class="fine">${count} серий · не добавлен</span><button type="button" class="primary" data-download-season="${esc(number)}">Скачать</button></span></summary></details>`;
   return `<details class="library-season" name="library-seasons" data-season="${esc(number??'none')}"><summary><strong>${esc(label)}</strong><span class="fine">${episodes.length} серий${activity}</span></summary><div class="library-season-episodes">${episodes.map(renderEpisode).join('')}</div></details>`;
 }
 function renderEpisodeGroups(item){
   if(item.kind!=='tv')return item.episodes.map(renderEpisode).join('');
   const groups=new Map();
+  const seasonInfo=new Map((item.seasons||item.metadata?.seasons||[]).map(season=>[season.number,season]));
+  for(const season of seasonInfo.values())groups.set(season.number,[]);
   for(const episode of item.episodes){
     const season=episode.season??episode.canonical_season??null;
     if(!groups.has(season))groups.set(season,[]);
     groups.get(season).push(episode);
   }
-  return [...groups.entries()].sort(([left],[right])=>(left??-1)-(right??-1)).map(([season,episodes])=>renderSeason(season,episodes)).join('');
+  return [...groups.entries()].sort(([left],[right])=>(left??-1)-(right??-1)).map(([season,episodes])=>renderSeason(item,season,episodes,seasonInfo.get(season))).join('');
 }
 async function openLibraryMedia(identity,silent=false){
   const opened=new Set($$('.library-episode[open]').map(node=>node.dataset.episode));
@@ -72,14 +78,14 @@ async function openLibraryMedia(identity,silent=false){
   const generation=++libraryGeneration;libraryMedia=identity;
   $('#library-detail').hidden=false;$('#library-overview').hidden=true;
   if(!silent)$('#library-detail-body').textContent='Загрузка…';
-  const item=await api(`/libraries/media/${identity}`);if(generation!==libraryGeneration)return;
+  const item=await api(`/libraries/media/${identity}`);if(generation!==libraryGeneration)return;libraryItem=item;
   const meta=item.metadata;
   const calendar=[...item.episodes].sort((a,b)=>(a.air_date||'9999').localeCompare(b.air_date||'9999'));
   const allActions=mediaTaskActions(identity);
   $('#library-detail-body').innerHTML=`<div class="library-heading">${item.poster?`<img src="${esc(posterUrl(item.poster))}" alt="">`:''}<div><h2>${esc(item.title)}</h2><p class="fine">${esc(meta.original_title||'')} · ${item.year||'—'}</p><p>${esc(meta.overview||'Описание отсутствует.')}</p><p class="fine">${esc((meta.genres||[]).join(', '))}</p><p>Последний поиск: ${searchDate(item.last_search_at)}</p><p class="fine">Задач: ${item.task_count} · Источник: ${esc(meta.provider||'tmdb')} · ID: ${esc(meta.id)}</p>${allActions?`<div class="media-task-actions">${allActions}</div>`:''}</div></div><details class="library-calendar"><summary>Календарь выхода · ${calendar.length}</summary><ol>${calendar.map(e=>`<li><time>${libraryDate(e.air_date)}</time> — ${e.episode==null?'Фильм':`S${e.season} · E${e.episode}`} · ${esc(e.title)}${e.air_date&&!e.released?' · Ожидается':''}</li>`).join('')}</ol></details><div class="library-episodes">${renderEpisodeGroups(item)||'<p>Сведения об эпизодах ещё не получены.</p>'}</div>`;
   const seasons=$$('.library-season');
   for(const node of seasons)if(openedSeasons.has(node.dataset.season))node.open=true;
-  if(!silent&&!openedSeasons.size&&seasons.length)seasons[0].open=true;
+  if(!silent&&!openedSeasons.size){const first=seasons.find(node=>!node.classList.contains('is-disabled'));if(first)first.open=true;}
   for(const node of $$('.library-episode'))if(opened.has(node.dataset.episode))node.open=true;
 }
 async function refreshLibraryView(){
@@ -91,7 +97,8 @@ document.addEventListener('click',async event=>{
   try{
     if(button.dataset.library){librarySelection=button.dataset.library;renderLibraries();}
     else if(button.dataset.libraryMedia)await openLibraryMedia(Number(button.dataset.libraryMedia));
-    else if(button.id==='library-back'){libraryGeneration++;libraryMedia=null;$('#library-detail').hidden=true;$('#library-overview').hidden=false;}
+    else if(button.id==='library-back'){libraryGeneration++;libraryMedia=null;libraryItem=null;$('#library-detail').hidden=true;$('#library-overview').hidden=false;}
+    else if(button.dataset.downloadSeason!==undefined){event.preventDefault();if(!libraryItem)return;if(!state.settings)await loadSettings();await switchTab('search');showTaskForm(libraryItem.metadata,Number(button.dataset.downloadSeason));}
     else if(button.id==='library-refresh')await openLibraryMedia(libraryMedia);
     else if(button.id==='library-subtitles'){
       const defaults=state.settings?.defaults?.subtitle_languages||[];
@@ -117,9 +124,10 @@ document.addEventListener('submit',async event=>{
       return;
     }
     const result=await api(`/libraries/media/${form.dataset.media}`,'DELETE',{delete_files:data.get('delete_files')==='on'});
-    $('#modal').close();libraryGeneration++;libraryMedia=null;
+    $('#modal').close();libraryGeneration++;libraryMedia=null;libraryItem=null;
     $('#library-detail').hidden=true;$('#library-overview').hidden=false;
     await Promise.all([loadLibraries(),refreshTasks(),refreshDownloads()]);
     toast(result.cleanup_pending?'Произведение удалено. Очистка файлов будет повторена автоматически.':'Произведение удалено из библиотеки');
   }catch(error){form.querySelector('.form-error').textContent=error.message;}
 });
+document.addEventListener('toggle',event=>{const node=event.target;if(node instanceof HTMLDetailsElement&&node.classList.contains('is-disabled')&&node.open)node.open=false;},true);

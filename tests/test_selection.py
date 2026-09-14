@@ -49,6 +49,7 @@ def rezero():
     [
         "Re:Zero (ТВ-1) [1080p]",
         "Re:Zero 3rd Season [1080p]",
+        "Re:Zero / Сезон: 03 / Серии: 1-8 [1080p]",
         "Re:Zero [Movie] [1080p]",
         "Re:Zero (ТВ-2, часть 2) [720p]",
         "Re:Zero [manga]",
@@ -65,6 +66,7 @@ def test_explicit_contradictions_are_filtered_before_network(rezero, title):
 def test_unknown_claims_partial_coverage_and_anime_numbering_are_kept(rezero):
     item = candidate(title="Re:Zero (ТВ-2, часть 2) [2021] [1080p]", external_ids={})
     assert reject_reason(item, [rezero]) is None
+    assert reject_reason(candidate(title="Re:Zero / Сезон: 02 / [1080p]"), [rezero]) is None
     assert reject_reason(candidate(title="Re:Zero", external_ids={}), [rezero]) is None
     other = rezero.model_copy(update={"season": 3, "episode": 1})
     assert reject_reason(item, [other, rezero]) is None

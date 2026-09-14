@@ -4,10 +4,10 @@
     {
       "id": "tmdb",
       "kind": "metadata",
-      "version": "1.0.4",
+      "version": "1.0.5",
       "sdk": ">=1.4,<2",
       "url": "https://example.invalid/lazarr/providers/tmdb.py",
-      "sha256": "c1b8e6ee0f0bddbbeeda1d1d1c230aefe60ef0b602f4a5489e187f25ec322f81"
+      "sha256": "38357004b4a88d4ecbe7d52d96e1ef00d050423fe64dbcd36477db25cf3a355b"
     },
     {
       "id": "nyaa",

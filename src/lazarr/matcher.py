@@ -4,6 +4,7 @@ import re
 import unicodedata
 from pathlib import PurePosixPath
 from lazarr.languages import language_name
+from lazarr.provider_utils import title_subtitle_evidence
 from lazarr.sdk import (
     Candidate,
     TorrentFile,
@@ -215,6 +216,9 @@ class Matcher:
     def evaluate(
         self, candidate: Candidate, requests: list[SubtaskRequest], files: list[TorrentFile], infohash=""
     ):
+        title_evidence = title_subtitle_evidence(candidate.title)
+        if title_evidence:
+            candidate = candidate.model_copy(update={"evidence": [*candidate.evidence, *title_evidence]})
         videos = [file for file in files if playable_video(file)]
         reports = []
         for request in requests:
@@ -328,18 +332,32 @@ class Matcher:
                         ambiguities.add((kind, lang))
                 for kind, field in [("audio", "audio_languages"), ("subtitle", "subtitle_languages")]:
                     evidence = self._scoped_evidence(candidate, video, videos, field)
-                    external = {
+                    described_external = {
                         language(v)
                         for e in evidence
                         if e.delivery == "external" and isinstance(e.value, list)
                         for v in e.value
                     } - {"und"}
+                    title_external = set()
+                    if kind == "subtitle":
+                        title_external = {
+                            language(value)
+                            for item in candidate.evidence
+                            if item.field == field
+                            and item.source == "title"
+                            and item.delivery == "external"
+                            and isinstance(item.value, list)
+                            for value in item.value
+                        } - {"und"}
+                    external = described_external | title_external
                     inferred = next(iter(external)) if len(external) == 1 else None
                     if inferred:
                         for track in tracks:
                             if track.kind == kind and track.language == "und":
                                 track.language = inferred
-                                track.language_source = "description"
+                                track.language_source = (
+                                    "title" if inferred in title_external else "description"
+                                )
                     for item in evidence:
                         if item.delivery != "external" and isinstance(item.value, list):
                             for lang in item.value:
@@ -378,6 +396,14 @@ class Matcher:
                     )
                 )
                 wanted_subs = set(request.requirements.subtitle_languages)
+                subtitle_evidence = self._scoped_evidence(candidate, video, videos, "subtitle_languages")
+                for item in candidate.evidence:
+                    if (
+                        item.field == "subtitle_languages"
+                        and item.source == "title"
+                        and item not in subtitle_evidence
+                    ):
+                        subtitle_evidence.append(item)
                 present_subs = {
                     t.language
                     for t in tracks
@@ -392,6 +418,7 @@ class Matcher:
                         reason="Нет субтитров: " + ", ".join(language_name(v) for v in missing_subs)
                         if missing_subs
                         else "Субтитры доступны или не запрошены",
+                        evidence=subtitle_evidence,
                     )
                 )
                 tracks = [
@@ -401,7 +428,7 @@ class Matcher:
                         t.kind == "audio"
                         and t.language in wanted_audio
                         or t.kind == "subtitle"
-                        and t.language in wanted_subs
+                        and (t.file_index is not None or t.language in wanted_subs)
                     )
                     and (t.kind, t.language) not in ambiguities
                 ]

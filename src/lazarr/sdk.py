@@ -70,6 +70,7 @@ class MetadataItem(BaseModel):
     taxonomy_known: bool = False
     overview: str = ""
     poster: str | None = None
+    backdrop: str | None = None
     aliases: list[str] = Field(default_factory=list)
     external_ids: dict[str, str] = Field(default_factory=dict)
     release_date: str | None = None
@@ -207,7 +208,7 @@ class Criterion(BaseModel):
 
 
 class TrackBinding(BaseModel):
-    language_source: Literal["filename", "description", "probe"] = "filename"
+    language_source: Literal["filename", "title", "description", "probe"] = "filename"
     kind: Literal["audio", "subtitle"]
     language: str = "und"
     file_index: int | None = None

@@ -48,6 +48,7 @@ async def test_shared_media_detail_tracks_release_calendar_last_search(core, med
     identity = groups[2]["items"][0]["id"]
     before = library.detail(identity)
     assert before["task_count"] == 2 and before["last_search_at"] is None
+    assert before["seasons"] == media.seasons
     assert any(e["season"] == 2 and e["episode"] == 14 for e in before["episodes"])
     # Use canonical filename numbering for this synthetic worker fixture.
     with db.session() as session:
@@ -73,8 +74,7 @@ async def test_shared_media_detail_tracks_release_calendar_last_search(core, med
             "progress": 0.4,
             "download_rate": 2048,
             "bindings": {
-                str(subtask_identity): {"progress": 0.25, "eta": 90}
-                for subtask_identity in subtask_ids
+                str(subtask_identity): {"progress": 0.25, "eta": 90} for subtask_identity in subtask_ids
             },
         }
         asset.probe = {
@@ -149,7 +149,14 @@ async def test_enrichment_is_offline_tolerant_and_does_not_change_numbering(core
     assert len(library.list()[0]["items"]) == 1
 
     async def enriched(*args):
-        return media.model_copy(update={"taxonomy_known": True, "genre_ids": [16], "original_language": "ja"})
+        return media.model_copy(
+            update={
+                "taxonomy_known": True,
+                "genre_ids": [16],
+                "original_language": "ja",
+                "backdrop": "https://image.tmdb.org/t/p/w1280/backdrop.jpg",
+            }
+        )
 
     monkeypatch.setattr(plugins.classes["tmdb"], "get_media", enriched)
     from lazarr.models import ProviderConfig
@@ -158,3 +165,5 @@ async def test_enrichment_is_offline_tolerant_and_does_not_change_numbering(core
         session.get(ProviderConfig, "tmdb").retry_at = 0
     await library.enrich()
     assert len(library.list()[2]["items"]) == 1
+    with db.session() as session:
+        assert session.scalar(select(Media)).metadata_json["backdrop"].endswith("/backdrop.jpg")

@@ -18,7 +18,7 @@ class Plugin(MetadataProvider):
         id="tmdb",
         name="TMDB",
         kind="metadata",
-        version="1.0.4",
+        version="1.0.5",
         sdk=">=1.4,<2",
         config_fields=[
             ConfigField(name="api_key", label="API key или Read Access Token", secret=True, required=True),
@@ -81,6 +81,9 @@ class Plugin(MetadataProvider):
             release_date=date or None,
             poster=f"https://image.tmdb.org/t/p/w342{data['poster_path']}"
             if data.get("poster_path")
+            else None,
+            backdrop=f"https://image.tmdb.org/t/p/w1280{data['backdrop_path']}"
+            if data.get("backdrop_path")
             else None,
             aliases=list(dict.fromkeys([original or ""] + [n["title"] for n in names])),
             external_ids=ids,

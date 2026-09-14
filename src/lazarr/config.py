@@ -34,6 +34,7 @@ class Requirements(BaseModel):
 class Settings(BaseModel):
     model_config = ConfigDict(validate_default=True)
     defaults: Requirements = Field(default_factory=Requirements)
+    prefer_full_subtitles: bool = True
     movie_path: str = Field(default_factory=lambda: os.getenv("LAZARR_MOVIE_PATH", "downloads/movies"))
     series_path: str = Field(default_factory=lambda: os.getenv("LAZARR_SERIES_PATH", "downloads/series"))
     search_start: str = "00:00"

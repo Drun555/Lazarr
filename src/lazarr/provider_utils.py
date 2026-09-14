@@ -87,6 +87,32 @@ def description_evidence(text):
     return evidence
 
 
+def title_subtitle_evidence(text):
+    """Extract explicit compact claims such as ``rus Sub`` from release titles."""
+    values = []
+    excerpts = []
+    for clause in re.split(r"\s*(?:\+|\||;)\s*", text):
+        if not re.search(r"\b(?:sub(?:title)?s?|субтитр\w*)\b", clause, re.I):
+            continue
+        languages = extract_languages(clause)
+        if languages:
+            values.extend(languages)
+            excerpts.append(clause.strip())
+    values = list(dict.fromkeys(values))
+    if not values:
+        return []
+    return [
+        Evidence(
+            field="subtitle_languages",
+            value=values,
+            source="title",
+            excerpt=" + ".join(excerpts)[:300],
+            scope="release",
+            delivery="external",
+        )
+    ]
+
+
 def _title_key(value):
     return re.sub(r"[^\w]", "", value.casefold())
 

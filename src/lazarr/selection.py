@@ -5,13 +5,13 @@ import re
 
 def title_seasons(title):
     patterns = [
-        r"\b(?:тв|tv|season|сезон)[ ._-]*(\d{1,3})\b",
+        r"\b(?:тв|tv|season|сезон)[\s._:#№-]*(\d{1,3})\b",
         r"\b(\d{1,3})(?:st|nd|rd|th)[ ._-]+season\b",
         r"\bs(\d{1,3})(?:e\d+|\b)",
     ]
     seasons = {int(n) for pattern in patterns for n in re.findall(pattern, title, re.I)}
     for start, end in re.findall(
-        r"\b(?:тв|tv|season|сезон|s)[ ._-]*(\d{1,3})\s*[-–]\s*(?:(?:тв|tv|season|сезон|s)[ ._-]*)?(\d{1,3})\b",
+        r"\b(?:тв|tv|season|сезон|s)[\s._:#№-]*(\d{1,3})\s*[-–]\s*(?:(?:тв|tv|season|сезон|s)[\s._:#№-]*)?(\d{1,3})\b",
         title,
         re.I,
     ):

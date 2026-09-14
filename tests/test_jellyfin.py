@@ -10,7 +10,7 @@ from lazarr.models import Download, LibraryAsset, Media, MediaAsset, Release, Su
 from lazarr.services import CreateTask
 
 
-def playable_episode(core, media, season):
+def playable_episode(core, media, season, *, complete=True):
     config, db, _, service = core
     media.taxonomy_known = True
     media.genre_ids = [16]
@@ -41,8 +41,10 @@ def playable_episode(core, media, season):
             "episode_numbering": media.episode_numbering,
             "overview": "Описание",
             "poster": "https://image.tmdb.org/t/p/w342/example.jpg",
+            "backdrop": "https://image.tmdb.org/t/p/w1280/example-backdrop.jpg",
         }
         subtask = session.scalar(select(Subtask))
+        subtask.status = "done" if complete else "ready"
         release = Release(
             provider="demo", external_id="1", revision="1", data={"title": "Release", "url": ""}
         )
@@ -53,8 +55,17 @@ def playable_episode(core, media, season):
             release_id=release.id,
             save_path=str(root.resolve()),
             torrent_file=str(config.data_dir / "torrents" / f"{infohash}.torrent"),
-            state="seeding",
+            state="seeding" if complete else "downloading",
             plan={"infohash": infohash, "files": [], "bindings": []},
+            stats={
+                "bindings": {
+                    str(subtask.id): {
+                        "progress": 1 if complete else 0.5,
+                        "complete": complete,
+                        "buffer_ready": True,
+                    }
+                }
+            },
         )
         session.add(download)
         session.flush()
@@ -90,6 +101,13 @@ def playable_episode(core, media, season):
                         "channels": 2,
                         "tags": {"language": "ja"},
                     },
+                    {
+                        "index": 3,
+                        "codec_type": "subtitle",
+                        "codec_name": "ass",
+                        "tags": {"language": "ru", "title": "Forced"},
+                        "disposition": {"forced": 1},
+                    },
                 ],
             },
         )
@@ -99,9 +117,9 @@ def playable_episode(core, media, season):
             SubtaskAsset(
                 subtask_id=subtask.id,
                 asset_id=asset.id,
-                current=True,
-                pending=False,
-                verification={"complete": True},
+                current=complete,
+                pending=not complete,
+                verification={"complete": complete},
                 preflight={
                     "binding": {
                         "tracks": [
@@ -116,27 +134,28 @@ def playable_episode(core, media, season):
                 },
             )
         )
-        session.add(
-            LibraryAsset(
-                media_id=row.id,
-                episode_id=subtask.episode_id,
-                part_key=f"episode:{subtask.episode_id}",
-                asset_id=asset.id,
-                preflight={
-                    "binding": {
-                        "tracks": [
-                            {
-                                "kind": "subtitle",
-                                "language": "ru",
-                                "file_index": 1,
-                                "path": subtitle.name,
-                            }
-                        ]
-                    }
-                },
-                verification={"complete": True},
+        if complete:
+            session.add(
+                LibraryAsset(
+                    media_id=row.id,
+                    episode_id=subtask.episode_id,
+                    part_key=f"episode:{subtask.episode_id}",
+                    asset_id=asset.id,
+                    preflight={
+                        "binding": {
+                            "tracks": [
+                                {
+                                    "kind": "subtitle",
+                                    "language": "ru",
+                                    "file_index": 1,
+                                    "path": subtitle.name,
+                                }
+                            ]
+                        }
+                    },
+                    verification={"complete": True},
+                )
             )
-        )
     return video, subtitle
 
 
@@ -146,6 +165,53 @@ def jellyfin_login(client, username="alice", password="a-safe-password"):
     payload = response.json()
     client.headers["X-Emby-Token"] = payload["AccessToken"]
     return payload
+
+
+def test_jellyfin_lists_starting_and_downloading_episodes_without_playback(core, media, season):
+    config, db, _, service = core
+    service.create_from_metadata(
+        CreateTask(media_id="42", kind="tv", season=1, episodes=[1, 2, 3]), media, season, 1
+    )
+    with db.session() as session:
+        subtasks = list(session.scalars(select(Subtask).order_by(Subtask.id)))
+        subtasks[0].status = "starting"
+        subtasks[1].status = "downloading"
+        subtasks[2].status = "waiting_release"
+    with TestClient(create_app(config)) as client:
+        auth = jellyfin_login(client)
+        views = client.get("/UserViews", params={"userId": auth["User"]["Id"]}).json()["Items"]
+        series_view = next(item for item in views if item["Name"] == "Сериалы")
+        series = client.get("/Items", params={"ParentId": series_view["Id"]}).json()["Items"]
+        assert len(series) == 1
+        seasons = client.get(f"/Shows/{series[0]['Id']}/Seasons").json()["Items"]
+        assert [item["IndexNumber"] for item in seasons] == [1]
+        episodes = client.get(f"/Shows/{series[0]['Id']}/Episodes").json()["Items"]
+        assert [item["IndexNumber"] for item in episodes] == [1, 2]
+        assert all(item["PlayAccess"] == "None" and item["MediaSources"] == [] for item in episodes)
+        assert client.get(f"/Items/{episodes[0]['Id']}").status_code == 200
+        assert client.get(f"/Items/{episodes[0]['Id']}/PlaybackInfo").status_code == 404
+        next_up = client.get("/Shows/NextUp", params={"userId": auth["User"]["Id"]})
+        assert next_up.status_code == 200
+        assert next_up.json() == {"Items": [], "TotalRecordCount": 0, "StartIndex": 0}
+
+
+def test_jellyfin_direct_plays_buffer_ready_episode(core, media, season):
+    playable_episode(core, media, season, complete=False)
+    config, _, _, _ = core
+    with TestClient(create_app(config)) as client:
+        auth = jellyfin_login(client)
+        anime = next(
+            item
+            for item in client.get("/UserViews", params={"userId": auth["User"]["Id"]}).json()["Items"]
+            if item["Name"] == "Аниме"
+        )
+        series = client.get("/Items", params={"ParentId": anime["Id"]}).json()["Items"][0]
+        seasons = client.get(f"/Shows/{series['Id']}/Seasons").json()["Items"]
+        assert [item["IndexNumber"] for item in seasons] == [2]
+        episode = client.get(f"/Shows/{series['Id']}/Episodes").json()["Items"][0]
+        assert episode["PlayAccess"] == "Full"
+        assert len(episode["MediaSources"]) == 1
+        assert client.get(f"/Items/{episode['Id']}/PlaybackInfo").status_code == 200
 
 
 def test_jellyfin_auth_libraries_navigation_and_read_only_api(core, media, season):
@@ -161,13 +227,24 @@ def test_jellyfin_auth_libraries_navigation_and_read_only_api(core, media, seaso
         )
         auth = jellyfin_login(client)
         assert client.get("/Users/Me").json()["Id"] == auth["User"]["Id"]
+        assert client.get("/UserViews/GroupingOptions", params={"userId": auth["User"]["Id"]}).json() == []
+        assert client.get("/Plugins").json() == []
+        preferences = client.get(
+            "/DisplayPreferences/usersettings",
+            params={"userId": auth["User"]["Id"], "client": "emby"},
+        )
+        assert preferences.status_code == 200
+        assert preferences.json()["Client"] == "emby"
+        assert preferences.json()["CustomPrefs"] == {}
         views = client.get("/UserViews", params={"userId": auth["User"]["Id"]}).json()["Items"]
         assert [item["Name"] for item in views] == ["Сериалы", "Кино", "Аниме"]
         anime = next(item for item in views if item["Name"] == "Аниме")
         series = client.get("/Items", params={"ParentId": anime["Id"]}).json()["Items"]
         assert len(series) == 1 and series[0]["Type"] == "Series"
+        assert len(series[0]["BackdropImageTags"]) == 1
         seasons = client.get(f"/Shows/{series[0]['Id']}/Seasons").json()["Items"]
         assert [item["IndexNumber"] for item in seasons] == [2]
+        assert seasons[0]["ParentBackdropImageTags"] == series[0]["BackdropImageTags"]
         children = client.get(
             "/Items", params={"ParentId": seasons[0]["Id"], "IncludeItemTypes": "Episode"}
         ).json()["Items"]
@@ -191,6 +268,7 @@ def test_jellyfin_auth_libraries_navigation_and_read_only_api(core, media, seaso
         assert episodes[0]["Name"] == "Episode 1"
         assert episodes[0]["Overview"] == "Описание первой серии"
         assert episodes[0]["ImageTags"]["Primary"]
+        assert episodes[0]["ParentBackdropImageTags"] == series[0]["BackdropImageTags"]
         audio = next(stream for stream in episodes[0]["MediaStreams"] if stream["Type"] == "Audio")
         assert audio["Channels"] == 2
         assert audio["SampleRate"] == 48_000
@@ -225,18 +303,59 @@ def test_jellyfin_direct_play_range_languages_and_external_subtitles(core, media
         )
         selected_subtitle = next(s for s in streams if s["Index"] == source["DefaultSubtitleStreamIndex"])
         assert selected_subtitle["Language"] == "rus" and selected_subtitle["IsExternal"]
-        client.app.state.ctx.poster_transport = httpx.MockTransport(
-            lambda request: httpx.Response(
-                200, content=b"\xff\xd8\xffepisode", headers={"content-type": "image/jpeg"}
-            )
-        )
+        assert selected_subtitle["IsForced"] is False
+        image_requests = []
+
+        def image_transport(request):
+            image_requests.append(str(request.url))
+            name = b"backdrop" if request.url.path.endswith("example-backdrop.jpg") else b"episode"
+            return httpx.Response(200, content=b"\xff\xd8\xff" + name, headers={"content-type": "image/jpeg"})
+
+        client.app.state.ctx.poster_transport = httpx.MockTransport(image_transport)
         preview = client.get(f"/Items/{episode['Id']}/Images/Primary")
         assert preview.status_code == 200 and preview.content == b"\xff\xd8\xffepisode"
+        backdrop = client.get(f"/Items/{series['Id']}/Images/Backdrop/0")
+        assert backdrop.status_code == 200 and backdrop.content == b"\xff\xd8\xffbackdrop"
+        assert any("/t/p/w1280/example-backdrop.jpg" in value for value in image_requests)
+        assert client.get(f"/Items/{series['Id']}/Images/Backdrop/1").status_code == 404
         response = client.get(f"/Videos/{source['Id']}/stream", headers={"Range": "bytes=2-5"})
         assert response.status_code == 206 and response.content == video.read_bytes()[2:6]
         assert client.get(f"/Videos/{episode['Id']}/stream.mp4").status_code == 415
+        subtitle_format = subtitle.suffix.lstrip(".")
+        assert (
+            f"/Subtitles/{selected_subtitle['Index']}/0/Stream.{subtitle_format}"
+            in selected_subtitle["DeliveryUrl"]
+        )
         response = client.get(selected_subtitle["DeliveryUrl"])
         assert response.status_code == 200 and response.content == subtitle.read_bytes()
+        legacy = selected_subtitle["DeliveryUrl"].replace(
+            f"/{selected_subtitle['Index']}/0/", f"/{selected_subtitle['Index']}/"
+        )
+        assert client.get(legacy).content == subtitle.read_bytes()
+
+
+def test_jellyfin_can_keep_forced_subtitle_priority(core, media, season):
+    playable_episode(core, media, season)
+    config, _, _, service = core
+    settings = service.settings()
+    settings.prefer_full_subtitles = False
+    service.set_settings(settings, 1)
+    with TestClient(create_app(config)) as client:
+        auth = jellyfin_login(client)
+        anime = next(
+            item
+            for item in client.get("/UserViews", params={"userId": auth["User"]["Id"]}).json()["Items"]
+            if item["Name"] == "Аниме"
+        )
+        series = client.get("/Items", params={"ParentId": anime["Id"]}).json()["Items"][0]
+        episode = client.get(f"/Shows/{series['Id']}/Episodes").json()["Items"][0]
+        source = client.post(f"/Items/{episode['Id']}/PlaybackInfo", json={}).json()["MediaSources"][0]
+        selected = next(
+            stream
+            for stream in source["MediaStreams"]
+            if stream["Index"] == source["DefaultSubtitleStreamIndex"]
+        )
+        assert selected["Language"] == "rus" and selected["IsForced"] is True
 
 
 async def test_jellyfin_keeps_verified_episode_after_task_is_deleted(core, media, season):

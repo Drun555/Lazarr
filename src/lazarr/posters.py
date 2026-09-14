@@ -5,7 +5,7 @@ import os
 import re
 import tempfile
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 import httpx
 from lazarr.sdk import ProviderError
 
@@ -18,9 +18,11 @@ def poster_url(value):
     return value
 
 
-async def fetch_poster(ctx, filename):
+async def fetch_poster(ctx, filename, size=None):
     if not re.fullmatch(r"[A-Za-z0-9_-]+\.(?:jpg|png|webp)", filename):
         raise ValueError("Некорректное имя обложки")
+    if size not in {None, "w1280"}:
+        raise ValueError("Некорректный размер обложки")
     # Read configuration without requiring API credentials or an enabled search provider.
     from lazarr.models import ProviderConfig
 
@@ -36,6 +38,10 @@ async def fetch_poster(ctx, filename):
         or parsed.fragment
     ):
         raise ValueError("Некорректный URL изображений TMDB")
+    if size:
+        sized_path = re.sub(r"/(?:original|w\d+)$", f"/{size}", parsed.path.rstrip("/"))
+        parsed = parsed._replace(path=sized_path)
+        base = urlunparse(parsed)
     url = base.rstrip("/") + "/" + filename
     cache = (
         ctx.config.data_dir / "posters" / (hashlib.sha256(url.encode()).hexdigest() + Path(filename).suffix)

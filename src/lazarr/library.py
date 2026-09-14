@@ -42,7 +42,7 @@ class LibraryService:
                 pending = [
                     (m.id, m.provider, m.kind, m.external_id)
                     for m in db.scalars(select(Media))
-                    if not m.metadata_json.get("taxonomy_known")
+                    if not m.metadata_json.get("taxonomy_known") or "backdrop" not in m.metadata_json
                 ]
             for identity, provider_id, kind, external_id in pending:
                 if provider_id not in self.plugins.available("metadata"):
@@ -50,23 +50,24 @@ class LibraryService:
                 try:
                     async with self.plugins.open(provider_id) as provider:
                         item = await provider.get_media(kind, external_id)
-                    if item.taxonomy_known:
-                        with self.db.session() as db:
-                            row = db.get(Media, identity)
-                            if row:
-                                row.metadata_json = {
-                                    **row.metadata_json,
-                                    **{
-                                        k: getattr(item, k)
-                                        for k in (
-                                            "genre_ids",
-                                            "genres",
-                                            "origin_countries",
-                                            "original_language",
-                                            "taxonomy_known",
-                                        )
-                                    },
-                                }
+                    with self.db.session() as db:
+                        row = db.get(Media, identity)
+                        if row:
+                            fields = ["backdrop"]
+                            if item.taxonomy_known:
+                                fields.extend(
+                                    [
+                                        "genre_ids",
+                                        "genres",
+                                        "origin_countries",
+                                        "original_language",
+                                        "taxonomy_known",
+                                    ]
+                                )
+                            row.metadata_json = {
+                                **row.metadata_json,
+                                **{field: getattr(item, field) for field in fields},
+                            }
                 except Exception:
                     # Existing local library remains usable when metadata is offline.
                     continue
@@ -112,11 +113,16 @@ class LibraryService:
                     )
                 }
                 if downloads:
-                    values = [min(1.0, max(0.0, float((d.stats or {}).get("progress", 0)))) for d in downloads.values()]
+                    values = [
+                        min(1.0, max(0.0, float((d.stats or {}).get("progress", 0))))
+                        for d in downloads.values()
+                    ]
                     summaries[media.id] = {
                         "state": "downloading",
                         "progress": sum(values) / len(values),
-                        "download_rate": sum((d.stats or {}).get("download_rate", 0) or 0 for d in downloads.values()),
+                        "download_rate": sum(
+                            (d.stats or {}).get("download_rate", 0) or 0 for d in downloads.values()
+                        ),
                     }
             return [
                 {
@@ -195,7 +201,10 @@ class LibraryService:
                     else {"season": canonical, "episode": episode.number if episode else None}
                 )
                 date = episode.air_date if episode else media.metadata_json.get("release_date")
-                files = {version["id"]: version for version in stored_versions.get(episode.id if episode else None, [])}
+                files = {
+                    version["id"]: version
+                    for version in stored_versions.get(episode.id if episode else None, [])
+                }
                 for sub in related:
                     for version in task_versions.get(sub.id, []):
                         old = files.get(version["id"])
@@ -240,6 +249,7 @@ class LibraryService:
             return {
                 **self.tile(media),
                 "metadata": media.metadata_json,
+                "seasons": media.metadata_json.get("seasons", []),
                 "episodes": parts,
                 "last_search_at": max((s.last_search_at or 0 for s in subs), default=0) or None,
                 "task_count": len(tasks),
@@ -340,5 +350,7 @@ class LibraryService:
         active = [file["download"] for file in files if file.get("download")]
         if not active:
             return None
-        current = next((item for item in active if item["state"] in {"starting", "downloading", "paused"}), active[0])
+        current = next(
+            (item for item in active if item["state"] in {"starting", "downloading", "paused"}), active[0]
+        )
         return current

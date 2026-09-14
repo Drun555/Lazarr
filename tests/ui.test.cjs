@@ -28,7 +28,7 @@ async function setup(){
   w.fetch=async(url,options={})=>{
     const payload=options.body?JSON.parse(options.body):undefined;calls.push({url,method:options.method,payload});
     let result;
-    if(url==='/api/v1/settings')result={defaults,movie_path:'/tmp/movies',series_path:'/tmp/series',search_start:'00:00',seed_ratio:1,plugin_repository:''};
+    if(url==='/api/v1/settings')result={defaults,prefer_full_subtitles:true,movie_path:'/tmp/movies',series_path:'/tmp/series',search_start:'00:00',seed_ratio:1,plugin_repository:''};
     else if(url==='/api/v1/status')result=status();
     else if(url==='/api/v1/providers/order'){
       providers.sort((a,b)=>payload.ids.indexOf(a.id)-payload.ids.indexOf(b.id));result={ok:true};
@@ -80,6 +80,21 @@ test('language autocomplete pills, aliases, keyboard, removal, and no duplicates
     assert.equal(picker.querySelectorAll('.language-pill').length,2);
     key(w,query,'Backspace');assert.equal(picker.querySelectorAll('.language-pill').length,1);
     key(w,query,'Escape');assert.equal(query.getAttribute('aria-expanded'),'false');
+    assert.deepEqual(errors,[]);
+  }finally{dom.window.close();}
+});
+
+test('full subtitles preference loads and saves as a checkbox',async()=>{
+  const {dom,w,document:d,calls,errors}=await setup();
+  try{
+    d.querySelector('[data-tab=settings]').click();await settle();await settle();
+    const preference=d.querySelector('[name=prefer_full_subtitles]');
+    assert.equal(preference.checked,true);
+    preference.checked=false;
+    d.querySelector('#settings-form').dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}));
+    await settle();await settle();
+    const saved=calls.find(c=>c.url==='/api/v1/settings'&&c.method==='PUT');
+    assert.equal(saved.payload.prefer_full_subtitles,false);
     assert.deepEqual(errors,[]);
   }finally{dom.window.close();}
 });
@@ -202,7 +217,7 @@ test('libraries switch categories, show details and delete media',async()=>{
     const detail=d.querySelector('#library-detail-body').textContent;
     assert.match(detail,/Описание серии/);assert.match(detail,/Календарь выхода/);assert.match(detail,/14\. Пари/);
     assert.equal(d.querySelectorAll('.library-season').length,2);assert.match(d.querySelector('.library-season').textContent,/Сезон 1/);
-    assert.equal(d.querySelector('.library-season').open,true);assert.ok(d.querySelector('.episode-still-empty'));
+    assert.equal(d.querySelector('[data-season="2"]').open,true);assert.ok(d.querySelector('[data-season="1"]').classList.contains('is-disabled'));assert.ok(d.querySelector('.episode-still-empty'));
     assert.match(detail,/1080p/);assert.match(detail,/Японский/);assert.match(detail,/Selected release/);assert.match(detail,/Предварительные сведения/);
     assert.equal(d.querySelector('.episode-still').getAttribute('src'),'/api/v1/posters/tmdb/still.jpg');
     assert.equal(d.querySelector('.episode-download .progress').getAttribute('aria-valuenow'),'42.0');
@@ -216,6 +231,26 @@ test('libraries switch categories, show details and delete media',async()=>{
     assert.deepEqual(removed.payload,{delete_files:false});
     assert.equal(d.querySelector('#library-overview').hidden,false);
     assert.equal(d.querySelector('[data-library-media="2"]'),null);
+    assert.deepEqual(errors,[]);
+  }finally{dom.window.close();}
+});
+
+test('missing library seasons stay disabled and open a prefilled task form',async()=>{
+  const {dom,document:d,errors,setTasks,setLibrary}=await setup();
+  try{
+    setTasks([{id:7,media_id:2,title:'Show',season:1,canonical_season:1,subtasks:[],requirements:{audio_languages:['ru'],subtitle_languages:[],min_resolution:720,max_resolution:1080},paused:false}]);
+    const metadata={provider:'tmdb',id:'42',kind:'tv',title:'Show',year:2020,overview:'Описание',genres:[],seasons:[{number:1,title:'Сезон 1',episode_count:8},{number:2,title:'Сезон 2',episode_count:10},{number:3,title:'Сезон 3',episode_count:6}],episode_numbering:{}};
+    setLibrary([{id:'series',name:'Сериалы',items:[{id:2,title:'Show',year:2020,taxonomy_known:true}]},{id:'movies',name:'Кино',items:[]},{id:'anime',name:'Аниме',items:[]}],{id:2,title:'Show',kind:'tv',year:2020,metadata,seasons:metadata.seasons,task_count:1,last_search_at:1,episodes:[{id:1,season:1,episode:1,title:'Первая',air_date:'2020-01-01',released:true,statuses:['queued'],subtasks:[{id:1,task_id:7,status:'queued'}],files:[]}]});
+    d.querySelector('[data-tab=library]').click();await settle();await settle();
+    d.querySelector('[data-library-media="2"]').click();await settle();await settle();
+    assert.equal(d.querySelectorAll('.library-season').length,3);
+    assert.equal(d.querySelectorAll('.library-season.is-disabled').length,2);
+    assert.equal(d.querySelector('[data-season="2"]').open,false);
+    d.querySelector('[data-download-season="3"]').click();await settle();await settle();
+    assert.equal(d.querySelector('#tab-search').hidden,false);
+    assert.equal(d.querySelector('#selection').hidden,false);
+    assert.equal(d.querySelector('#selection-title').textContent,'Show · 2020');
+    assert.equal(d.querySelector('#season-select').value,'3');
     assert.deepEqual(errors,[]);
   }finally{dom.window.close();}
 });

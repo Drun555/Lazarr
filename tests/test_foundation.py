@@ -102,6 +102,7 @@ def test_settings_validate_timezone_and_container_paths(monkeypatch):
     monkeypatch.setenv("LAZARR_SERIES_PATH", "/downloads/series")
     assert Settings().movie_path == "/downloads/movies"
     assert Settings().series_path == "/downloads/series"
+    assert Settings().prefer_full_subtitles is True
     monkeypatch.setenv("TZ", "Europe/Saratov")
     assert str(Settings().timezone) == "Europe/Saratov"
     assert "timezone" not in Settings().model_dump()
