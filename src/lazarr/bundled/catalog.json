@@ -26,6 +26,14 @@
       "sha256": "913f49af78807b53ccdeab6d4c17091e053bb5e81806d368e84e38e4d142a548"
     },
     {
+      "id": "kinozal",
+      "kind": "content",
+      "version": "1.0.0",
+      "sdk": ">=1.3,<2",
+      "url": "https://example.invalid/lazarr/providers/kinozal.py",
+      "sha256": "2f6d7b3c76855c16c33facd050b4abedecc357f2a4e3b5367f63e5e13a86fe03"
+    },
+    {
       "id": "podnapisi",
       "kind": "subtitle",
       "version": "1.0.1",

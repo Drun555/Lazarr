@@ -4,12 +4,21 @@ import re
 
 
 def title_seasons(title):
+    reverse = r"\b(\d{1,3})(?:\s*[-–]\s*(\d{1,3}))?\s+сезон(?:а|ы|ов)?\b"
+    seasons = set()
+    for start, end in re.findall(reverse, title, re.I):
+        end = end or start
+        if int(end) < int(start) or int(end) - int(start) > 100:
+            return set()
+        seasons.update(range(int(start), int(end) + 1))
+    # In '2 сезон: 1-8 серии', the digits after ':' are episodes, not seasons.
+    title = re.sub(reverse, " ", title, flags=re.I)
     patterns = [
         r"\b(?:тв|tv|season|сезон)[\s._:#№-]*(\d{1,3})\b",
         r"\b(\d{1,3})(?:st|nd|rd|th)[ ._-]+season\b",
         r"\bs(\d{1,3})(?:e\d+|\b)",
     ]
-    seasons = {int(n) for pattern in patterns for n in re.findall(pattern, title, re.I)}
+    seasons.update(int(n) for pattern in patterns for n in re.findall(pattern, title, re.I))
     for start, end in re.findall(
         r"\b(?:тв|tv|season|сезон|s)[\s._:#№-]*(\d{1,3})\s*[-–]\s*(?:(?:тв|tv|season|сезон|s)[\s._:#№-]*)?(\d{1,3})\b",
         title,
@@ -19,6 +28,24 @@ def title_seasons(title):
             return set()
         seasons.update(range(int(start), int(end) + 1))
     return seasons
+
+
+def title_episode_coverage(title):
+    """Kinozal's '1 сезон: 1-3 серии из 8': 8 is the total, not available coverage."""
+    seasons = title_seasons(title)
+    if len(seasons) != 1:
+        return None, set()
+    match = re.search(
+        r"\b\d{1,3}\s+сезон\s*:\s*(\d{1,4})(?:\s*[-–]\s*(\d{1,4}))?\s+сер(?:ия|ии|ий)\b",
+        title,
+        re.I,
+    )
+    if not match:
+        return None, set()
+    start, end = int(match[1]), int(match[2] or match[1])
+    if end < start or end - start > 1000:
+        return None, set()
+    return next(iter(seasons)), set(range(start, end + 1))
 
 
 def request_seasons(request):
@@ -49,6 +76,8 @@ def reject_reason(candidate, requests, *, detailed=False):
     explicit_season, explicit_episodes, _ = (
         episode_numbers(title + ".mkv") if re.search(r"\bS\d+E\d+", title, re.I) else (None, set(), False)
     )
+    if explicit_season is None:
+        explicit_season, explicit_episodes = title_episode_coverage(title)
     complete_audio = {
         frozenset(e.value)
         for e in candidate.evidence

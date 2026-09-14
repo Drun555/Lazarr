@@ -170,8 +170,12 @@ def test_content_order_persists_and_validates_enabled_providers(core):
     restarted = PluginManager(db, config, manager.secrets)
     restarted.bootstrap()
     assert restarted.available("content") == ["rutracker", "nyaa"]
-    assert [p["id"] for p in restarted.search_status()] == ["rutracker", "nyaa"]
-    assert [p["id"] for p in restarted.describe() if p.get("kind") == "content"] == ["rutracker", "nyaa"]
+    assert [p["id"] for p in restarted.search_status()] == ["rutracker", "nyaa", "kinozal"]
+    assert [p["id"] for p in restarted.describe() if p.get("kind") == "content"] == [
+        "rutracker",
+        "nyaa",
+        "kinozal",
+    ]
     for ids in [["nyaa"], ["nyaa", "nyaa"], ["tmdb", "nyaa"], ["unknown", "nyaa"]]:
         with pytest.raises(ValueError):
             restarted.set_content_order(ids)

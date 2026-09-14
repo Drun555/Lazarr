@@ -15,6 +15,7 @@ for name, kind in [
     ("tmdb", "metadata"),
     ("nyaa", "content"),
     ("rutracker", "content"),
+    ("kinozal", "content"),
     ("podnapisi", "subtitle"),
     ("opensubtitles", "subtitle"),
 ]:

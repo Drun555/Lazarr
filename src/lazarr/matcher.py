@@ -142,7 +142,7 @@ class Matcher:
                     tail = segment[len(name) :].strip()
                     # A sequel or a longer title must not match merely by containing an alias.
                     if re.match(
-                        r"(?:(?:19|20)\d{2}|s\d+|season\b|сезон\b|тв\b|tv\b|\d+(?:st|nd|rd|th) season\b|\d{3,4}[pi]\b|4k\b)",
+                        r"(?:(?:19|20)\d{2}|s\d+|season\b|сезон\b|тв\b|tv\b|\d+(?:st|nd|rd|th) season\b|\d+(?: \d+)? сезон(?:а|ы|ов)?\b|\d{3,4}[pi]\b|4k\b)",
                         tail,
                     ):
                         found = True
