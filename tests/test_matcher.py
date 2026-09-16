@@ -57,6 +57,39 @@ def test_all_episode_subtitles_are_bound_and_title_assigns_unknown_language(medi
     assert result.binding.missing_subtitle_languages == []
 
 
+def test_subtitle_path_marks_forced_and_size_identifies_full_track(media):
+    paths = [
+        TorrentFile(index=0, path="Show/Show.S01E01.1080p.mkv", size=1_000_000, offset=0),
+        TorrentFile(
+            index=1,
+            path="Show/RUS Subs/Crunchyroll/Show.S01E01.ass",
+            size=36_000,
+            offset=1_000_000,
+        ),
+        TorrentFile(
+            index=2,
+            path="Show/RUS Subs/Crunchyroll/Надписи/Show.S01E01.ass",
+            size=4_000,
+            offset=1_036_000,
+        ),
+    ]
+    result = (
+        Matcher()
+        .evaluate(
+            candidate(evidence=[audio_claim(paths[0].path)]),
+            [request(media, subtitle_languages=["ru"])],
+            paths,
+        )
+        .evaluations[0]
+    )
+
+    subtitles = {track.file_index: track for track in result.binding.tracks if track.kind == "subtitle"}
+    assert subtitles[2].forced is True
+    assert subtitles[2].title == "Форсированные"
+    assert subtitles[1].forced is False
+    assert subtitles[1].title == "Полные"
+
+
 def test_unknown_unrequested_subtitle_is_still_bound(media):
     paths = files("Show.S01E01.1080p.mkv", "Show.S01E01.srt")
     result = (
@@ -147,6 +180,25 @@ def test_episode_parser():
     assert episode_numbers("Season 2/Show E03.mkv") == (2, {3}, False)
     assert episode_numbers("Show.2x03.mkv") == (2, {3}, False)
     assert episode_numbers("Show.S01E03-E01.mkv") == (None, set(), False)
+    assert episode_numbers("Show [TV-3]/Show S3 - 01 (1080p).mkv") == (3, {1}, False)
+    assert episode_numbers("Show TV-3 - 01.mkv") == (3, {1}, False)
+    assert episode_numbers("Show S3 - 1.mkv") == (3, {1}, False)
+    assert episode_numbers("Show III/Show - 01.mkv", season_hint=3) == (3, {1}, False)
+    assert episode_numbers("Show III/Show - 1.mkv", season_hint=3) == (None, {1}, True)
+    assert episode_numbers("Show III/Show - 101.mkv", season_hint=3) == (None, {101}, True)
+
+
+def test_release_season_fills_two_digit_episode_filename(media):
+    paths = files("[Group] Example Show III - 01.mkv", "[Group] Example Show III - 02.mkv")
+    item = candidate(
+        title="Example Show (TV-3) [01-02] 1080p",
+        evidence=[audio_claim(path.path) for path in paths],
+    )
+    requests = [request(media, 1, 1), request(media, 2, 2)]
+    for subtask in requests:
+        subtask.season = 3
+    report = Matcher().evaluate(item, requests, paths)
+    assert [result.binding.video_index for result in report.evaluations] == [0, 1]
 
 
 def test_longer_title_and_sequel_are_not_same_identity(media):

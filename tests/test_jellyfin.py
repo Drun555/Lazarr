@@ -12,7 +12,7 @@ from lazarr.models import Download, LibraryAsset, Media, MediaAsset, Release, Su
 from lazarr.services import CreateTask
 
 
-def playable_episode(core, media, season, *, complete=True):
+def playable_episode(core, media, season, *, complete=True, external_forced=False, external_title=None):
     config, db, _, service = core
     media.taxonomy_known = True
     media.genre_ids = [16]
@@ -130,6 +130,8 @@ def playable_episode(core, media, season, *, complete=True):
                                 "language": "ru",
                                 "file_index": 1,
                                 "path": subtitle.name,
+                                "forced": external_forced,
+                                "title": external_title,
                             }
                         ]
                     }
@@ -151,6 +153,8 @@ def playable_episode(core, media, season, *, complete=True):
                                     "language": "ru",
                                     "file_index": 1,
                                     "path": subtitle.name,
+                                    "forced": external_forced,
+                                    "title": external_title,
                                 }
                             ]
                         }
@@ -382,7 +386,6 @@ def test_jellyfin_direct_play_range_languages_and_external_subtitles(core, media
             f"/{selected_subtitle['Index']}/0/", f"/{selected_subtitle['Index']}/"
         )
         assert client.get(legacy).content == "Привет, Swiftfin!\r\n".encode()
-
         configuration = dict(auth["User"]["Configuration"])
         configuration.update(
             {
@@ -461,6 +464,53 @@ def test_jellyfin_direct_play_range_languages_and_external_subtitles(core, media
         ).json()["MediaSources"][0]
         assert query_selected["DefaultAudioStreamIndex"] == russian_audio["Index"]
         assert query_selected["DefaultSubtitleStreamIndex"] == russian_subtitle["Index"]
+
+
+def test_jellyfin_exposes_external_forced_subtitle_metadata(core, media, season):
+    _, subtitle = playable_episode(
+        core,
+        media,
+        season,
+        external_forced=True,
+        external_title="Форсированные",
+    )
+    config, _, _, _ = core
+    with TestClient(create_app(config)) as client:
+        auth = jellyfin_login(client)
+        client.headers["Authorization"] = (
+            f'MediaBrowser Token="{auth["AccessToken"]}", Client="Fladder", Version="1"'
+        )
+        anime = next(
+            item
+            for item in client.get("/UserViews", params={"userId": auth["User"]["Id"]}).json()["Items"]
+            if item["Name"] == "Аниме"
+        )
+        series = client.get("/Items", params={"ParentId": anime["Id"]}).json()["Items"][0]
+        episode = client.get(f"/Shows/{series['Id']}/Episodes", params={"Season": 2}).json()["Items"][0]
+        streams = client.post(f"/Items/{episode['Id']}/PlaybackInfo", json={}).json()["MediaSources"][0][
+            "MediaStreams"
+        ]
+        external = next(stream for stream in streams if stream["IsExternal"])
+        assert external["IsForced"] is True
+        assert external["Title"] == "Форсированные"
+        assert "Форсированные" in external["DisplayTitle"]
+        assert external["Codec"] == "srt"
+        assert "/Stream.srt?" in external["DeliveryUrl"]
+        subtitle.write_text(
+            "[Script Info]\nScriptType: v4.00+\n\n[V4+ Styles]\n"
+            "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, "
+            "BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, "
+            "BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
+            "Style: Default,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,"
+            "100,100,0,0,1,2,0,2,10,10,10,1\n\n[Events]\n"
+            "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+            "Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,Привет\n",
+            encoding="utf-8",
+        )
+        converted = client.get(external["DeliveryUrl"])
+        assert converted.status_code == 200
+        assert b"00:00:01,000 --> 00:00:02,000" in converted.content
+        assert "Привет" in converted.text
 
 
 def test_jellyfin_can_keep_forced_subtitle_priority(core, media, season):

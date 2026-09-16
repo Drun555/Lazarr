@@ -184,6 +184,8 @@ class TrackBinding(BaseModel):
     file_index: int | None = None
     path: str | None = None
     embedded: bool = False
+    title: str | None = None
+    forced: bool = False
 
 
 class FileBinding(BaseModel):

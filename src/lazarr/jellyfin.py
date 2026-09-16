@@ -5,8 +5,10 @@ import hashlib
 import json
 import mimetypes
 import re
+import subprocess
 import time
 import uuid
+from functools import lru_cache
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -16,6 +18,7 @@ from sqlalchemy import select, delete
 
 from lazarr.library import LIBRARIES, library_kind
 from lazarr.languages import CODES, language, language_name
+from lazarr.matcher import classify_external_subtitles
 from lazarr.models import (
     Download,
     Episode,
@@ -41,6 +44,25 @@ KINDS = {"media": 1, "season": 2, "episode": 3, "asset": 4, "user": 5}
 KIND_NAMES = {value: key for key, value in KINDS.items()}
 LIBRARY_COLLECTIONS = {"series": "tvshows", "movies": "movies", "anime": "tvshows"}
 VISIBLE_DOWNLOAD_STATES = {"starting", "downloading", "ready"}
+
+
+def is_fladder(request):
+    header = request.headers.get("Authorization") or request.headers.get("X-Emby-Authorization", "")
+    return bool(re.search(r'\bClient=["\']?Fladder(?:["\',\s]|$)', header, re.I))
+
+
+@lru_cache(maxsize=128)
+def converted_subtitle(path_value, modified_ns, output_format):
+    del modified_ns
+    result = subprocess.run(
+        ["ffmpeg", "-v", "error", "-i", path_value, "-f", output_format, "pipe:1"],
+        check=False,
+        capture_output=True,
+        timeout=15,
+    )
+    if result.returncode:
+        raise RuntimeError(result.stderr.decode("utf-8", errors="replace").strip())
+    return result.stdout
 
 
 def object_id(kind, identity, secondary=0):
@@ -449,7 +471,15 @@ def selected_stream(streams, stream_type, selector):
     return candidates[ordinal] if isinstance(ordinal, int) and 0 <= ordinal < len(candidates) else None
 
 
-def media_streams(ctx, playable, item_id, media_source_id, user=None, play_session_id=None):
+def media_streams(
+    ctx,
+    playable,
+    item_id,
+    media_source_id,
+    user=None,
+    play_session_id=None,
+    subtitle_compatibility=False,
+):
     asset, link, download = playable["asset"], playable["link"], playable["download"]
     settings = ctx.service.settings()
     defaults = settings.defaults
@@ -498,6 +528,9 @@ def media_streams(ctx, playable, item_id, media_source_id, user=None, play_sessi
         internal_streams.append(entry)
     external_tracks = list((link.preflight.get("binding") or {}).get("tracks", []))
     external_tracks.extend(asset.tracks or [])
+    external_tracks = classify_external_subtitles(
+        [dict(track) for track in external_tracks], download.plan.get("files", [])
+    )
     seen_external = set()
     external_streams = []
     for track in external_tracks:
@@ -513,7 +546,8 @@ def media_streams(ctx, playable, item_id, media_source_id, user=None, play_sessi
         path = playable_path(download, relative)
         if not path:
             continue
-        suffix = path.suffix.lower().lstrip(".")
+        source_suffix = path.suffix.lower().lstrip(".")
+        suffix = "srt" if subtitle_compatibility and source_suffix in {"ass", "ssa"} else source_suffix
         entry = {
             "Codec": suffix,
             "Language": jellyfin_language(track.get("language", "und")),
@@ -523,7 +557,7 @@ def media_streams(ctx, playable, item_id, media_source_id, user=None, play_sessi
             "Index": len(external_streams),
             "IsExternal": True,
             "IsDefault": False,
-            "IsForced": False,
+            "IsForced": bool(track.get("forced")),
             "Path": str(path),
         }
         entry.update(
@@ -544,7 +578,7 @@ def media_streams(ctx, playable, item_id, media_source_id, user=None, play_sessi
         stream["Index"] += external_count
     for stream in external_streams:
         index = stream["Index"]
-        suffix = Path(stream["Path"]).suffix.lower().lstrip(".")
+        suffix = stream["Codec"]
         delivery_url = f"/Videos/{item_id}/{media_source_id}/Subtitles/{index}/0/Stream.{suffix}"
         if play_session_id:
             delivery_url += f"?playSessionId={play_session_id}"
@@ -582,14 +616,14 @@ def media_streams(ctx, playable, item_id, media_source_id, user=None, play_sessi
     )
 
 
-def media_source(ctx, playable, item_id, user=None, play_session_id=None):
+def media_source(ctx, playable, item_id, user=None, play_session_id=None, subtitle_compatibility=False):
     asset, path = playable["asset"], playable["path"]
     # Fladder requests /Videos/{MediaSource.Id}/stream. Keeping the source id
     # equal to the public item id makes that URL resolve without exposing a
     # filesystem path or requiring the client to know Lazarr's asset ids.
     source_id = item_id
     streams, audio_index, subtitle_index = media_streams(
-        ctx, playable, item_id, source_id, user, play_session_id
+        ctx, playable, item_id, source_id, user, play_session_id, subtitle_compatibility
     )
     remembered = playback_selection(ctx, user, item_id)
     if "audio" in remembered:
@@ -1268,7 +1302,16 @@ def install_jellyfin_api(app, context):
         play_session_id = uuid.uuid4().hex
         play_sessions[play_session_id] = (item_id, time.time() + 6 * 60 * 60)
         return {
-            "MediaSources": [media_source(context(request), playable, item_id, user, play_session_id)],
+            "MediaSources": [
+                media_source(
+                    context(request),
+                    playable,
+                    item_id,
+                    user,
+                    play_session_id,
+                    subtitle_compatibility=is_fladder(request),
+                )
+            ],
             "PlaySessionId": play_session_id,
         }
 
@@ -1396,7 +1439,17 @@ def install_jellyfin_api(app, context):
             None,
         )
         path = Path(stream["Path"]) if stream else None
-        if not path or subtitle_format.casefold() != path.suffix.lstrip(".").casefold():
+        if not path:
+            raise HTTPException(404, "Subtitle not found")
+        requested_format = subtitle_format.casefold()
+        source_format = path.suffix.lstrip(".").casefold()
+        if requested_format != source_format:
+            if source_format in {"ass", "ssa"} and requested_format == "srt":
+                try:
+                    content = converted_subtitle(str(path), path.stat().st_mtime_ns, "srt")
+                except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+                    raise HTTPException(500, "Subtitle conversion failed") from exc
+                return Response(content=content, media_type="text/plain; charset=utf-8")
             raise HTTPException(415, "Subtitle conversion is disabled")
         if path.suffix.casefold() in {".srt", ".ass", ".ssa", ".vtt"}:
             raw = path.read_bytes()

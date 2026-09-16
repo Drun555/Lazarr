@@ -608,7 +608,13 @@ class Worker:
             evaluation = report.evaluations[0]
             binding = evaluation.binding
             if video_index is not None:
-                from lazarr.matcher import playable_video, AUDIO, SUBTITLE, file_language
+                from lazarr.matcher import (
+                    AUDIO,
+                    SUBTITLE,
+                    classify_external_subtitles,
+                    file_language,
+                    playable_video,
+                )
                 from lazarr.sdk import TrackBinding
 
                 video = next(
@@ -629,6 +635,7 @@ class Worker:
                             path=file.path,
                         )
                     )
+                classify_external_subtitles(tracks, metadata.files)
                 binding = FileBinding(
                     subtask_id=request.id,
                     video_index=video.index,

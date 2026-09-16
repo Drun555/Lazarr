@@ -23,6 +23,19 @@ VIDEO = {".mkv", ".mp4", ".avi", ".m4v", ".ts", ".m2ts", ".webm", ".mov", ".mpg"
 AUDIO = {".mka", ".ac3", ".eac3", ".aac", ".flac", ".dts", ".mp3", ".ogg", ".wav", ".m4a"}
 SUBTITLE = {".srt", ".ass", ".ssa", ".vtt", ".sub", ".idx", ".sup"}
 
+FORCED_SUBTITLE_MARKERS = {
+    "forced",
+    "force",
+    "форсированные",
+    "форсированная",
+    "форс",
+    "надписи",
+    "надпись",
+    "signs",
+    "sign",
+}
+FULL_SUBTITLE_MARKERS = {"full", "полные", "полная"}
+
 
 def normalized(value):
     return re.sub(r"[^\w]+", " ", unicodedata.normalize("NFKC", value).casefold()).strip()
@@ -35,7 +48,7 @@ def resolution(value):
     return next(iter(hits)) if len(hits) == 1 else None
 
 
-def episode_numbers(path, aliases=()):
+def episode_numbers(path, aliases=(), season_hint=None):
     """Return (season, numbers, absolute). Never guess season offsets for anime."""
     name = PurePosixPath(path).stem
     matches = list(
@@ -53,11 +66,14 @@ def episode_numbers(path, aliases=()):
     match = re.search(r"(?<!\d)(\d{1,2})x(\d{1,3})(?!\d)", name, re.I)
     if match:
         return int(match[1]), {int(match[2])}, False
-    parent = re.search(r"(?:season|сезон|s)[ ._-]*(\d{1,3})\b", str(PurePosixPath(path).parent), re.I)
+    parent = re.search(r"\b(?:season|сезон|tv|тв|s)[ ._-]*(\d{1,3})\b", str(PurePosixPath(path).parent), re.I)
     number = re.search(r"(?:episode|эпизод|серия|ep|e)[ ._-]*(\d{1,4})(?!\d)", name, re.I)
     if parent and number:
         return int(parent[1]), {int(number[1])}, False
     cleaned = re.sub(r"\[[^]]*\]|\([^)]*\)", " ", name)
+    short = re.search(r"\b(?:s|tv|тв)[ ._-]*(\d{1,3})[ ._-]+(\d{1,4})\s*$", cleaned, re.I)
+    if short:
+        return int(short[1]), {int(short[2])}, False
     # Anime filenames may state "2nd Season - Part 2 - 14". Part is not
     # an episode offset: only bind the literal season and trailing episode.
     seasons = {
@@ -86,7 +102,14 @@ def episode_numbers(path, aliases=()):
     values = re.findall(r"(?:^|[ ._-])(\d{1,3})(?:v\d)?(?=$|[ ._-])", cleaned)
     values = {int(v) for v in values if int(v) not in {264, 265, 480, 576, 720}}
     if len(values) == 1:
-        return (int(parent[1]) if parent else None), values, not bool(parent)
+        inferred_season = int(parent[1]) if parent else None
+        if (
+            inferred_season is None
+            and season_hint is not None
+            and re.search(r"(?:^|[ ._-])\d{2}\s*$", cleaned)
+        ):
+            inferred_season = season_hint
+        return inferred_season, values, inferred_season is None
     return None, set(), False
 
 
@@ -106,6 +129,54 @@ def stem_key(path):
         if language(v) == "und" and v not in {"audio", "subs", "subtitles", "forced", "sdh"}
     ]
     return " ".join(tokens)
+
+
+def classify_external_subtitles(tracks, files):
+    """Add forced/full metadata when the torrent layout provides reliable evidence."""
+
+    def value(item, key, default=None):
+        return item.get(key, default) if isinstance(item, dict) else getattr(item, key, default)
+
+    def assign(item, key, new_value):
+        if isinstance(item, dict):
+            item[key] = new_value
+        else:
+            setattr(item, key, new_value)
+
+    sizes = {value(file, "index"): value(file, "size", 0) for file in files}
+    groups = {}
+    for track in tracks:
+        kind = value(track, "kind")
+        file_index = value(track, "file_index")
+        path = value(track, "path")
+        if kind != "subtitle" or file_index is None or not path:
+            continue
+        tokens = set(normalized(path).split())
+        role = (
+            "forced"
+            if tokens & FORCED_SUBTITLE_MARKERS
+            else "full"
+            if tokens & FULL_SUBTITLE_MARKERS
+            else None
+        )
+        if role == "forced":
+            assign(track, "forced", True)
+            assign(track, "title", "Форсированные")
+        elif role == "full":
+            assign(track, "title", "Полные")
+        groups.setdefault(value(track, "language", "und"), []).append((track, role, sizes.get(file_index, 0)))
+
+    # Size is only supporting evidence: infer a full track when the same-language
+    # group already contains an explicitly named forced/signs track.
+    for items in groups.values():
+        forced_sizes = [size for _, role, size in items if role == "forced" and size > 0]
+        if not forced_sizes:
+            continue
+        largest_forced = max(forced_sizes)
+        for track, role, size in items:
+            if role is None and size >= largest_forced * 2:
+                assign(track, "title", "Полные")
+    return tracks
 
 
 def playable_video(file):
@@ -182,11 +253,13 @@ class Matcher:
             reason="Название совпало, но год или ID не подтверждены",
         )
 
-    def _video_matches(self, file, request):
+    def _video_matches(self, file, request, season_hint=None):
         if request.media.kind == "movie":
             return True
         season, numbers, absolute = episode_numbers(
-            file.path, [request.media.title, request.media.original_title, *request.media.aliases]
+            file.path,
+            [request.media.title, request.media.original_title, *request.media.aliases],
+            season_hint,
         )
         if absolute:
             return request.absolute_number is not None and request.absolute_number in numbers
@@ -219,14 +292,19 @@ class Matcher:
         title_evidence = title_subtitle_evidence(candidate.title)
         if title_evidence:
             candidate = candidate.model_copy(update={"evidence": [*candidate.evidence, *title_evidence]})
+        from lazarr.selection import title_seasons
+
+        release_seasons = title_seasons(candidate.title)
+        season_hint = next(iter(release_seasons)) if len(release_seasons) == 1 else None
         videos = [file for file in files if playable_video(file)]
         reports = []
         for request in requests:
             criteria = [self.identity(candidate, request)]
-            possible = [v for v in videos if self._video_matches(v, request)]
+            possible = [v for v in videos if self._video_matches(v, request, season_hint)]
             video = possible[0] if len(possible) == 1 else None
             numbered = [
-                episode_numbers(v.path, [request.media.title, request.media.original_title]) for v in videos
+                episode_numbers(v.path, [request.media.title, request.media.original_title], season_hint)
+                for v in videos
             ]
             absent_episode = (
                 request.media.kind == "tv"
@@ -309,10 +387,10 @@ class Matcher:
                     for v in videos:
                         same_stem = stem_key(file.path) == stem_key(v.path)
                         file_number = episode_numbers(
-                            file.path, [request.media.title, request.media.original_title]
+                            file.path, [request.media.title, request.media.original_title], season_hint
                         )
                         video_number = episode_numbers(
-                            v.path, [request.media.title, request.media.original_title]
+                            v.path, [request.media.title, request.media.original_title], season_hint
                         )
                         same_episode = bool(file_number[1]) and file_number == video_number
                         if same_stem or same_episode:
@@ -356,6 +434,7 @@ class Matcher:
                         if item.delivery != "external" and isinstance(item.value, list):
                             for lang in item.value:
                                 tracks.append(TrackBinding(kind=kind, language=language(lang), embedded=True))
+                classify_external_subtitles(tracks, files)
                 audio = {t.language for t in tracks if t.kind == "audio"}
                 wanted_audio = set(request.requirements.audio_languages)
                 missing_audio = wanted_audio - audio

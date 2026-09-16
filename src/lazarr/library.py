@@ -16,6 +16,7 @@ from lazarr.models import (
     CandidateDecision,
 )
 from lazarr.calendar import released
+from lazarr.matcher import classify_external_subtitles
 from lazarr.sdk import language
 
 LIBRARIES = [("series", "Сериалы"), ("movies", "Кино"), ("anime", "Аниме")]
@@ -303,7 +304,10 @@ class LibraryService:
             for stream in streams
             if stream.get("codec_type") in {"audio", "subtitle"}
         ]
-        for track in binding.get("tracks", []):
+        binding_tracks = classify_external_subtitles(
+            [dict(track) for track in binding.get("tracks", [])], download.plan.get("files", [])
+        )
+        for track in binding_tracks:
             external = track.get("file_index") is not None
             if external or not streams:
                 tracks.append(
@@ -312,6 +316,8 @@ class LibraryService:
                         "language": track["language"],
                         "codec": None,
                         "path": track.get("path"),
+                        "title": track.get("title"),
+                        "forced": bool(track.get("forced")),
                         "external": external,
                         "verified": bool(verification.get("complete") and current),
                     }
