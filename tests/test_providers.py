@@ -145,6 +145,37 @@ def test_description_tracks_survive_html_label_boundaries():
     assert evidence[2].scope == "release"
 
 
+def test_mediainfo_audio_languages_ignore_video_and_cover_agreeing_dumps():
+    from lazarr.provider_utils import description_evidence
+
+    evidence = description_evidence(
+        """Подробные тех. данные
+1-11 эп.
+General
+Complete name : Show S3 - 01.mkv
+Video
+Language : English
+Audio
+Format : AAC LC
+Language : Japanese
+12 эп.
+General
+Complete name : Show S3 - 12.mkv
+Video
+Language : English
+Audio
+Format : AAC LC
+Language : Japanese
+"""
+    )
+
+    assert len(evidence) == 1
+    assert evidence[0].field == "audio_languages"
+    assert evidence[0].value == ["ja"]
+    assert evidence[0].scope == "all_video_files"
+    assert evidence[0].delivery == "embedded"
+
+
 async def test_cloudflare_challenge_is_not_a_password_failure(core):
     _, _, manager, _ = core
     manager.configure("rutracker", {"username": "user", "password": "password"}, True)

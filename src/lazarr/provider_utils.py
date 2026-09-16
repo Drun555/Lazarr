@@ -15,8 +15,75 @@ def size_bytes(text):
     return int(float(amount.replace(",", ".")) * 1024 ** powers.get(unit[0], 0))
 
 
-def description_evidence(text):
+def mediainfo_audio_evidence(text):
+    """Read languages only from MediaInfo audio sections, never video metadata."""
+    dumps = []
+    current = None
+    section = None
+    excerpts = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if re.fullmatch(r"(?:General|Общее)", stripped, re.I):
+            if current:
+                dumps.append(current)
+            current = set()
+            section = None
+            continue
+        if current is None:
+            continue
+        if re.fullmatch(r"(?:Audio|Аудио)(?:\s*#\d+)?", stripped, re.I):
+            section = "audio"
+            continue
+        if re.fullmatch(
+            r"(?:Video|Видео|Text|Текст|Subtitle|Субтитры|Menu|Меню)(?:\s*#\d+)?",
+            stripped,
+            re.I,
+        ):
+            section = None
+            continue
+        if section == "audio":
+            match = re.match(r"(?:Language|Язык)\s*:\s*(.+)", stripped, re.I)
+            if match:
+                values = extract_languages(match[1])
+                current.update(values)
+                if values:
+                    excerpts.append(stripped)
+    if current:
+        dumps.append(current)
+    if not dumps:
+        return []
+
+    common = set.intersection(*dumps) if len(dumps) > 1 else set()
     evidence = []
+    if common:
+        evidence.append(
+            Evidence(
+                field="audio_languages",
+                value=sorted(common),
+                source="description",
+                excerpt="; ".join(excerpts)[:300],
+                scope="all_video_files",
+                delivery="embedded",
+            )
+        )
+    remaining = set.union(*dumps) - common
+    if remaining or len(dumps) == 1:
+        values = remaining or dumps[0]
+        evidence.append(
+            Evidence(
+                field="audio_languages",
+                value=sorted(values),
+                source="description",
+                excerpt="; ".join(excerpts)[:300],
+                scope="release",
+                delivery="embedded",
+            )
+        )
+    return evidence
+
+
+def description_evidence(text):
+    evidence = mediainfo_audio_evidence(text)
     section = None
     section_lines = []
 
