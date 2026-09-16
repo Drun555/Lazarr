@@ -32,7 +32,7 @@ function addLanguage(picker,code) {
   const input = picker.querySelector('.language-query');
   if (!languageLabels[code]) return;
   if (![...picker.querySelectorAll('input[type=hidden]')].some(i=>i.value===code)) input.insertAdjacentHTML('beforebegin',languagePill(picker.dataset.languagePicker,code));
-  input.value=''; input.setCustomValidity(''); input.focus(); languageSuggestions(picker);
+  input.value=''; input.setCustomValidity(''); input.focus(); closeLanguages(picker);
 }
 function selectedLanguages(form,name) {
   const picker = [...form.querySelectorAll('[data-language-picker]')].find(p=>p.dataset.languagePicker===name);

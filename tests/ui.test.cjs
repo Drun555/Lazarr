@@ -75,6 +75,13 @@ async function setup(){
 function input(w,node,value){node.value=value;node.dispatchEvent(new w.Event('input',{bubbles:true}));}
 function key(w,node,key){node.dispatchEvent(new w.KeyboardEvent('keydown',{key,bubbles:true,cancelable:true}));}
 
+test('mobile viewport prevents interface zoom',()=>{
+  const dom=new JSDOM(html);
+  try{
+    assert.equal(dom.window.document.querySelector('meta[name=viewport]').content,'width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover');
+  }finally{dom.window.close();}
+});
+
 test('season deletion requires confirmation and addresses only the selected season',async()=>{
   const {dom,w,document:d,errors,calls,setLibrary}=await setup();
   try{
@@ -188,9 +195,13 @@ test('language autocomplete pills, aliases, keyboard, removal, and no duplicates
     assert.equal(picker.querySelector('[data-add-language]').textContent,'Японский');
     picker.querySelector('[data-add-language=ja]').click();
     assert.deepEqual([...picker.querySelectorAll('input[type=hidden]')].map(i=>i.value),['ru','ja']);
+    assert.equal(picker.querySelector('.language-options').hidden,true);
+    assert.equal(query.getAttribute('aria-expanded'),'false');
     input(w,query,'japanese');assert.equal(picker.querySelectorAll('[data-add-language]').length,0);
+    assert.equal(picker.querySelector('.language-options').hidden,false);
     input(w,query,'eng');key(w,query,'ArrowDown');key(w,query,'Enter');
     assert.equal(picker.querySelectorAll('.language-pill').length,3);
+    assert.equal(picker.querySelector('.language-options').hidden,true);
     picker.querySelector('[data-remove-language=ja]').click();
     assert.equal(picker.querySelectorAll('.language-pill').length,2);
     key(w,query,'Backspace');assert.equal(picker.querySelectorAll('.language-pill').length,1);

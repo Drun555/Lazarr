@@ -216,6 +216,49 @@ def user_data(ctx, user, item_id, runtime_ticks=0):
     return result
 
 
+def visible_episode_item_ids(ctx, media_id, season_number=None):
+    return [
+        object_id("episode", episode["id"])
+        for episode in ctx.library.detail(media_id)["episodes"]
+        if (season_number is None or episode["season"] == season_number) and episode_is_visible(ctx, episode)
+    ]
+
+
+def grouped_user_data(ctx, user, item_id, episode_ids):
+    result = user_data(ctx, None, item_id)
+    if user is None:
+        return result
+    with ctx.db.session() as db:
+        rows = {
+            row.item_id: row
+            for row in db.scalars(
+                select(PlaybackProgress).where(
+                    PlaybackProgress.user_id == user.id,
+                    PlaybackProgress.item_id.in_(episode_ids),
+                )
+            )
+        }
+    played = sum(bool(rows.get(identity) and rows[identity].played) for identity in episode_ids)
+    result.update(
+        {
+            "Played": bool(episode_ids) and played == len(episode_ids),
+            "PlayCount": (
+                min(rows.get(identity).play_count if rows.get(identity) else 0 for identity in episode_ids)
+                if episode_ids
+                else 0
+            ),
+            "UnplayedItemCount": len(episode_ids) - played,
+            "PlayedPercentage": played * 100 / len(episode_ids) if episode_ids else 0,
+        }
+    )
+    last_played = max((row.last_played_at for row in rows.values() if row.last_played_at), default=None)
+    if last_played:
+        result["LastPlayedDate"] = (
+            datetime.fromtimestamp(last_played, timezone.utc).isoformat().replace("+00:00", "Z")
+        )
+    return result
+
+
 def media_dto(ctx, media, user=None):
     image = poster_tag(media)
     backdrop = backdrop_tag(media)
@@ -251,7 +294,12 @@ def media_dto(ctx, media, user=None):
         result["MediaSources"] = [source]
         result["MediaStreams"] = source["MediaStreams"]
         result["HasSubtitles"] = any(s["Type"] == "Subtitle" for s in source["MediaStreams"])
-    result["UserData"] = user_data(ctx, user, result["Id"], result.get("RunTimeTicks", 0))
+    if media.kind == "tv":
+        result["UserData"] = grouped_user_data(
+            ctx, user, result["Id"], visible_episode_item_ids(ctx, media.id)
+        )
+    else:
+        result["UserData"] = user_data(ctx, user, result["Id"], result.get("RunTimeTicks", 0))
     return result
 
 
@@ -275,7 +323,7 @@ def library_dto(ctx, key, name):
     }
 
 
-def season_dto(ctx, media, number):
+def season_dto(ctx, media, number, user=None):
     count = sum(
         1
         for episode in ctx.library.detail(media.id)["episodes"]
@@ -303,7 +351,7 @@ def season_dto(ctx, media, number):
         "ImageTags": {},
         "BackdropImageTags": [backdrop] if backdrop else [],
         "SeriesPrimaryImageTag": poster_tag(media),
-        "UserData": user_data(ctx, None, identity),
+        "UserData": grouped_user_data(ctx, user, identity, visible_episode_item_ids(ctx, media.id, number)),
     }
 
 
@@ -748,7 +796,7 @@ def item_dto(ctx, item_id, user=None):
         elif kind == "season":
             media = db.get(Media, identity)
             if media:
-                return season_dto(ctx, media, secondary)
+                return season_dto(ctx, media, secondary, user)
         elif kind == "episode":
             episode = db.get(Episode, identity)
             season = db.get(Season, episode.season_id) if episode else None
@@ -763,39 +811,93 @@ def item_dto(ctx, item_id, user=None):
     raise HTTPException(404, "Item not found")
 
 
+def progress_targets(ctx, item_id):
+    kind, identity, secondary = parse_object_id(item_id)
+    with ctx.db.session() as db:
+        if kind == "media":
+            media = db.get(Media, identity)
+            if not media:
+                raise HTTPException(404, "Item not found")
+            if media.kind != "tv":
+                return [item_id], False
+            targets = visible_episode_item_ids(ctx, media.id)
+            if not targets:
+                raise HTTPException(404, "No visible episodes found")
+            return targets, True
+        if kind == "season":
+            media = db.get(Media, identity)
+            if not media or media.kind != "tv":
+                raise HTTPException(404, "Season not found")
+            targets = visible_episode_item_ids(ctx, media.id, secondary)
+            if not targets:
+                raise HTTPException(404, "Season not found")
+            return targets, True
+        if kind == "episode":
+            episode = db.get(Episode, identity)
+            season = db.get(Season, episode.season_id) if episode else None
+            media = db.get(Media, season.media_id) if season else None
+            if media:
+                data = next(
+                    (item for item in ctx.library.detail(media.id)["episodes"] if item["id"] == identity),
+                    None,
+                )
+                if data and episode_is_visible(ctx, data):
+                    return [item_id], False
+    raise HTTPException(404, "Item not found")
+
+
+def progress_user_data(ctx, user, item_id, runtime_ticks=0):
+    kind, identity, secondary = parse_object_id(item_id)
+    if kind == "season":
+        return grouped_user_data(ctx, user, item_id, visible_episode_item_ids(ctx, identity, secondary))
+    if kind == "media":
+        with ctx.db.session() as db:
+            media = db.get(Media, identity)
+        if media and media.kind == "tv":
+            return grouped_user_data(ctx, user, item_id, visible_episode_item_ids(ctx, identity))
+    return user_data(ctx, user, item_id, runtime_ticks)
+
+
 def save_progress(ctx, user, item_id, position_ticks=None, played=None, touch=True):
     kind, identity, _ = parse_object_id(item_id)
-    playable = playable_asset(ctx, kind, identity) if kind in {"media", "episode"} else None
-    if not playable:
-        raise HTTPException(404, "Playable file not found")
-    runtime = duration_ticks(playable["asset"])
+    targets, grouped = progress_targets(ctx, item_id)
+    if grouped and played is None:
+        raise HTTPException(400, "Folder playback progress requires Played")
+    playable = playable_asset(ctx, kind, identity) if not grouped and kind in {"media", "episode"} else None
+    runtime = duration_ticks(playable["asset"]) if playable else 0
     position = max(0, int(position_ticks or 0)) if position_ticks is not None else None
     completed = played
     if completed is None and position is not None and runtime:
         completed = position >= runtime * 0.9
     now = time.time()
     with ctx.db.session() as db:
-        row = db.scalar(
-            select(PlaybackProgress).where(
-                PlaybackProgress.user_id == user.id, PlaybackProgress.item_id == item_id
+        rows = {
+            row.item_id: row
+            for row in db.scalars(
+                select(PlaybackProgress).where(
+                    PlaybackProgress.user_id == user.id,
+                    PlaybackProgress.item_id.in_(targets),
+                )
             )
-        )
-        if row is None:
-            row = PlaybackProgress(user_id=user.id, item_id=item_id)
-            db.add(row)
-        was_played = row.played
-        if completed is True:
-            row.position_ticks = 0
-        elif position is not None:
-            row.position_ticks = position
-        if completed is not None:
-            row.played = bool(completed)
-            if completed and not was_played:
-                row.play_count += 1
-        if touch:
-            row.last_played_at = now
-        row.updated_at = now
-    return user_data(ctx, user, item_id, runtime)
+        }
+        for target in targets:
+            row = rows.get(target)
+            if row is None:
+                row = PlaybackProgress(user_id=user.id, item_id=target)
+                db.add(row)
+            was_played = row.played
+            if completed is True:
+                row.position_ticks = 0
+            elif position is not None:
+                row.position_ticks = position
+            if completed is not None:
+                row.played = bool(completed)
+                if completed and not was_played:
+                    row.play_count = (row.play_count or 0) + 1
+            if touch:
+                row.last_played_at = now
+            row.updated_at = now
+    return progress_user_data(ctx, user, item_id, runtime)
 
 
 def save_playback_selection(ctx, user, item_id, payload):
@@ -1089,7 +1191,7 @@ def install_jellyfin_api(app, context):
                         if item
                     ]
                 else:
-                    items = [season_dto(ctx, media, number) for number in available_seasons(ctx, media)]
+                    items = [season_dto(ctx, media, number, user) for number in available_seasons(ctx, media)]
             elif kind == "season":
                 items = [
                     item
@@ -1166,7 +1268,7 @@ def install_jellyfin_api(app, context):
         if not media or media.kind != "tv":
             raise HTTPException(404, "Series not found")
         numbers = available_seasons(context(request), media)
-        return query_result([season_dto(context(request), media, number) for number in numbers])
+        return query_result([season_dto(context(request), media, number, user) for number in numbers])
 
     @app.get("/Shows/NextUp")
     async def jellyfin_next_up(request: Request, userId: str | None = None, user=Depends(authenticated)):

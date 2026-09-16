@@ -358,3 +358,4 @@ input[role="switch"]{appearance:none;width:36px;height:21px;border-radius:12px;p
 .library-file dd { margin:0; overflow-wrap:anywhere; }
 .library-file a { color:#ddd; text-decoration:underline; }
 @media(max-width:600px){.library-heading{display:block}.library-heading img{width:120px;height:180px;margin-bottom:1rem}.library-file dl{grid-template-columns:1fr}.library-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.episode-summary{grid-template-columns:1fr}.episode-visual{width:100%}.library-page-heading{padding-top:1.5rem}.library-season{padding:.75rem}.library-season .library-episode{margin-left:0;margin-right:0}.library-season-summary{gap:.6rem}.library-season-summary .fine{display:none}}
+@media(max-width:600px){input,select,textarea,.search-box input,.language-values .language-query{font-size:16px}}

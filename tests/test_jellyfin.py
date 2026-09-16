@@ -213,6 +213,81 @@ def test_jellyfin_lists_starting_and_downloading_episodes_without_playback(core,
         assert next_up.json() == {"Items": [], "TotalRecordCount": 0, "StartIndex": 0}
 
 
+def test_jellyfin_marks_episode_season_and_series_played(core, media, season):
+    config, db, _, service = core
+    service.create_from_metadata(
+        CreateTask(media_id="42", kind="tv", season=1, episodes=[1, 2, 3]), media, season, 1
+    )
+    with db.session() as session:
+        subtasks = list(session.scalars(select(Subtask).order_by(Subtask.id)))
+        subtasks[0].status = "starting"
+        subtasks[1].status = "downloading"
+        subtasks[2].status = "waiting_release"
+
+    with TestClient(create_app(config)) as client:
+        auth = jellyfin_login(client)
+        series_view = next(
+            item
+            for item in client.get("/UserViews", params={"userId": auth["User"]["Id"]}).json()["Items"]
+            if item["Name"] == "Сериалы"
+        )
+        series = client.get("/Items", params={"ParentId": series_view["Id"]}).json()["Items"][0]
+        season_item = client.get(f"/Shows/{series['Id']}/Seasons").json()["Items"][0]
+        episodes = client.get(f"/Shows/{series['Id']}/Episodes").json()["Items"]
+        first, second = episodes
+
+        def progress(item):
+            return client.get(f"/UserItems/{item['Id']}/UserData").json()
+
+        assert not progress(first)["Played"]
+        assert not progress(season_item)["Played"]
+        assert not progress(series)["Played"]
+
+        assert client.post(f"/UserPlayedItems/{first['Id']}").status_code == 200
+        assert progress(first)["Played"]
+        assert not progress(second)["Played"]
+        assert progress(season_item)["UnplayedItemCount"] == 1
+        assert progress(season_item)["PlayedPercentage"] == 50
+        assert not progress(series)["Played"]
+
+        assert client.post(f"/UserPlayedItems/{season_item['Id']}").status_code == 200
+        assert progress(first)["Played"] and progress(second)["Played"]
+        assert progress(season_item)["Played"] and progress(series)["Played"]
+
+        assert client.delete(f"/UserPlayedItems/{second['Id']}").status_code == 200
+        assert progress(first)["Played"] and not progress(second)["Played"]
+        assert not progress(season_item)["Played"] and not progress(series)["Played"]
+
+        assert client.post(f"/UserPlayedItems/{series['Id']}").status_code == 200
+        assert progress(first)["Played"] and progress(second)["Played"]
+        assert progress(season_item)["Played"] and progress(series)["Played"]
+
+        assert client.delete(f"/UserPlayedItems/{season_item['Id']}").status_code == 200
+        assert not progress(first)["Played"] and not progress(second)["Played"]
+        assert not progress(season_item)["Played"] and not progress(series)["Played"]
+
+
+def test_jellyfin_marks_movie_title_without_a_playable_file(core, media):
+    config, _, _, service = core
+    movie = media.model_copy(
+        update={"id": "movie-42", "kind": "movie", "title": "Example Movie", "seasons": []}
+    )
+    service.create_from_metadata(CreateTask(media_id=movie.id, kind="movie"), movie, None, 1)
+
+    with TestClient(create_app(config)) as client:
+        auth = jellyfin_login(client)
+        movie_view = next(
+            item
+            for item in client.get("/UserViews", params={"userId": auth["User"]["Id"]}).json()["Items"]
+            if item["Name"] == "Кино"
+        )
+        movie_item = client.get("/Items", params={"ParentId": movie_view["Id"]}).json()["Items"][0]
+        assert not movie_item["UserData"]["Played"]
+        assert client.post(f"/UserPlayedItems/{movie_item['Id']}").json()["Played"]
+        assert client.get(f"/Items/{movie_item['Id']}").json()["UserData"]["Played"]
+        assert not client.delete(f"/UserPlayedItems/{movie_item['Id']}").json()["Played"]
+
+
 def test_jellyfin_direct_plays_buffer_ready_episode(core, media, season):
     playable_episode(core, media, season, complete=False)
     config, _, _, _ = core
