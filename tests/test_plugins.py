@@ -3,6 +3,7 @@ import json
 import httpx
 import pytest
 from lazarr.models import ProviderConfig
+from lazarr.plugins import PluginManager
 
 
 def plugin_source(version):
@@ -161,8 +162,6 @@ async def test_automatic_updates_and_offline_cache(core):
 
 
 def test_content_order_persists_and_validates_enabled_providers(core):
-    from lazarr.plugins import PluginManager
-
     config, db, manager, _ = core
     manager.configure("nyaa", {}, True)
     manager.configure("rutracker", {}, True)
@@ -184,3 +183,25 @@ def test_content_order_persists_and_validates_enabled_providers(core):
     restarted.set_content_order(["nyaa"])
     restarted.configure("rutracker", {}, True)
     assert restarted.available("content") == ["nyaa", "rutracker"]
+
+
+async def test_removed_subtitle_provider_kind_is_ignored(core):
+    config, db, manager, _ = core
+    legacy = {
+        "id": "legacy_subtitles",
+        "kind": "subtitle",
+        "version": "1.0.0",
+        "sdk": ">=1,<2",
+        "url": "https://plugins.example/subtitles.py",
+        "sha256": "0" * 64,
+    }
+    pointer = config.plugin_dir / "legacy_subtitles" / "active.json"
+    pointer.parent.mkdir(parents=True)
+    pointer.write_text(json.dumps(legacy))
+    restarted = PluginManager(db, config, manager.secrets)
+    restarted.bootstrap()
+    assert "legacy_subtitles" not in restarted.classes
+    assert "legacy_subtitles" not in restarted.errors
+
+    restarted.transport = httpx.MockTransport(lambda request: httpx.Response(200, json={"plugins": [legacy]}))
+    assert await restarted.catalog("https://plugins.example/catalog.json") == []

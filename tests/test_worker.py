@@ -46,7 +46,7 @@ class FakeEngine:
         files = [TorrentFile(index=i, path=path, size=100, offset=i * 100) for i, path in enumerate(data)]
         return TorrentMetadata(hashlib.sha256(source.torrent).hexdigest(), files, source.torrent)
 
-    def add(self, torrent, save_path, plan, paused=False):
+    def add(self, torrent, save_path, plan, paused=False, counters=None):
         self.handles[plan.infohash] = object()
         self.plans[plan.infohash] = plan
         self.paused[plan.infohash] = paused
@@ -159,8 +159,8 @@ async def test_grouped_subtasks_share_one_download(core, media, season, worker_s
     with db.session() as session:
         assert session.scalar(select(func.count()).select_from(Download)) == 1
         assert session.scalar(select(func.count()).select_from(MediaAsset)) == 2
-        assert session.scalar(select(func.count()).select_from(SubtaskAsset)) == 3
-        assert len(list(session.scalars(select(Subtask).where(Subtask.status == "starting")))) == 3
+        assert session.scalar(select(func.count()).select_from(SubtaskAsset)) == 2
+        assert len(list(session.scalars(select(Subtask).where(Subtask.status == "starting")))) == 2
     assert demo.calls == 1
     # An immediate retry must not duplicate active work.
     await worker.run_due()
@@ -180,7 +180,10 @@ async def test_shared_download_survives_one_task_pause_and_stops_at_ratio(core, 
         CreateTask(media_id="42", kind="tv", season=1, episodes=[1]), media, season, 1
     )
     service.create_from_metadata(
-        CreateTask(media_id="42", kind="tv", season=1, episodes=[1]), media, season, 2
+        CreateTask(media_id="43", kind="tv", season=1, episodes=[1]),
+        media.model_copy(update={"id": "43"}),
+        season,
+        2,
     )
     await worker.run_due()
     service.edit(first, 1, paused=True)
@@ -222,7 +225,7 @@ async def test_wrong_actual_audio_does_not_promote_version(core, media, season, 
         assert session.scalar(select(CandidateDecision)).action == "rejected"
 
 
-async def test_upgrade_preserves_old_download_for_other_consumer(core, media, season, worker_setup):
+async def test_completed_tasks_do_not_search_or_upgrade(core, media, season, worker_setup):
     _, db, _, service = core
     worker, engine, demo = worker_setup
     service.create_from_metadata(
@@ -237,7 +240,7 @@ async def test_upgrade_preserves_old_download_for_other_consumer(core, media, se
         CreateTask(
             media_id="42", kind="tv", season=1, episodes=[1], requirements=Requirements(max_resolution=1080)
         ),
-        media,
+        media.model_copy(update={"id": "43"}),
         season,
         2,
     )
@@ -245,24 +248,31 @@ async def test_upgrade_preserves_old_download_for_other_consumer(core, media, se
     engine.completed = {1, 2}
     await worker.poll()
     old_hash = next(iter(engine.handles))
+    search_calls = demo.calls
     demo.quality = 2160
+    assert all(task["completed"] for task in service.list_tasks())
+    assert await worker.due_groups(force=True) == []
     with db.session() as session:
         session.get(Subtask, 1).next_search_at = 0
     await worker.run_due()
+    await worker.run_due(force=True)
     await worker.poll()
+    assert demo.calls == search_calls
     with db.session() as session:
-        assert session.scalar(select(func.count()).select_from(Download)) == 2
+        assert session.scalar(select(func.count()).select_from(Download)) == 1
         current = session.scalar(
             select(MediaAsset)
             .join(SubtaskAsset)
             .where(SubtaskAsset.subtask_id == 1, SubtaskAsset.current.is_(True))
         )
-        assert current.resolution == 2160
+        assert current.resolution == 1080
     assert not engine.paused[old_hash]
-    # Once the remaining old consumer changes requirements, the old torrent may stop; files stay.
+    # Editing requirements must not invalidate completed files or restart acquisition.
     service.edit(2, 2, requirements=Requirements(max_resolution=2160))
     await worker.sync_consumers()
-    assert engine.paused[old_hash]
+    assert not engine.paused[old_hash]
+    assert await worker.due_groups(force=True) == []
+    assert all(task["completed"] for task in service.list_tasks())
 
 
 async def test_future_dates_block_but_unknown_dates_search(core, media, season, worker_setup):
@@ -385,7 +395,10 @@ async def test_delete_task_preserves_shared_download_and_removes_last_consumer(
         CreateTask(media_id="42", kind="tv", season=1, episodes=[1]), media, season, 1
     )
     second = service.create_from_metadata(
-        CreateTask(media_id="42", kind="tv", season=1, episodes=[1]), media, season, 2
+        CreateTask(media_id="43", kind="tv", season=1, episodes=[1]),
+        media.model_copy(update={"id": "43"}),
+        season,
+        2,
     )
     await worker.run_due()
     with db.session() as session:
@@ -403,7 +416,7 @@ async def test_delete_task_preserves_shared_download_and_removes_last_consumer(
     with db.session() as session:
         assert session.scalar(select(func.count()).select_from(Task)) == 0
         assert session.scalar(select(func.count()).select_from(Download)) == 0
-        assert session.scalar(select(func.count()).select_from(Media)) == 1
+        assert session.scalar(select(func.count()).select_from(Media)) == 2
 
 
 async def test_delete_task_without_media_keeps_files(core, media, season, worker_setup):

@@ -99,9 +99,7 @@ def test_manual_provider_controls_bypass_cooldown(core):
             row.retry_at = time.time() + 300
             row.last_error = "unavailable: temporary outage"
 
-        response = client.post(
-            "/api/v1/providers/rutracker/authenticate", json={"values": {}}
-        )
+        response = client.post("/api/v1/providers/rutracker/authenticate", json={"values": {}})
         assert response.status_code == 200, response.text
         assert response.json()["status"] == "authenticated"
 

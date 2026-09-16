@@ -132,12 +132,11 @@ def test_identity_conflict_and_keyword(media):
     assert Matcher().evaluate(c, [request(media, keyword="dub studio")], paths).plan is None
 
 
-def test_same_resolution_is_not_upgrade(media):
+def test_resolution_below_maximum_is_acceptable(media):
     paths = files("Show.S01E01.1080p.mkv")
     c = candidate(evidence=[audio_claim(paths[0].path)])
     req = request(media, max_resolution=2160)
-    req.current_resolution = 1080
-    assert Matcher().evaluate(c, [req], paths).evaluations[0].result == MatchResult.MISMATCH
+    assert Matcher().evaluate(c, [req], paths).evaluations[0].result == MatchResult.MATCH
 
 
 def test_archives_are_not_video(media):

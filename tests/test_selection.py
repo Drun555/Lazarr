@@ -17,7 +17,7 @@ from lazarr.sdk import (
     ProviderManifest,
     DownloadSource,
 )
-from lazarr.selection import reject_reason, can_improve
+from lazarr.selection import reject_reason
 from lazarr.services import CreateTask
 from lazarr.scheduler import Scheduler
 from lazarr.search import PREFIX
@@ -106,14 +106,6 @@ def test_season_identity_requires_title_season_and_episode_year(rezero):
     )
 
 
-def test_coverage_prunes_equal_quality_but_keeps_upgrades_and_unknown(rezero):
-    item = candidate(title="Re:Zero [1080p]")
-    assert not can_improve(item, [rezero], {rezero.id: 1080})
-    assert can_improve(item.model_copy(update={"title": "Re:Zero [2160p]"}), [rezero], {rezero.id: 1080})
-    assert can_improve(item.model_copy(update={"title": "Re:Zero"}), [rezero], {rezero.id: 1080})
-    assert can_improve(item, [rezero, rezero.model_copy(update={"id": 2})], {rezero.id: 1080})
-
-
 async def test_worker_filters_before_inspect_and_resolve_and_orders_candidates(
     core, media, season, worker_setup, monkeypatch
 ):
@@ -162,7 +154,7 @@ async def test_worker_filters_before_inspect_and_resolve_and_orders_candidates(
     await worker.run_due()
     assert inspected == resolved == ["2"]
     p = worker.progress.snapshot()
-    assert p["candidates_found"] == 4 and p["candidates_filtered"] == 3 and p["candidates_checked"] == 1
+    assert p["candidates_found"] == 4 and p["candidates_filtered"] == 2 and p["candidates_checked"] == 1
     assert len(engine.plans) == 1
 
 
@@ -189,6 +181,35 @@ async def test_description_filter_does_not_resolve_torrent(core, media, season, 
     await worker.run_due()
     assert worker.progress.snapshot()["candidates_filtered"] == 1
     assert worker.progress.snapshot()["candidates_checked"] == 0
+
+
+async def test_search_stops_when_covered_below_maximum(core, media, season, worker_setup, monkeypatch):
+    _, _, _, service = core
+    worker, _, demo = worker_setup
+    original_search = demo.search
+    calls = []
+
+    async def search(self, query, cursor=None):
+        calls.append(cursor)
+        page = await original_search(self, query, cursor)
+        return page.model_copy(update={"next_cursor": "more"})
+
+    monkeypatch.setattr(demo, "search", search)
+    service.create_from_metadata(
+        CreateTask(
+            media_id="42",
+            kind="tv",
+            season=1,
+            episodes=[1],
+            requirements=Requirements(max_resolution=2160),
+        ),
+        media,
+        season,
+        1,
+    )
+    await worker.run_due()
+    assert calls == [None]
+    assert worker.progress.snapshot()["candidates_checked"] == 1
 
 
 async def test_cooldown_stops_candidate_loop_and_pagination_and_retries_only_failed_provider(

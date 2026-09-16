@@ -287,12 +287,6 @@ class Matcher:
                         else MatchResult.MISMATCH
                     )
                 )
-                if (
-                    request.current_resolution
-                    and quality is not None
-                    and quality <= request.current_resolution
-                ):
-                    quality_result = MatchResult.MISMATCH
                 criteria.append(
                     Criterion(
                         field="resolution",

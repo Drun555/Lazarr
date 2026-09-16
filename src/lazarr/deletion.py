@@ -3,11 +3,13 @@
 import asyncio
 import re
 import shutil
+import time
 from pathlib import Path
 from uuid import uuid4
 from sqlalchemy import delete, select
 from lazarr.models import (
     Task,
+    TaskSeason,
     Subtask,
     SubtaskAsset,
     LibraryAsset,
@@ -44,6 +46,25 @@ def cleanup(db):
         ]
     for key, job in jobs:
         try:
+            for entry in job.get("files", []):
+                from lazarr.replacement import retained_paths
+
+                root = Path(entry["root"])
+                path = root / entry["path"]
+                if (
+                    not root.is_absolute()
+                    or root.resolve() != root
+                    or not re.fullmatch(r"[a-f0-9]{40}|[a-f0-9]{64}", root.name)
+                    or path.resolve() != path
+                    or not path.is_relative_to(root)
+                    or path == root
+                ):
+                    raise ValueError("Unsafe file cleanup path")
+                with db.session() as session:
+                    download = session.scalar(select(Download).where(Download.save_path == str(root)))
+                    if download and entry["path"] in retained_paths(session, download):
+                        continue
+                path.unlink(missing_ok=True)
             for raw in job["directories"]:
                 with db.session() as session:
                     if session.scalar(select(Download.id).where(Download.save_path == raw)):
@@ -60,6 +81,138 @@ def cleanup(db):
         except (OSError, ValueError):
             pending = True
     return pending
+
+
+async def delete_selection(worker, identity, user_id, *, media_id=None):
+    from types import SimpleNamespace
+    from lazarr.replacement import retire_selections
+
+    async with worker.lock, worker.poll_lock, worker.download_lock:
+        with worker.db.session() as db:
+            published = []
+            if media_id is None:
+                sub = db.get(Subtask, identity)
+                if sub is None:
+                    raise ValueError("Серия не найдена")
+                subs = [sub]
+            else:
+                media = db.get(Media, media_id)
+                episode_id = None if identity == "movie" else int(identity)
+                episode = db.get(Episode, episode_id) if episode_id else None
+                if (
+                    not media
+                    or (
+                        media.kind == "tv"
+                        and (not episode or db.get(Season, episode.season_id).media_id != media_id)
+                    )
+                    or (media.kind != "tv" and identity != "movie")
+                ):
+                    raise ValueError("Серия не найдена")
+                subs = list(
+                    db.scalars(
+                        select(Subtask)
+                        .join(Task)
+                        .where(Task.media_id == media_id, Subtask.episode_id == episode_id)
+                    )
+                )
+                published = list(
+                    db.scalars(
+                        select(LibraryAsset).where(
+                            LibraryAsset.media_id == media_id, LibraryAsset.episode_id == episode_id
+                        )
+                    )
+                )
+            await retire_selections(
+                worker,
+                db,
+                [SimpleNamespace(subtask_id=sub.id) for sub in subs],
+                None,
+                published=published if not subs else None,
+            )
+            for sub in subs:
+                sub.status = "removed"
+                sub.lease_until = sub.next_search_at = 0
+                sub.last_error = None
+                sub.missing_subtitle_languages = []
+            audit(db, user_id, "subtask.delete_selection", str(identity))
+        worker.probe_cache.clear()
+        pending = await asyncio.to_thread(cleanup, worker.db)
+        await worker.restore(reset_leases=False)
+    return {"ok": True, "cleanup_pending": pending}
+
+
+async def delete_season(worker, media_id, number, user_id):
+    from types import SimpleNamespace
+    from lazarr.library import LibraryService
+    from lazarr.replacement import retire_selections
+
+    async with worker.lock, worker.poll_lock, worker.download_lock:
+        detail = LibraryService(worker.db, worker.plugins, worker.service).detail(media_id)
+        if not detail or detail["kind"] != "tv":
+            raise ValueError("Сериал не найден")
+        episode_ids = {e["id"] for e in detail["episodes"] if e["season"] == number}
+        with worker.db.session() as db:
+            task = db.scalar(select(Task).where(Task.media_id == media_id))
+            subs = (
+                list(
+                    db.scalars(
+                        select(Subtask).where(Subtask.task_id == task.id, Subtask.episode_id.in_(episode_ids))
+                    )
+                )
+                if task
+                else []
+            )
+            published = list(
+                db.scalars(
+                    select(LibraryAsset).where(
+                        LibraryAsset.media_id == media_id, LibraryAsset.episode_id.in_(episode_ids)
+                    )
+                )
+            )
+            await retire_selections(
+                worker, db, [SimpleNamespace(subtask_id=s.id) for s in subs], None, published=published
+            )
+            ids = {s.id for s in subs}
+            db.execute(delete(CandidateDecision).where(CandidateDecision.subtask_id.in_(ids)))
+            db.execute(delete(Subtask).where(Subtask.id.in_(ids)))
+            if task:
+                for membership in list(db.scalars(select(TaskSeason).where(TaskSeason.task_id == task.id))):
+                    season = db.get(Season, membership.season_id)
+                    affected = membership.numbering.get("season", season.number) == number
+                    if not membership.numbering:
+                        affected |= any(
+                            db.get(Episode, identity).season_id == season.id for identity in episode_ids
+                        )
+                    if affected:
+                        other = db.scalar(
+                            select(Subtask.id)
+                            .join(Episode)
+                            .where(Subtask.task_id == task.id, Episode.season_id == season.id)
+                        )
+                        if not membership.numbering and other:
+                            # Canonical selections may span multiple displayed seasons.
+                            membership.whole_season = False
+                        else:
+                            db.delete(membership)
+                db.flush()
+                remaining = list(db.scalars(select(TaskSeason).where(TaskSeason.task_id == task.id)))
+                if not remaining and not db.scalar(select(Subtask.id).where(Subtask.task_id == task.id)):
+                    for entry in db.scalars(
+                        select(ConfigEntry).where(ConfigEntry.key.startswith("search.request."))
+                    ):
+                        if entry.value.get("task_id") == task.id:
+                            db.delete(entry)
+                    db.delete(task)
+                else:
+                    task.season_id = remaining[0].season_id if len(remaining) == 1 else None
+                    task.numbering = remaining[0].numbering if len(remaining) == 1 else {}
+                    task.whole_season = all(m.whole_season for m in remaining)
+                    task.updated_by, task.updated_at = user_id, time.time()
+            audit(db, user_id, "season.delete", str(media_id), {"season": number})
+        worker.probe_cache.clear()
+        pending = await asyncio.to_thread(cleanup, worker.db)
+        await worker.restore(reset_leases=False)
+    return {"ok": True, "cleanup_pending": pending}
 
 
 async def delete_task(worker, identity, user_id, delete_media=False):

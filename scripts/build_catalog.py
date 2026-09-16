@@ -16,8 +16,6 @@ for name, kind in [
     ("nyaa", "content"),
     ("rutracker", "content"),
     ("kinozal", "content"),
-    ("podnapisi", "subtitle"),
-    ("opensubtitles", "subtitle"),
 ]:
     tree = ast.parse((root / f"{name}.py").read_text())
     manifest = next(

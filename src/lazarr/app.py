@@ -16,7 +16,17 @@ from sqlalchemy import select, delete, text
 from sqlalchemy.exc import IntegrityError
 from lazarr.config import RuntimeConfig, Settings, Requirements
 from lazarr.db import Database
-from lazarr.models import User, LoginSession, Download, CandidateDecision, Release
+from lazarr.models import (
+    User,
+    LoginSession,
+    Download,
+    CandidateDecision,
+    Release,
+    Task,
+    SubtaskAsset,
+    MediaAsset,
+    LibraryAsset,
+)
 from lazarr.security import (
     SecretStore,
     verify_password,
@@ -29,14 +39,12 @@ from lazarr.security import (
 )
 from lazarr.plugins import PluginManager
 from lazarr.sdk import ProviderError, DownloadSource
-from lazarr.services import TaskService, CreateTask
+from lazarr.services import TaskService, CreateTask, SeasonSelection
 from lazarr.torrent import LibtorrentEngine
 from lazarr.worker import Worker
 from lazarr.scheduler import Scheduler
 from lazarr.library import LibraryService
 from lazarr.posters import poster_url, fetch_poster
-from lazarr.subtitles import SubtitleService
-from lazarr.languages import language
 
 
 class Context:
@@ -55,7 +63,6 @@ class Context:
         self.service = TaskService(self.db, self.plugins)
         self.service.settings()
         self.library = LibraryService(self.db, self.plugins, self.service)
-        self.subtitles = SubtitleService(self.db, self.plugins, self.service)
         self.engine_error = None
         try:
             self.engine = LibtorrentEngine(config.data_dir, config.listen_interfaces)
@@ -142,18 +149,6 @@ class TaskDelete(BaseModel):
 
 class MediaDelete(BaseModel):
     delete_files: bool = False
-
-
-class SubtitleDownloadInput(BaseModel):
-    languages: list[str] = Field(default_factory=list, max_length=16)
-
-    @field_validator("languages")
-    @classmethod
-    def normalize_languages(cls, values):
-        normalized = list(dict.fromkeys(language(value) for value in values))
-        if "und" in normalized:
-            raise ValueError("Неизвестный язык субтитров")
-        return normalized
 
 
 class ProviderOrder(BaseModel):
@@ -456,7 +451,44 @@ def create_app(config: RuntimeConfig | None = None):
         async with ctx.worker.lock:
             ctx.service.edit(identity, user.id, requirements=payload.requirements, paused=payload.paused)
             await ctx.worker.sync_consumers()
+        ctx.scheduler.wake.set()
         return {"ok": True}
+
+    @app.post("/api/v1/tasks/{identity}/search", status_code=202)
+    async def run_task(identity: int, request: Request, user=Depends(permission("tasks"))):
+        ctx = context(request)
+        with ctx.db.session() as db:
+            task = db.get(Task, identity)
+            if task is None:
+                raise HTTPException(404, "Задача не найдена")
+            if task.paused:
+                raise ValueError("Сначала возобновите задачу")
+        ctx.scheduler.enqueue(identity)
+        return {"queued": True}
+
+    @app.post("/api/v1/libraries/media/{identity}/seasons")
+    async def add_media_season(
+        identity: int, payload: SeasonSelection, request: Request, user=Depends(permission("tasks"))
+    ):
+        ctx = context(request)
+        task_id = await ctx.service.add_season(identity, payload, user.id)
+        ctx.scheduler.wake.set()
+        return {"id": task_id, "search_queued": True}
+
+    @app.get("/api/v1/libraries/media/{identity}/seasons/{number}/episodes")
+    async def library_season_episodes(
+        identity: int, number: int, request: Request, user=Depends(permission("library"))
+    ):
+        await context(request).library.load_season(identity, number)
+        return {"ok": True}
+
+    @app.delete("/api/v1/libraries/media/{identity}/seasons/{number}")
+    async def delete_library_season(
+        identity: int, number: int, request: Request, user=Depends(permission("tasks"))
+    ):
+        from lazarr.deletion import delete_season
+
+        return await delete_season(context(request).worker, identity, number, user.id)
 
     @app.delete("/api/v1/tasks/{identity}")
     async def delete_task(
@@ -466,13 +498,83 @@ def create_app(config: RuntimeConfig | None = None):
 
         return await remove_task(context(request).worker, identity, user.id, payload.delete_media)
 
+    @app.delete("/api/v1/subtasks/{identity}/selection")
+    async def delete_episode_selection(identity: int, request: Request, user=Depends(permission("tasks"))):
+        from lazarr.deletion import delete_selection
+
+        return await delete_selection(context(request).worker, identity, user.id)
+
+    @app.delete("/api/v1/libraries/media/{media_id}/episodes/{identity}/selection")
+    async def delete_library_episode_selection(
+        media_id: int, identity: str, request: Request, user=Depends(permission("tasks"))
+    ):
+        from lazarr.deletion import delete_selection
+
+        return await delete_selection(context(request).worker, identity, user.id, media_id=media_id)
+
     @app.get("/api/v1/subtasks/{identity}/candidates")
     async def candidates(identity: int, request: Request, user=Depends(authenticated)):
         return context(request).service.candidates(identity)
 
+    @app.post("/api/v1/subtasks/{identity}/candidates/search")
+    async def search_alternatives(identity: int, request: Request, user=Depends(permission("tasks"))):
+        ctx = context(request)
+        if ctx.engine is None:
+            raise HTTPException(503, ctx.engine_error)
+        await ctx.worker.search_alternatives(identity)
+        return ctx.service.candidates(identity)
+
     @app.get("/api/v1/tasks/{identity}/candidates")
     async def task_candidates(identity: int, request: Request, user=Depends(authenticated)):
         return context(request).service.task_candidates(identity)
+
+    @app.get("/api/v1/candidates/{identity}/selection")
+    async def candidate_selection(
+        identity: int,
+        request: Request,
+        video_index: int | None = Query(default=None, ge=0),
+        user=Depends(authenticated),
+    ):
+        with context(request).db.session() as db:
+            decision = db.get(CandidateDecision, identity)
+            if not decision:
+                raise HTTPException(404, "Кандидат не найден")
+            link = db.scalar(
+                select(SubtaskAsset)
+                .join(MediaAsset, SubtaskAsset.asset_id == MediaAsset.id)
+                .join(Download, MediaAsset.download_id == Download.id)
+                .where(
+                    SubtaskAsset.subtask_id == decision.subtask_id, Download.release_id == decision.release_id
+                )
+            )
+            if (
+                video_index is None
+                or link
+                and link.preflight.get("binding", {}).get("video_index") == video_index
+            ):
+                return link.preflight.get("binding") if link else None
+            # Another video may already belong to another episode or to the
+            # library after its task was removed. Use persisted bindings only.
+            bindings = []
+            for model in (SubtaskAsset, LibraryAsset):
+                for selected in db.scalars(
+                    select(model)
+                    .join(MediaAsset, model.asset_id == MediaAsset.id)
+                    .join(Download, MediaAsset.download_id == Download.id)
+                    .where(Download.release_id == decision.release_id, MediaAsset.video_index == video_index)
+                ):
+                    binding = selected.preflight.get("binding")
+                    if binding:
+                        bindings.append(binding)
+            if not bindings:
+                return None
+            tracks = {
+                track["file_index"]: track
+                for binding in bindings
+                for track in binding.get("tracks", [])
+                if track.get("file_index") is not None
+            }
+            return {**bindings[0], "tracks": list(tracks.values())}
 
     @app.get("/api/v1/candidates/{identity}/files")
     async def candidate_files(identity: int, request: Request, user=Depends(authenticated)):
@@ -486,7 +588,15 @@ def create_app(config: RuntimeConfig | None = None):
             release = db.get(Release, decision.release_id)
             path = ctx.config.data_dir / "torrents" / f"{release.revision}.torrent"
         metadata = await asyncio.to_thread(ctx.engine.inspect, DownloadSource(torrent=path.read_bytes()))
-        return [file.model_dump() for file in metadata.files]
+        from lazarr.matcher import episode_numbers
+
+        result = []
+        for file in metadata.files:
+            season, episodes, _ = episode_numbers(file.path)
+            result.append(
+                {**file.model_dump(), "episode_order": [season or 0, min(episodes)] if episodes else None}
+            )
+        return result
 
     @app.post("/api/v1/candidates/{identity}/choice")
     async def choose_candidate(
@@ -499,9 +609,7 @@ def create_app(config: RuntimeConfig | None = None):
         return {"ok": True}
 
     @app.post("/api/v1/candidates/{identity}/choice-all")
-    async def choose_candidate_for_task(
-        identity: int, request: Request, user=Depends(permission("tasks"))
-    ):
+    async def choose_candidate_for_task(identity: int, request: Request, user=Depends(permission("tasks"))):
         ctx = context(request)
         if ctx.engine is None:
             raise HTTPException(503, ctx.engine_error)
@@ -559,6 +667,9 @@ def create_app(config: RuntimeConfig | None = None):
         result = ctx.library.detail(identity)
         if result is None:
             raise HTTPException(404, "Произведение не найдено")
+        task = next((t for t in ctx.service.list_tasks() if t["media_id"] == identity), None)
+        result["task"] = task
+        result["search"] = ctx.scheduler.snapshot(task["id"]) if task else None
         return result
 
     @app.delete("/api/v1/libraries/media/{identity}")
@@ -568,18 +679,6 @@ def create_app(config: RuntimeConfig | None = None):
         from lazarr.deletion import delete_media
 
         return await delete_media(context(request).worker, identity, user.id, payload.delete_files)
-
-    @app.post("/api/v1/libraries/media/{identity}/subtitles")
-    async def download_library_subtitles(
-        identity: int,
-        payload: SubtitleDownloadInput,
-        request: Request,
-        user=Depends(permission("library")),
-    ):
-        result = await context(request).subtitles.download(identity, payload.languages, user.id)
-        if result is None:
-            raise HTTPException(404, "Произведение не найдено")
-        return result
 
     @app.get("/api/v1/providers")
     async def providers(request: Request, user=Depends(permission("providers"))):

@@ -284,6 +284,20 @@ input[role="switch"]{appearance:none;width:36px;height:21px;border-radius:12px;p
 .provider-order li { padding: .4rem 0; }
 .provider-order li span { display: inline-block; width: calc(100% - 6rem); }
 .provider-order .icon-button { margin-left: .3rem; }
+.task-season-row { display:grid; grid-template-columns:1fr 1fr auto; gap:1rem; align-items:start; margin-bottom:1rem; }
+.all-tasks-heading { display:flex; align-items:center; justify-content:space-between; gap:1rem; margin:1rem 0; }
+.all-tasks-heading h3 { margin:0; }
+.library-task { border:1px solid var(--line); border-radius:5px; padding:1rem; margin-bottom:1rem; }
+.library-task>summary { display:flex; justify-content:space-between; cursor:pointer; gap:1rem; }
+.library-task>summary strong::before { content:'▸'; display:inline-block; margin-right:.5rem; }
+.library-task[open]>summary strong::before { content:'▾'; }
+.media-task-body dl { display:grid; grid-template-columns:180px 1fr; gap:.7rem 1rem; }
+.media-task-body dt { color:var(--muted); }
+.media-task-body dd { margin:0; overflow-wrap:anywhere; }
+.media-task-search { border-top:1px solid var(--line); margin-top:1rem; padding-top:1rem; }
+@media(max-width:600px){.all-tasks-heading{align-items:stretch;flex-direction:column}.media-task-body dl{grid-template-columns:1fr}.media-task-body .task-actions{flex-wrap:wrap}}
+.task-season-row>button { margin-top:1.6rem; }
+@media(max-width:600px){.task-season-row{grid-template-columns:1fr}.task-season-row>button{margin-top:0;justify-self:start}}
 .library-nav,.library-toolbar { display:flex; gap:.75rem; flex-wrap:wrap; margin:1rem 0 1.5rem; }
 .library-nav .active { background:#ddd; color:#151515; }
 .library-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(160px,1fr)); gap:1.2rem; }
@@ -305,11 +319,11 @@ input[role="switch"]{appearance:none;width:36px;height:21px;border-radius:12px;p
 .library-calendar,.library-season,.library-episode { border:1px solid #363636; border-radius:5px; padding:1rem; margin-bottom:1rem; }
 .library-season>summary { display:flex; align-items:center; justify-content:space-between; gap:1rem; cursor:pointer; list-style-position:outside; }
 .library-season>summary strong { font-size:1.05rem; }
-.library-season.is-disabled { background:#171717; border-color:#2d2d2d; color:#888; }
-.library-season.is-disabled>summary { cursor:default; }
-.library-season.is-disabled>summary::marker { color:#555; }
+.library-season.is-unrequested { background:#171717; border-color:#2d2d2d; }
+.library-season.is-unrequested>summary { color:#888; }
+.library-season.is-unrequested>summary::marker { color:#555; }
 .library-season-summary { display:flex; align-items:center; justify-content:flex-end; gap:1rem; margin-left:auto; }
-.library-season.is-disabled .primary { color:#151515; }
+.library-season.is-unrequested .primary { color:#151515; }
 .library-season-episodes { margin-top:1rem; }
 .library-season .library-episode { margin-left:.25rem; margin-right:.25rem; background:#191919; }
 .library-episode summary { display:flex; flex-direction:column; gap:.5rem; cursor:pointer; }

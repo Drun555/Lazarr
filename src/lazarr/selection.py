@@ -110,8 +110,6 @@ def reject_reason(candidate, requests, *, detailed=False):
             and not request.requirements.min_resolution <= quality <= request.requirements.max_resolution
         ):
             reason = "Заявленное разрешение вне диапазона задачи"
-        elif quality and request.current_resolution and quality <= request.current_resolution:
-            reason = "Разрешение не улучшает полученную версию"
         elif any(
             str(candidate.external_ids[k]) != str(request.media.external_ids[k])
             for k in candidate.external_ids.keys() & request.media.external_ids.keys()
@@ -148,15 +146,4 @@ def candidate_rank(candidate, requests):
         candidate.size or 2**63,
         candidate.provider,
         candidate.id,
-    )
-
-
-def can_improve(candidate, requests, best):
-    from lazarr.matcher import resolution
-
-    quality = resolution(candidate.title)
-    return any(
-        best.get(r.id, r.current_resolution or 0)
-        < min(quality or r.requirements.max_resolution, r.requirements.max_resolution)
-        for r in requests
     )

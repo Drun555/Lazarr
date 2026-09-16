@@ -19,7 +19,7 @@ def add(service, media, season, episodes=(1,)):
 async def test_new_task_searches_immediately_and_only_it(core, media, season, worker_setup):
     _, db, _, service = core
     worker, _, demo = worker_setup
-    old = add(service, media, season, (2,))
+    old = add(service, media.model_copy(update={"id": "43"}), season, (2,))
     with db.session() as session:
         session.execute(delete(ConfigEntry).where(ConfigEntry.key.startswith(PREFIX)))
     new = add(service, media, season)
@@ -94,7 +94,7 @@ async def test_manual_queue_preserves_pause_and_calendar(core, media, season, wo
     _, db, _, service = core
     worker, _, demo = worker_setup
     paused = add(service, media, season)
-    future = add(service, media, season, (2,))
+    future = add(service, media.model_copy(update={"id": "43"}), season, (2,))
     service.edit(paused, 1, paused=True)
     with db.session() as session:
         from lazarr.models import Episode

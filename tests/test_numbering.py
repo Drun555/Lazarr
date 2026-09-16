@@ -78,7 +78,8 @@ def test_part_selection_uses_shared_canonical_episodes(core):
         CreateTask(media_id=media.id, kind="tv", season=1, episodes=list(range(39, 51))), media, season, 2
     )
     tasks = {t["id"]: t for t in service.list_tasks()}
-    assert tasks[first]["season"] == 2 and tasks[first]["canonical_season"] == 1
+    assert first == second
+    assert {s["canonical_season"] for s in tasks[first]["seasons"]} == {1}
     assert [s["episode"] for s in tasks[first]["subtasks"]] == list(range(14, 26))
     assert [s["canonical_episode"] for s in tasks[first]["subtasks"]] == list(range(39, 51))
     with db.session() as s:

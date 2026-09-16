@@ -13,6 +13,7 @@ from lazarr.models import (
     MediaAsset,
     Download,
     Release,
+    CandidateDecision,
 )
 from lazarr.calendar import released
 from lazarr.sdk import language
@@ -98,6 +99,28 @@ class LibraryService:
                     # A metadata outage must not hide the local library.
                     continue
 
+    async def load_season(self, identity, number):
+        """Fetch episode metadata on expansion without creating a download task."""
+        with self.db.session() as db:
+            media = db.get(Media, identity)
+            if not media or media.kind != "tv":
+                raise ValueError("Сериал не найден")
+            canonical = {
+                int(key.split(":")[0])
+                for key, aliases in media.metadata_json.get("episode_numbering", {}).items()
+                if any(alias["season"] == number for alias in aliases)
+            }
+            if len(canonical) > 1:
+                raise ValueError("Нет однозначного соответствия сезона")
+            season_number = next(iter(canonical), number)
+            provider_id, external_id = media.provider, media.external_id
+        async with self.refresh_lock:
+            async with self.plugins.open(provider_id) as provider:
+                info = await provider.get_season(external_id, season_number)
+            with self.db.session() as db:
+                if db.get(Media, identity):
+                    self.service._upsert_season(db, identity, info)
+
     def list(self):
         with self.db.session() as db:
             items = list(db.scalars(select(Media).order_by(Media.title, Media.id)))
@@ -166,6 +189,7 @@ class LibraryService:
                     self._version(link, asset, download, release, current=True, pending=False)
                 )
             task_versions = {}
+            selected_candidates = {}
             if subs:
                 for link, asset, download, release in db.execute(
                     select(SubtaskAsset, MediaAsset, Download, Release)
@@ -174,6 +198,12 @@ class LibraryService:
                     .join(Release, Release.id == Download.release_id)
                     .where(SubtaskAsset.subtask_id.in_([s.id for s in subs]))
                 ):
+                    selected_candidates[link.subtask_id] = db.scalar(
+                        select(CandidateDecision.id).where(
+                            CandidateDecision.subtask_id == link.subtask_id,
+                            CandidateDecision.release_id == release.id,
+                        )
+                    )
                     task_versions.setdefault(link.subtask_id, []).append(
                         self._version(
                             link,
@@ -236,6 +266,7 @@ class LibraryService:
                             {
                                 "id": sub.id,
                                 "task_id": sub.task_id,
+                                "selected_candidate_id": selected_candidates.get(sub.id),
                                 "status": "paused" if tasks[sub.task_id].paused else sub.status,
                             }
                             for sub in related
@@ -285,7 +316,7 @@ class LibraryService:
                         "verified": bool(verification.get("complete") and current),
                     }
                 )
-        for track in asset.tracks or []:
+        for track in (asset.tracks or []) if not binding else []:
             tracks.append(
                 {
                     "kind": track.get("kind", "subtitle"),

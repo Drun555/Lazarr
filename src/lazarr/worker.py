@@ -1,4 +1,4 @@
-from lazarr.selection import reject_reason, candidate_rank, can_improve
+from lazarr.selection import reject_reason, candidate_rank
 from lazarr.provider_utils import search_titles
 
 import asyncio
@@ -113,12 +113,13 @@ class Worker:
                     )
                 ):
                     continue
-                request = self.service.request_for(db, sub)
-                if (
-                    request.current_resolution
-                    and request.current_resolution >= request.requirements.max_resolution
+                if sub.status in {"done", "removed"} or db.scalar(
+                    select(SubtaskAsset.id).where(
+                        SubtaskAsset.subtask_id == sub.id, SubtaskAsset.current.is_(True)
+                    )
                 ):
                     continue
+                request = self.service.request_for(db, sub)
                 episode = db.get(Episode, sub.episode_id) if sub.episode_id else None
                 episode_info = (
                     EpisodeInfo(id=str(episode.id), number=episode.number, air_date=episode.air_date)
@@ -155,8 +156,34 @@ class Worker:
                     self.progress.value = previous
                     return True
                 self.progress.value["groups_total"] = len(groups)
-                for ids in groups:
-                    await self._run_group(ids, provider_filter=provider_filter)
+                with self.db.session() as db:
+                    task_groups = [
+                        list(set(db.scalars(select(Subtask.task_id).where(Subtask.id.in_(ids)))))
+                        for ids in groups
+                    ]
+                self.progress.prepare_tasks(task_groups)
+                with self.db.session() as db:
+                    target_ids = list(
+                        db.scalars(
+                            select(Task.id).where(
+                                Task.paused.is_(False), True if task_ids is None else Task.id.in_(task_ids)
+                            )
+                        )
+                    )
+                grouped_ids = {identity for group in task_groups for identity in group}
+                for identity in set(target_ids) - grouped_ids:
+                    self.progress.tasks[identity] = SearchProgress().snapshot()
+                    self.progress.tasks[identity].update(
+                        state="finished", message="Нет доступных для поиска серий"
+                    )
+                for ids, identities in zip(groups, task_groups):
+                    self.progress.start_group(identities)
+                    completed = False
+                    try:
+                        await self._run_group(ids, provider_filter=provider_filter)
+                        completed = True
+                    finally:
+                        self.progress.finish_group(completed)
                     self.progress.value["groups_done"] += 1
                 unavailable = bool(groups) and not self.progress.value["search_requests"]
                 self.progress.record(
@@ -189,12 +216,29 @@ class Worker:
             task_ids = list(db.scalars(select(Subtask.task_id).where(Subtask.id.in_(claimed))))
             defer(db, task_ids, provider_id, until)
 
-    async def _run_group(self, ids, provider_filter=None):
+    async def search_alternatives(self, subtask_id):
+        async with self.lock:
+            with self.db.session() as db:
+                if not db.get(Subtask, subtask_id):
+                    raise ValueError("Серия не найдена")
+            self.progress.begin()
+            self.progress.value["providers"] = self.plugins.search_status()
+            try:
+                await self._run_group([subtask_id], acquire=False)
+                if not self.progress.value["search_requests"]:
+                    raise ValueError("Поиск не выполнен. Проверьте доступность провайдеров в настройках.")
+            finally:
+                self.progress.value.update(running=False, state="finished")
+
+    async def _run_group(self, ids, provider_filter=None, acquire=True):
         settings = self.service.settings()
         now = time.time()
         with self.db.session() as db:
             claimed = []
             for identity in ids:
+                if not acquire:
+                    claimed.append(identity)
+                    continue
                 result = db.execute(
                     update(Subtask)
                     .where(Subtask.id == identity, Subtask.lease_until <= now)
@@ -205,6 +249,13 @@ class Worker:
             requests = [self.service.request_for(db, db.get(Subtask, identity)) for identity in claimed]
         if not requests:
             return
+        self.progress.value.update(
+            media=requests[0].media.title,
+            season=requests[0].season,
+            episodes=[r.episode for r in requests if r.episode is not None],
+            candidate="",
+            provider="",
+        )
         choices = []
         errors = []
         provider_ids = [
@@ -242,23 +293,21 @@ class Worker:
                 provider="",
             )
             seen = set()
-            best = {}
+            covered = set()
             for provider_id in provider_ids:
                 provider_name = self.plugins.classes[provider_id].manifest.name
                 self.progress.value["provider"] = provider_name
                 participation = provider_state[provider_id]
-                if all(
-                    best.get(r.id, r.current_resolution or 0) >= r.requirements.max_resolution
-                    for r in requests
-                ):
+                if acquire and all(r.id in covered for r in requests):
                     participation.update(
-                        state="skipped", reason="Все эпизоды найдены в максимальном разрешении"
+                        state="skipped", reason="Для всех эпизодов найдены подходящие раздачи"
                     )
                     self.progress.record("provider_skipped", f"{provider_name}: {participation['reason']}")
                     continue
                 if participation["state"] == "cooldown":
                     reason = participation["reason"]
-                    self.defer_requests(claimed, provider_id, participation["retry_at"])
+                    if acquire:
+                        self.defer_requests(claimed, provider_id, participation["retry_at"])
                     errors.append(f"{provider_name}: {reason}")
                     self.progress.record("provider_cooldown", f"{provider_name}: {reason}")
                     continue
@@ -268,10 +317,7 @@ class Worker:
                 variant_pages = 0
                 stopped = False
                 for _page in range(3 * len(variants)):
-                    if all(
-                        best.get(r.id, r.current_resolution or 0) >= r.requirements.max_resolution
-                        for r in requests
-                    ):
+                    if acquire and all(r.id in covered for r in requests):
                         break
                     query.text = variants[variant]
                     participation.update(state="searching", reason=f"Запрос страницы {_page + 1}")
@@ -294,7 +340,8 @@ class Worker:
                         participation.update(state="error", reason=self._error(exc))
                         latest = next(p for p in self.plugins.search_status() if p["id"] == provider_id)
                         participation["retry_at"] = latest["retry_at"]
-                        self.defer_requests(claimed, provider_id, latest["retry_at"])
+                        if acquire:
+                            self.defer_requests(claimed, provider_id, latest["retry_at"])
                         self.progress.record("provider_error", f"{provider_name}: {self._error(exc)}")
                         break
                     variant_pages += 1
@@ -322,12 +369,8 @@ class Worker:
                             shortlist.append(candidate)
                     ordered = sorted(shortlist, key=lambda c: candidate_rank(c, requests))
                     for position, candidate in enumerate(ordered):
-                        if not can_improve(candidate, requests, best):
-                            self.progress.value["candidates_filtered"] += 1
-                            self.progress.record(
-                                "filtered", f"Отсеяно: {candidate.title} — не улучшает найденное покрытие"
-                            )
-                            continue
+                        if acquire and all(r.id in covered for r in requests):
+                            break
                         try:
                             detailed, metadata, report = await self.evaluate(candidate, requests)
                             release_id, allowed = self._record(detailed, metadata, report)
@@ -338,9 +381,7 @@ class Worker:
                                     evaluation.result == MatchResult.MATCH
                                     and evaluation.subtask_id in allowed
                                 ):
-                                    best[evaluation.subtask_id] = max(
-                                        best.get(evaluation.subtask_id, 0), evaluation.binding.resolution or 0
-                                    )
+                                    covered.add(evaluation.subtask_id)
                         except CandidateFiltered as exc:
                             self.progress.value["candidates_filtered"] += 1
                             self.progress.record("filtered", f"Отсеяно: {candidate.title} — {exc}")
@@ -352,7 +393,8 @@ class Worker:
                             )
                             latest = next(p for p in self.plugins.search_status() if p["id"] == provider_id)
                             if latest["state"] == "cooldown":
-                                self.defer_requests(claimed, provider_id, latest["retry_at"])
+                                if acquire:
+                                    self.defer_requests(claimed, provider_id, latest["retry_at"])
                                 participation.update(
                                     state="cooldown", reason=latest["reason"], retry_at=latest["retry_at"]
                                 )
@@ -363,6 +405,8 @@ class Worker:
                                 )
                                 stopped = True
                                 break
+                        if not acquire:
+                            continue
                         with self.db.session() as db:
                             db.execute(
                                 update(Subtask)
@@ -380,6 +424,9 @@ class Worker:
                         cursor = None
                     else:
                         break
+            if not acquire:
+                self.progress.record("alternatives", "Поиск вариантов завершён. Выберите раздачу вручную.")
+                return
             self.progress.record("ranking", "Выбор подходящих раздач и объединение загрузок")
             selected = {}
             for request in requests:
@@ -430,6 +477,8 @@ class Worker:
             self.progress.value["errors"] += len(errors)
             with self.db.session() as db:
                 for identity in claimed:
+                    if not acquire:
+                        continue
                     sub = db.get(Subtask, identity)
                     pending = db.scalar(
                         select(SubtaskAsset.id).where(
@@ -518,9 +567,6 @@ class Worker:
                     audit(db, user_id, "candidate.reject", str(decision_id))
                     return
                 sub = db.get(Subtask, decision.subtask_id)
-                task = db.get(Task, sub.task_id)
-                if task.paused:
-                    raise ValueError("Сначала возобновите задачу")
                 request = self.service.request_for(db, sub)
                 release = db.get(Release, decision.release_id)
                 release_id, infohash = release.id, release.revision
@@ -535,7 +581,7 @@ class Worker:
                         Download.infohash == infohash,
                     )
                 )
-                if already_current is not None:
+                if already_current is not None and video_index is None:
                     return
             torrent = (self.config.data_dir / "torrents" / f"{infohash}.torrent").read_bytes()
             metadata = await asyncio.to_thread(self.engine.inspect, DownloadSource(torrent=torrent))
@@ -583,6 +629,7 @@ class Worker:
             await self.submit(release_id, metadata, plan, {request.id: evaluation}, override=True)
             with self.db.session() as db:
                 db.get(CandidateDecision, decision_id).action = "selected"
+                db.get(CandidateDecision, decision_id).report = evaluation.model_dump(mode="json")
                 audit(db, user_id, "candidate.select", str(decision_id), {"override": True})
 
     async def choose_all(self, decision_id, user_id):
@@ -594,8 +641,6 @@ class Worker:
                     raise ValueError("Кандидат не найден")
                 source_subtask = db.get(Subtask, decision.subtask_id)
                 task = db.get(Task, source_subtask.task_id)
-                if task.paused:
-                    raise ValueError("Сначала возобновите задачу")
                 release = db.get(Release, decision.release_id)
                 release_id, infohash = release.id, release.revision
                 candidate = Candidate.model_validate(release.data)
@@ -668,10 +713,12 @@ class Worker:
             return {"selected": selected, "total": len(subtasks), "skipped": len(subtasks) - selected}
 
     async def submit(self, release_id, metadata, plan, reports, override=False):
-        async with self.download_lock:
+        async with self.poll_lock, self.download_lock:
             with self.db.session() as db:
                 for job in db.scalars(select(ConfigEntry).where(ConfigEntry.key.like("cleanup.%"))):
-                    if any(Path(p).name == plan.infohash for p in job.value["directories"]):
+                    if any(Path(p).name == plan.infohash for p in job.value["directories"]) or any(
+                        Path(entry["root"]).name == plan.infohash for entry in job.value.get("files", [])
+                    ):
                         raise ValueError(
                             "Предыдущие файлы этой раздачи ещё удаляются; повторите после очистки"
                         )
@@ -681,11 +728,14 @@ class Worker:
                 valid = []
                 for binding in plan.bindings:
                     sub = db.get(Subtask, binding.subtask_id)
-                    if sub and not db.get(Task, sub.task_id).paused:
+                    if sub and (override or not db.get(Task, sub.task_id).paused):
                         valid.append(binding)
                 if not valid:
                     return
                 plan.bindings = valid
+                from lazarr.replacement import retire_selections
+
+                await retire_selections(self, db, valid, plan.infohash)
                 download = db.scalar(select(Download).where(Download.infohash == plan.infohash))
                 if download:
                     old = DownloadPlan.model_validate(download.plan)
@@ -747,15 +797,44 @@ class Worker:
                         )
                         db.add(link)
                     else:
-                        link.pending, link.override, link.verification = True, override, {}
+                        link.current, link.pending, link.override, link.verification = (
+                            False,
+                            True,
+                            override,
+                            {},
+                        )
                         link.preflight = reports[sub.id].model_dump(mode="json")
                     sub.status, sub.last_error = "starting", None
-                path, paused = download.save_path, download.manual_paused
-            await asyncio.to_thread(self.engine.add, metadata.torrent, path, plan, paused)
+                    sub.missing_subtitle_languages = []
+                path = download.save_path
+                paused = download.manual_paused or all(
+                    db.get(Task, db.get(Subtask, b.subtask_id).task_id).paused for b in plan.bindings
+                )
+            from lazarr.deletion import cleanup
 
-    async def restore(self):
+            self.probe_cache.clear()
+            await asyncio.to_thread(cleanup, self.db)
+            await self.restore(reset_leases=False, skip_hash=plan.infohash)
+            if not self.cleanup_blocks(plan.infohash):
+                await asyncio.to_thread(self.engine.add, metadata.torrent, path, plan, paused)
+
+    def cleanup_blocks(self, infohash):
+        with self.db.session() as db:
+            return any(
+                any(Path(p).name == infohash for p in job.value["directories"])
+                or any(Path(entry["root"]).name == infohash for entry in job.value.get("files", []))
+                for job in db.scalars(select(ConfigEntry).where(ConfigEntry.key.like("cleanup.%")))
+            )
+
+    async def restore(self, reset_leases=True, skip_hash=None):
         if self.engine is None:
             return
+        if reset_leases:
+            from lazarr.replacement import prune_history
+            from lazarr.deletion import cleanup
+
+            await prune_history(self)
+            await asyncio.to_thread(cleanup, self.db)
         with self.db.session() as db:
             rows = [
                 (
@@ -768,8 +847,11 @@ class Worker:
                 )
                 for d in db.scalars(select(Download))
             ]
-            db.execute(update(Subtask).values(lease_until=0))
+            if reset_leases:
+                db.execute(update(Subtask).values(lease_until=0))
         for infohash, torrent_file, save_path, plan, paused, counters in rows:
+            if infohash == skip_hash or self.engine.contains(infohash) or self.cleanup_blocks(infohash):
+                continue
             try:
                 await asyncio.to_thread(
                     self.engine.add,
@@ -826,7 +908,9 @@ class Worker:
         from lazarr.deletion import cleanup
 
         async with self.poll_lock:
-            await asyncio.to_thread(cleanup, self.db)
+            async with self.download_lock:
+                await asyncio.to_thread(cleanup, self.db)
+                await self.restore(reset_leases=False)
             await self._poll()
 
     async def _poll(self):
@@ -972,8 +1056,6 @@ class Worker:
             if (request.requirements.min_resolution <= quality <= request.requirements.max_resolution)
             else MatchResult.MISMATCH
         )
-        if request.current_resolution and quality is not None and quality <= request.current_resolution:
-            resolution_result = MatchResult.MISMATCH
         criteria = [
             Criterion(
                 field="audio",
@@ -1041,10 +1123,6 @@ class Worker:
             sub.status = "done" if state["complete"] else "ready"
             sub.last_error = None
             if state["complete"]:
-                for old in db.scalars(
-                    select(SubtaskAsset).where(SubtaskAsset.subtask_id == sub_id, SubtaskAsset.id != link_id)
-                ):
-                    old.current, old.pending = False, False
                 link.current, link.pending = True, False
                 part_key = f"episode:{sub.episode_id}" if sub.episode_id else "movie"
                 library_asset = db.scalar(

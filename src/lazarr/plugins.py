@@ -23,8 +23,14 @@ from lazarr.sdk import (
     ContentProvider,
     MetadataProvider,
     ReleaseCalendarProvider,
-    SubtitleProvider,
 )
+
+
+PROVIDER_TYPES = {
+    "content": ContentProvider,
+    "metadata": MetadataProvider,
+    "calendar": ReleaseCalendarProvider,
+}
 
 
 class CatalogEntry(BaseModel):
@@ -72,6 +78,8 @@ class PluginManager:
         for pointer in self.root.glob("*/active.json"):
             try:
                 entry = CatalogEntry.model_validate_json(pointer.read_text())
+                if entry.kind not in PROVIDER_TYPES:
+                    continue
                 self._load_active(entry)
             except Exception:
                 self.errors[pointer.parent.name] = "Cannot load active plugin; update or roll back"
@@ -104,12 +112,9 @@ class PluginManager:
             raise ValueError("Plugin identity does not match catalog")
         if SDK_VERSION not in SpecifierSet(manifest.sdk):
             raise ValueError("Incompatible plugin SDK")
-        expected = {
-            "content": ContentProvider,
-            "metadata": MetadataProvider,
-            "calendar": ReleaseCalendarProvider,
-            "subtitle": SubtitleProvider,
-        }[manifest.kind]
+        expected = PROVIDER_TYPES.get(manifest.kind)
+        if expected is None:
+            raise ValueError("Unsupported provider kind")
         if not issubclass(cls, expected) or inspect.isabstract(cls):
             raise ValueError("Plugin does not implement its provider contract")
         return cls
@@ -151,7 +156,11 @@ class PluginManager:
             response.raise_for_status()
             if len(response.content) > 1024 * 1024:
                 raise ValueError("Catalog too large")
-            result = [CatalogEntry.model_validate(v) for v in response.json()["plugins"]]
+            result = [
+                entry
+                for value in response.json()["plugins"]
+                if (entry := CatalogEntry.model_validate(value)).kind in PROVIDER_TYPES
+            ]
             if len({entry.id for entry in result}) != len(result):
                 raise ValueError("Duplicate plugin IDs")
             return result
@@ -366,7 +375,7 @@ class PluginManager:
                 jar.set(item["name"], item["value"], domain=item["domain"], path=item["path"])
             pacer = (
                 self.request_pacers.setdefault(plugin_id, RequestPacer(self.request_interval))
-                if cls.manifest.kind in {"content", "subtitle"}
+                if cls.manifest.kind == "content"
                 else None
             )
             async with httpx.AsyncClient(

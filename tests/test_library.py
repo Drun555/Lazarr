@@ -26,6 +26,38 @@ def test_classification_includes_anime_movies_but_not_japanese_live_action():
     assert classify("tv", [], []) == "series"
 
 
+def test_load_unrequested_season_then_request_only_one_episode(core, media, season, monkeypatch):
+    from lazarr.sdk import SeasonInfo, EpisodeInfo
+
+    config, _, _, service = core
+    service.create_from_metadata(CreateTask(media_id="42", kind="tv", season=1), media, season, 1)
+    service.edit(1, 1, paused=True)
+    info = SeasonInfo(number=2, episodes=[EpisodeInfo(id=str(n), number=n) for n in (1, 2, 3)])
+
+    async def get_season(self, media_id, number):
+        assert number == 2
+        return info
+
+    async def get_media(self, kind, media_id):
+        return media
+
+    with TestClient(create_app(config)) as client:
+        login(client)
+        provider = client.app.state.ctx.plugins.classes["tmdb"]
+        monkeypatch.setattr(provider, "get_season", get_season)
+        monkeypatch.setattr(provider, "get_media", get_media)
+        before = client.get("/api/v1/tasks").json()
+        assert client.get("/api/v1/libraries/media/1/seasons/2/episodes").status_code == 200
+        assert client.get("/api/v1/tasks").json() == before
+        detail = client.get("/api/v1/libraries/media/1").json()
+        assert len([e for e in detail["episodes"] if e["season"] == 2]) == 3
+        response = client.post("/api/v1/libraries/media/1/seasons", json={"season": 2, "episodes": [2]})
+        assert response.status_code == 200, response.text
+        task = client.get("/api/v1/tasks").json()[0]
+        assert [s["episode"] for s in task["subtasks"] if s["season"] == 2] == [2]
+        assert next(s for s in task["seasons"] if s["season"] == 2)["whole_season"] is False
+
+
 async def test_shared_media_detail_tracks_release_calendar_last_search(core, media, season, worker_setup):
     _, db, plugins, service = core
     worker, engine, _ = worker_setup
@@ -47,7 +79,7 @@ async def test_shared_media_detail_tracks_release_calendar_last_search(core, med
     assert len(groups[2]["items"]) == 1
     identity = groups[2]["items"][0]["id"]
     before = library.detail(identity)
-    assert before["task_count"] == 2 and before["last_search_at"] is None
+    assert before["task_count"] == 1 and before["last_search_at"] is None
     assert before["seasons"] == media.seasons
     assert any(e["season"] == 2 and e["episode"] == 14 for e in before["episodes"])
     # Use canonical filename numbering for this synthetic worker fixture.
@@ -60,7 +92,7 @@ async def test_shared_media_detail_tracks_release_calendar_last_search(core, med
     first = next(e for e in detail["episodes"] if e["episode"] == 1)
     assert first["overview"] == "Описание серии" and first["still"].endswith("/still.jpg")
     assert first["subtasks"] and first["subtasks"][0]["id"]
-    assert len(first["files"]) == 1  # Shared physical asset, two users.
+    assert len(first["files"]) == 1  # One media task, accessible to both users.
     file = first["files"][0]
     assert file["pending"] and not file["verified"]
     assert file["resolution"] == 1080 and file["release"]["provider"] == "demo"
@@ -106,6 +138,7 @@ def test_library_api_auth_movie_empty_file_and_not_found(core):
         detail = client.get(f"/api/v1/libraries/media/{item['id']}").json()
         assert len(detail["episodes"]) == 1
         assert detail["episodes"][0]["files"] == [] and not detail["episodes"][0]["released"]
+        assert client.post(f"/api/v1/libraries/media/{item['id']}/subtitles", json={}).status_code == 404
         assert client.get("/api/v1/libraries/media/99999").status_code == 404
 
 
@@ -130,7 +163,7 @@ def test_library_media_delete_removes_shared_media_tasks_and_requires_csrf(core,
             == 403
         )
         result = client.request("DELETE", url, json={"delete_files": False})
-        assert result.status_code == 200 and result.json()["tasks_deleted"] == 2
+        assert result.status_code == 200 and result.json()["tasks_deleted"] == 1
         assert all(not group["items"] for group in client.get("/api/v1/libraries").json())
         assert client.get("/api/v1/tasks").json() == []
         assert client.get(url).status_code == 404

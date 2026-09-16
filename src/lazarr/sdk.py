@@ -12,7 +12,7 @@ from lazarr.languages import language as language, ALIASES
 
 LANGUAGES = ALIASES
 
-SDK_VERSION = "1.5"
+SDK_VERSION = "1.6"
 
 
 def safe_relative_path(value: str) -> str:
@@ -41,7 +41,7 @@ class ConfigField(BaseModel):
 class ProviderManifest(BaseModel):
     id: str = Field(pattern=r"^[a-z][a-z0-9_]{0,63}$")
     name: str
-    kind: Literal["metadata", "content", "calendar", "subtitle"]
+    kind: Literal["metadata", "content", "calendar"]
     version: str
     sdk: str = ">=1,<2"
     config_fields: list[ConfigField] = Field(default_factory=list)
@@ -153,35 +153,6 @@ class DownloadSource(BaseModel):
     magnet: str | None = None
 
 
-class SubtitleRequest(BaseModel):
-    media_kind: Literal["movie", "episode"]
-    title: str
-    year: int | None = None
-    season: int | None = None
-    episode: int | None = None
-    languages: list[str]
-    external_ids: dict[str, str] = Field(default_factory=dict)
-    video_filename: str = ""
-    aliases: list[str] = Field(default_factory=list)
-
-
-class SubtitleCandidate(BaseModel):
-    id: str
-    language: str
-    filename: str
-    release: str = ""
-    downloads: int = 0
-    rating: float = 0
-    hearing_impaired: bool = False
-    machine_translated: bool = False
-    ai_translated: bool = False
-
-
-class SubtitleFile(BaseModel):
-    content: bytes = Field(exclude=True)
-    filename: str
-
-
 class SubtaskRequest(BaseModel):
     id: int
     media: MetadataItem
@@ -190,7 +161,6 @@ class SubtaskRequest(BaseModel):
     absolute_number: int | None = None
     requirements: Requirements
     air_date: str | None = None
-    current_resolution: int | None = None
 
 
 class MatchResult(StrEnum):
@@ -342,14 +312,6 @@ class ContentProvider(Provider):
     async def inspect(self, candidate: Candidate) -> Candidate: ...
     @abstractmethod
     async def resolve_download(self, candidate: Candidate) -> DownloadSource: ...
-
-
-class SubtitleProvider(Provider):
-    @abstractmethod
-    async def search(self, query: SubtitleRequest) -> list[SubtitleCandidate]: ...
-
-    @abstractmethod
-    async def download(self, candidate: SubtitleCandidate) -> SubtitleFile: ...
 
 
 class ReleaseCalendarProvider(ABC):

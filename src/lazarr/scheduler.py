@@ -58,12 +58,29 @@ class Scheduler:
         self.wake.set()
         return key
 
-    def snapshot(self):
+    def snapshot(self, task_id=None):
         with self.service.db.session() as db:
             entries = list(db.scalars(select(ConfigEntry).where(ConfigEntry.key.startswith(PREFIX))))
+            if task_id is not None:
+                entries = [r for r in entries if r.value.get("task_id") in (None, task_id)]
             pending = len(entries)
             next_attempt = min((r.value.get("not_before", 0) for r in entries), default=0)
-        result = self.worker.progress.snapshot()
+        if task_id is None:
+            result = self.worker.progress.snapshot()
+        else:
+            from copy import deepcopy
+            from lazarr.search import SearchProgress
+
+            result = deepcopy(self.worker.progress.tasks.get(task_id, SearchProgress().snapshot()))
+            if result["state"] in {"finished", "error"}:
+                entries = [
+                    row
+                    for row in entries
+                    if row.value.get("not_before", 0) > 0
+                    or row.value.get("created_at", 0) > result.get("started_at", 0)
+                ]
+                pending = len(entries)
+                next_attempt = min((r.value.get("not_before", 0) for r in entries), default=0)
         if not result.get("providers"):
             result["providers"] = self.worker.plugins.search_status()
         result["pending_requests"] = pending
@@ -73,6 +90,14 @@ class Scheduler:
         if pending and not result["running"] and result["state"] not in {"blocked", "error"}:
             if next_attempt <= time.time():
                 result.update(state="queued", message="Поиск поставлен в очередь")
+        if task_id is not None and pending and not result["running"]:
+            if self.worker.engine is None or not self.worker.plugins.available("content"):
+                result.update(
+                    state="blocked",
+                    message="Движок загрузок недоступен"
+                    if self.worker.engine is None
+                    else "Включите провайдеры контента в настройках",
+                )
         return result
 
     async def process_queue(self):

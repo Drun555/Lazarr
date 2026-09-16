@@ -1,4 +1,5 @@
 let librarySelection='series',libraryMedia=null,libraryItem=null,libraryGeneration=0;
+const loadedLibrarySeasons=new Set(),loadingLibrarySeasons=new Set();
 const libraryDate=value=>value?new Date(value.length===10?value+'T12:00:00':value).toLocaleDateString('ru-RU'):'Дата неизвестна';
 const searchDate=value=>value?new Date(value*1000).toLocaleString('ru-RU'):'Не записана';
 const progressPercent=value=>Math.min(100,Math.max(0,(Number(value)||0)*100));
@@ -29,19 +30,28 @@ function downloadDetails(download){
   return `<div class="episode-download"><div class="episode-download-heading">${statusPill(download.state)}<span class="fine">${progressPercent(download.progress).toFixed(1)}% · ${bytes(download.download_rate)}/с · осталось ${eta(download.eta)}</span><button class="ghost" data-download="${download.id}" data-action="${paused?'resume':'pause'}">${paused?'Продолжить':'Пауза'}</button></div>${progressBar(download.progress,'Прогресс серии')}<div class="episode-download-stats fine">Раздача: ${bytes(download.upload_rate)}/с · ratio ${Number(download.ratio||0).toFixed(2)} / ${download.seed_ratio??'∞'} · сиды/пиры ${download.seeds||0}/${download.peers||0}</div>${download.error?`<p class="form-error">${esc(download.error)}</p>`:''}</div>`;
 }
 function libraryFile(file){
-  const label=file.current?'Текущая версия':file.pending?'Выбранная версия':'Предыдущая версия';
+  const label=file.current?'Проверенный файл':'Выбранный файл';
   const trackRows=kind=>file.tracks.filter(t=>t.kind===kind).map(t=>`${esc(languageName(t.language))}${t.codec?' · '+esc(t.codec):''}${t.channels?' · '+t.channels+' кан.':''} · ${t.external?'внешняя':'встроенная'}${t.title?' · '+esc(t.title):''}${t.path?'<small class="path">'+esc(t.path)+'</small>':''}`).join('<br>')||'Нет сведений';
   const href=/^https?:\/\//i.test(file.release.url)?file.release.url:null;
   return `<article class="library-file"><div class="part-row"><strong>${label}</strong>${statusPill(file.download_state)}</div>${downloadDetails(file.download)}<p class="fine">${file.verified?'Файл проверен':'Предварительные сведения; версия ещё не подтверждена'}</p><p class="path">${esc(file.directory)}/${esc(file.path)}</p><dl><dt>Видео</dt><dd>${file.resolution?file.resolution+'p':'Качество неизвестно'}${file.codec?' · '+esc(file.codec):''}${file.width?' · '+file.width+'×'+file.height:''} · ${bytes(file.size)}</dd><dt>Аудиодорожки</dt><dd>${trackRows('audio')}</dd><dt>Субтитры</dt><dd>${trackRows('subtitle')}</dd><dt>Раздача · ${esc(file.release.provider)}</dt><dd>${href?`<a href="${esc(href)}" target="_blank" rel="noopener noreferrer">${esc(file.release.title)}</a>`:esc(file.release.title)}</dd></dl>${file.missing_subtitle_languages.length?`<p class="fine">Не найдены субтитры: ${esc(languageList(file.missing_subtitle_languages))}</p>`:''}</article>`;
 }
 function episodeActions(episode){
   const subtasks=episode.subtasks||[];
-  if(!subtasks.length)return '';
-  return `<div class="episode-actions">${subtasks.map((sub,index)=>`<button class="ghost" data-candidates="${sub.id}">${subtasks.length>1?`Раздачи · задача ${index+1}`:'Выбрать раздачу'}</button>`).join('')}</div>`;
+  if(!subtasks.length)return `<div class="episode-actions">${episode.episode!=null&&!episode.files?.length?`<button class="primary" data-download-season="${esc(episode.season)}" data-download-episode="${esc(episode.episode)}">Скачать серию</button>`:''}<button class="ghost" data-delete-episode="${esc(episode.id)}" ${episode.files?.length?'':'disabled'}>Удалить</button></div>`;
+  return `<div class="episode-actions">${subtasks.map(sub=>`<button class="ghost" data-candidates="${sub.id}">Выбрать раздачу</button>${sub.selected_candidate_id?`<button class="ghost" data-map-files="${sub.selected_candidate_id}">Изменить файлы</button>`:''}<button class="ghost" data-delete-selection="${sub.id}">Удалить</button>`).join('')}</div>`;
 }
-function mediaTaskActions(identity){
-  const tasks=(state.tasks||[]).filter(task=>task.media_id===identity);
-  return tasks.map(task=>chooseAllButton(task)).filter(Boolean).join(' ');
+function renderMediaTask(item, identity){
+  const task=item.task??(state.tasks||[]).find(t=>t.media_id===identity);
+  if(!task)return `<details class="library-task" id="media-task"><summary><strong>Задача</strong><span class="fine">Не создана</span></summary>${item.kind==='movie'?'<button class="primary" data-create-media-task>Скачать фильм</button>':'<p class="muted">Нажмите «Скачать» у нужного сезона, чтобы создать задачу.</p>'}</details>`;
+  const requirements=task.requirements,search=item.search||{};
+  const seasons=task.seasons||[{season:task.season,whole_season:task.whole_season}];
+  const seasonList=task.kind==='movie'?'Фильм':seasons.filter(s=>s.season!=null).map(s=>{
+    const numbers=task.subtasks.filter(p=>(p.season??task.season)===s.season).map(p=>p.episode);
+    return `Сезон ${esc(s.season)}: ${s.whole_season?'все серии, включая новые':esc(numbers.join(', '))}`;
+  }).join('<br>');
+  const busy=search.running||search.pending_requests;
+  const searchMessage=search.state==='idle'&&item.last_search_at?`Последний поиск: ${searchDate(item.last_search_at)}. Подробный журнал появится при следующем запуске.`:search.message||'Поиск ещё не запускался';
+  return `<details class="library-task" id="media-task" open><summary><strong>Задача</strong><span class="fine">${task.completed?'Завершена':task.paused?'На паузе':search.running?'Поиск':search.pending_requests?'В очереди':'Активна'}</span></summary><div class="media-task-body"><dl><dt>Сезоны и серии</dt><dd>${seasonList||'Фильм'}</dd><dt>Качество</dt><dd>${requirements.min_resolution}–${requirements.max_resolution}p</dd><dt>Аудиодорожки</dt><dd>${esc(languageList(requirements.audio_languages||[])||'Без ограничений')}</dd><dt>Субтитры</dt><dd>${esc(languageList(requirements.subtitle_languages||[])||'Не запрошены')}</dd>${requirements.keyword?`<dt>Обязательная фраза</dt><dd>${esc(requirements.keyword)}</dd>`:''}</dl><div class="task-actions"><button class="primary" data-run-task="${task.id}" ${task.completed||task.paused||busy?'disabled':''}>Запустить поиск</button><button class="ghost" data-pause-task="${task.id}" data-paused="${task.paused}">${task.paused?'Продолжить':'Пауза'}</button><button class="ghost" data-edit-task="${task.id}">Изменить</button><button class="ghost" data-delete-task="${task.id}">Удалить задачу</button>${chooseAllButton(task)}</div><section class="media-task-search"><h3>Поиск раздач</h3><p role="status">${esc(task.completed?'Все запрошенные серии скачаны и проверены':task.paused?'Задача на паузе':searchMessage)}${search.next_attempt_at>Date.now()/1000?` · Повтор ${searchDate(search.next_attempt_at)}`:''}</p>${search.groups_total?progressBar(search.groups_done/search.groups_total,'Поиск по сезонам'):''}<p class="fine">${search.season!=null?`Сезон ${esc(search.season)} · `:''}${esc(search.provider||'')}${search.candidates_checked!=null?` · Проверено раздач: ${search.candidates_checked}`:''}</p>${search.history?.length?`<details class="task-search-log"><summary>Ход поиска</summary><ol>${search.history.map(event=>`<li>${esc(event.message)}</li>`).join('')}</ol></details>`:''}${task.subtasks.some(p=>p.error)?`<p class="form-error">${esc([...new Set(task.subtasks.map(p=>p.error).filter(Boolean))].join('; '))}</p>`:''}</section></div></details>`;
 }
 function renderEpisode(episode){
   const number=episode.episode==null?'Фильм':`${episode.episode}.`;
@@ -55,10 +65,10 @@ function renderSeason(item,number,episodes,info={}){
   const activity=downloading?` · загружается ${downloading}`:ready?` · готово ${ready}`:'';
   const label=number==null?'Без сезона':number===0?'Дополнительно':`Сезон ${number}`;
   const count=info.episode_count??episodes.length;
-  const hasTask=(state.tasks||[]).some(task=>task.media_id===item.id&&Number(task.canonical_season??task.season)===number);
+  const hasTask=episodes.some(episode=>episode.subtasks?.length)||(state.tasks||[]).some(task=>task.media_id===item.id&&(task.seasons||[{season:task.season,canonical_season:task.canonical_season}]).some(season=>season.season===number||(!season.numbering_season&&season.canonical_season===number)));
   const hasFiles=episodes.some(episode=>episode.files?.length);
-  if(number!==null&&!hasTask&&!hasFiles)return `<details class="library-season is-disabled" name="library-seasons" data-season="${esc(number)}" aria-disabled="true"><summary><strong>${esc(label)}</strong><span class="library-season-summary"><span class="fine">${count} серий · не добавлен</span><button type="button" class="primary" data-download-season="${esc(number)}">Скачать</button></span></summary></details>`;
-  return `<details class="library-season" name="library-seasons" data-season="${esc(number??'none')}"><summary><strong>${esc(label)}</strong><span class="fine">${episodes.length} серий${activity}</span></summary><div class="library-season-episodes">${episodes.map(renderEpisode).join('')}</div></details>`;
+  if(number!==null&&!hasTask&&!hasFiles)return `<details class="library-season is-unrequested" name="library-seasons" data-season="${esc(number)}"><summary><strong>${esc(label)}</strong><span class="library-season-summary"><span class="fine">${count} серий · не добавлен</span><button type="button" class="primary" data-download-season="${esc(number)}">Скачать</button></span></summary><div class="library-season-episodes">${episodes.length?episodes.map(renderEpisode).join(''):'<p class="muted">Сведения о сериях пока не получены.</p>'}</div></details>`;
+  return `<details class="library-season" name="library-seasons" data-season="${esc(number??'none')}"><summary><strong>${esc(label)}</strong><span class="library-season-summary"><span class="fine">${episodes.length} серий${activity}</span>${!hasTask&&number!==null?`<button type="button" class="primary" data-download-season="${esc(number)}">Скачать</button>`:''}${number!==null?`<button type="button" class="ghost" data-delete-season="${esc(number)}">Удалить сезон</button>`:''}</span></summary><div class="library-season-episodes">${episodes.map(renderEpisode).join('')}</div></details>`;
 }
 function renderEpisodeGroups(item){
   if(item.kind!=='tv')return item.episodes.map(renderEpisode).join('');
@@ -73,36 +83,61 @@ function renderEpisodeGroups(item){
   return [...groups.entries()].sort(([left],[right])=>(left??-1)-(right??-1)).map(([season,episodes])=>renderSeason(item,season,episodes,seasonInfo.get(season))).join('');
 }
 async function openLibraryMedia(identity,silent=false){
+  const taskOpen=$('#media-task')?.open??true;
+  const logOpen=$('.task-search-log')?.open??false;
   const opened=new Set($$('.library-episode[open]').map(node=>node.dataset.episode));
   const openedSeasons=new Set($$('.library-season[open]').map(node=>node.dataset.season));
   const generation=++libraryGeneration;libraryMedia=identity;
   $('#library-detail').hidden=false;$('#library-overview').hidden=true;
+  $('#all-tasks-control').hidden=true;
   if(!silent)$('#library-detail-body').textContent='Загрузка…';
   const item=await api(`/libraries/media/${identity}`);if(generation!==libraryGeneration)return;libraryItem=item;
+  if(item.task){state.tasks=state.tasks.filter(t=>t.media_id!==identity);state.tasks.push(item.task);}
   const meta=item.metadata;
   const calendar=[...item.episodes].sort((a,b)=>(a.air_date||'9999').localeCompare(b.air_date||'9999'));
-  const allActions=mediaTaskActions(identity);
-  $('#library-detail-body').innerHTML=`<div class="library-heading">${item.poster?`<img src="${esc(posterUrl(item.poster))}" alt="">`:''}<div><h2>${esc(item.title)}</h2><p class="fine">${esc(meta.original_title||'')} · ${item.year||'—'}</p><p>${esc(meta.overview||'Описание отсутствует.')}</p><p class="fine">${esc((meta.genres||[]).join(', '))}</p><p>Последний поиск: ${searchDate(item.last_search_at)}</p><p class="fine">Задач: ${item.task_count} · Источник: ${esc(meta.provider||'tmdb')} · ID: ${esc(meta.id)}</p>${allActions?`<div class="media-task-actions">${allActions}</div>`:''}</div></div><details class="library-calendar"><summary>Календарь выхода · ${calendar.length}</summary><ol>${calendar.map(e=>`<li><time>${libraryDate(e.air_date)}</time> — ${e.episode==null?'Фильм':`S${e.season} · E${e.episode}`} · ${esc(e.title)}${e.air_date&&!e.released?' · Ожидается':''}</li>`).join('')}</ol></details><div class="library-episodes">${renderEpisodeGroups(item)||'<p>Сведения об эпизодах ещё не получены.</p>'}</div>`;
+  $('#library-detail-body').innerHTML=`<div class="library-heading">${item.poster?`<img src="${esc(posterUrl(item.poster))}" alt="">`:''}<div><h2>${esc(item.title)}</h2><p class="fine">${esc(meta.original_title||'')} · ${item.year||'—'}</p><p>${esc(meta.overview||'Описание отсутствует.')}</p><p class="fine">${esc((meta.genres||[]).join(', '))}</p><p>Последний поиск: ${searchDate(item.last_search_at)}</p><p class="fine">Источник: ${esc(meta.provider||'tmdb')} · ID: ${esc(meta.id)}</p></div></div><details class="library-calendar"><summary>Календарь выхода · ${calendar.length}</summary><ol>${calendar.map(e=>`<li><time>${libraryDate(e.air_date)}</time> — ${e.episode==null?'Фильм':`S${e.season} · E${e.episode}`} · ${esc(e.title)}${e.air_date&&!e.released?' · Ожидается':''}</li>`).join('')}</ol></details><div class="library-episodes">${renderEpisodeGroups(item)||'<p>Сведения об эпизодах ещё не получены.</p>'}</div>`;
   const seasons=$$('.library-season');
+  $('.library-episodes').insertAdjacentHTML('beforebegin',renderMediaTask(item,identity));
+  $('#media-task').open=taskOpen;
+  if($('.task-search-log'))$('.task-search-log').open=logOpen;
   for(const node of seasons)if(openedSeasons.has(node.dataset.season))node.open=true;
-  if(!silent&&!openedSeasons.size){const first=seasons.find(node=>!node.classList.contains('is-disabled'));if(first)first.open=true;}
+  if(!silent&&!openedSeasons.size){const first=seasons.find(node=>!node.classList.contains('is-unrequested'));if(first)first.open=true;}
   for(const node of $$('.library-episode'))if(opened.has(node.dataset.episode))node.open=true;
 }
 async function refreshLibraryView(){
   if(state.tab!=='library')return;
   if(libraryMedia)await openLibraryMedia(libraryMedia,true);else await loadLibraries(true);
 }
+document.addEventListener('toggle',async event=>{
+  const node=event.target;
+  if(!(node instanceof HTMLDetailsElement)||!node.classList.contains('library-season')||!node.open||!libraryItem)return;
+  const identity=libraryMedia,season=Number(node.dataset.season),key=`${identity}:${season}`;
+  if(!Number.isInteger(season)||libraryItem.episodes.some(e=>e.season===season)||loadedLibrarySeasons.has(key)||loadingLibrarySeasons.has(key))return;
+  loadingLibrarySeasons.add(key);
+  node.querySelector('.library-season-episodes').textContent='Загрузка серий…';
+  try{
+    await api(`/libraries/media/${identity}/seasons/${season}/episodes`);
+    loadedLibrarySeasons.add(key);
+    if(libraryMedia===identity)await openLibraryMedia(identity,true);
+  }catch(error){if(node.isConnected)node.querySelector('.library-season-episodes').textContent=`${error.message}. Закройте и откройте сезон для повтора.`;}
+  finally{loadingLibrarySeasons.delete(key);}
+},true);
 document.addEventListener('click',async event=>{
   const button=event.target.closest('button');if(!button)return;
   try{
     if(button.dataset.library){librarySelection=button.dataset.library;renderLibraries();}
-    else if(button.dataset.libraryMedia)await openLibraryMedia(Number(button.dataset.libraryMedia));
-    else if(button.id==='library-back'){libraryGeneration++;libraryMedia=null;libraryItem=null;$('#library-detail').hidden=true;$('#library-overview').hidden=false;}
-    else if(button.dataset.downloadSeason!==undefined){event.preventDefault();if(!libraryItem)return;if(!state.settings)await loadSettings();await switchTab('search');showTaskForm(libraryItem.metadata,Number(button.dataset.downloadSeason));}
-    else if(button.id==='library-refresh')await openLibraryMedia(libraryMedia);
-    else if(button.id==='library-subtitles'){
-      const defaults=state.settings?.defaults?.subtitle_languages||[];
-      openModal('Загрузить субтитры',`<form id="subtitle-download-form" data-media="${libraryMedia}" class="stack">${languagePicker('subtitle_download_languages','Языки субтитров',defaults,'Пусто — языки из требований задач, затем значения по умолчанию.')}<p class="fine">Включённые провайдеры субтитров будут опрошены для готовых файлов, в которых этих языков ещё нет. Файлы сохранятся рядом с видео.</p><div class="form-footer"><p class="form-error"></p><button type="submit" class="primary">Загрузить</button></div></form>`);
+    else if(button.dataset.libraryMedia){libraryMedia=Number(button.dataset.libraryMedia);await switchTab('library');}
+    else if(button.id==='library-back'){libraryGeneration++;libraryMedia=null;libraryItem=null;$('#library-detail').hidden=true;$('#library-overview').hidden=false;$('#all-tasks-control').hidden=false;await loadLibraries();}
+    else if(button.dataset.downloadSeason!==undefined){event.preventDefault();if(!libraryItem)return;button.disabled=true;try{const season=Number(button.dataset.downloadSeason);const aliases=Object.values(libraryItem.metadata.episode_numbering||{}).flat();const single=button.dataset.downloadEpisode!==undefined;const selection={season,...(aliases.some(alias=>alias.season===season)?{numbering_season:season}:{}),...(single?{episodes:[Number(button.dataset.downloadEpisode)]}:{})};await api(`/libraries/media/${libraryMedia}/seasons`,'POST',selection);await refreshTasks();await refreshDownloads();await openLibraryMedia(libraryMedia,true);toast(single?'Серия добавлена в задачу':'Сезон добавлен в задачу');}finally{button.disabled=false;}}
+    else if(button.hasAttribute('data-create-media-task')){button.disabled=true;try{const meta=libraryItem.metadata;await api('/tasks','POST',{provider:meta.provider,media_id:meta.id,kind:'movie'});await refreshTasks();await refreshLibraryView();}finally{button.disabled=false;}}
+    else if(button.dataset.deleteSeason!==undefined){
+      event.preventDefault();
+      const number=button.dataset.deleteSeason;
+      openModal('Удаление сезона',`<form id="delete-selection-form" data-season="${esc(number)}" data-endpoint="/libraries/media/${libraryMedia}/seasons/${esc(number)}" class="stack"><p>Удалить сезон ${esc(number)} из задачи и удалить все его файлы и выбранные раздачи? Файлы нельзя восстановить без повторного скачивания.</p><p class="fine">Файлы, нужные другим сезонам и произведениям, сохранятся. Сезон можно будет снова добавить кнопкой «Скачать». При удалении последнего сезона пустая задача тоже будет удалена.</p><div class="form-footer"><p class="form-error"></p><button type="submit" class="primary">Удалить сезон</button></div></form>`);
+    }
+    else if(button.dataset.deleteSelection||button.dataset.deleteEpisode){
+      const endpoint=button.dataset.deleteSelection?`/subtasks/${button.dataset.deleteSelection}/selection`:`/libraries/media/${libraryMedia}/episodes/${button.dataset.deleteEpisode}/selection`;
+      openModal('Удаление файлов серии',`<form id="delete-selection-form" data-endpoint="${esc(endpoint)}" class="stack"><p>Удалить файлы этой серии и сбросить выбранную раздачу? Удалённые файлы нельзя восстановить без повторного скачивания.</p><p class="fine">Файлы, используемые другими сериями, сохранятся. Серия останется в списке; автоматическое скачивание остановится до нового выбора раздачи.</p><div class="form-footer"><p class="form-error"></p><button type="submit" class="primary">Удалить</button></div></form>`);
     }
     else if(button.id==='library-delete'){
       const title=$('#library-detail-body h2')?.textContent||'это произведение';
@@ -111,23 +146,26 @@ document.addEventListener('click',async event=>{
   }catch(error){toast(error.message,true);}
 });
 document.addEventListener('submit',async event=>{
-  const form=event.target;if(!['delete-media-form','subtitle-download-form'].includes(form.id))return;
+  const form=event.target;if(form.id!=='delete-selection-form')return;
+  event.preventDefault();
+  const button=form.querySelector('button[type="submit"]');button.disabled=true;
+  try{
+    const result=await api(form.dataset.endpoint,'DELETE');
+    $('#modal').close();
+    await Promise.all([refreshTasks(),refreshDownloads()]);await refreshLibraryView();
+    toast(result.cleanup_pending?'Удалено. Очистка файлов будет повторена автоматически.':form.dataset.season!==undefined?'Сезон удалён из задачи вместе с файлами':'Файлы серии и выбранная раздача удалены');
+  }catch(error){form.querySelector('.form-error').textContent=error.message;button.disabled=false;}
+});
+document.addEventListener('submit',async event=>{
+  const form=event.target;if(form.id!=='delete-media-form')return;
   event.preventDefault();
   try{
     const data=new FormData(form);
-    if(form.id==='subtitle-download-form'){
-      const button=form.querySelector('button[type=submit]');button.disabled=true;button.textContent='Загрузка…';
-      const result=await api(`/libraries/media/${form.dataset.media}/subtitles`,'POST',{languages:selectedLanguages(form,'subtitle_download_languages')});
-      $('#modal').close();await openLibraryMedia(Number(form.dataset.media));
-      const message=result.downloaded.length?`Загружено субтитров: ${result.downloaded.length}`:result.not_found.length?'Подходящие субтитры не найдены':'Новые субтитры не требуются';
-      toast(result.errors.length?`${message}. ${result.errors[0].message}`:message,Boolean(result.errors.length));
-      return;
-    }
     const result=await api(`/libraries/media/${form.dataset.media}`,'DELETE',{delete_files:data.get('delete_files')==='on'});
     $('#modal').close();libraryGeneration++;libraryMedia=null;libraryItem=null;
     $('#library-detail').hidden=true;$('#library-overview').hidden=false;
+    $('#all-tasks-control').hidden=false;
     await Promise.all([loadLibraries(),refreshTasks(),refreshDownloads()]);
     toast(result.cleanup_pending?'Произведение удалено. Очистка файлов будет повторена автоматически.':'Произведение удалено из библиотеки');
   }catch(error){form.querySelector('.form-error').textContent=error.message;}
 });
-document.addEventListener('toggle',event=>{const node=event.target;if(node instanceof HTMLDetailsElement&&node.classList.contains('is-disabled')&&node.open)node.open=false;},true);

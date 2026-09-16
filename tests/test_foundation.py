@@ -7,7 +7,7 @@ from lazarr.security import change_account, permitted
 from lazarr.services import CreateTask
 
 
-def test_tasks_share_media_but_not_requirements(core, media, season):
+def test_media_has_one_shared_task_and_explicit_requirements(core, media, season):
     _, db, _, service = core
     first = service.create_from_metadata(
         CreateTask(media_id="42", kind="tv", season=1, requirements=Requirements(audio_languages=["ru"])),
@@ -21,7 +21,6 @@ def test_tasks_share_media_but_not_requirements(core, media, season):
             kind="tv",
             season=1,
             episodes=[2],
-            requirements=Requirements(audio_languages=["ja"], max_resolution=2160),
         ),
         media,
         season,
@@ -31,9 +30,16 @@ def test_tasks_share_media_but_not_requirements(core, media, season):
         assert session.scalar(select(func.count()).select_from(Media)) == 1
         assert session.get(Task, first).media_id == session.get(Task, second).media_id
         assert session.get(Task, first).requirements["audio_languages"] == ["ru"]
-        assert session.get(Task, second).requirements["audio_languages"] == ["ja"]
+        assert first == second
         assert len(list(session.scalars(select(Subtask).where(Subtask.task_id == first)))) == 3
-        assert len(list(session.scalars(select(Subtask).where(Subtask.task_id == second)))) == 1
+        assert session.scalar(select(func.count()).select_from(Task)) == 1
+    with pytest.raises(ValueError, match="уже есть задача"):
+        service.create_from_metadata(
+            CreateTask(media_id="42", kind="tv", season=1, requirements=Requirements(audio_languages=["ja"])),
+            media,
+            season,
+            2,
+        )
     settings = service.settings()
     settings.defaults.audio_languages = ["en"]
     service.set_settings(settings, 1)
@@ -79,7 +85,10 @@ async def test_refresh_adds_episodes_only_to_whole_season(core, media, season, m
     _, db, plugins, service = core
     first = service.create_from_metadata(CreateTask(media_id="42", kind="tv", season=1), media, season, 1)
     second = service.create_from_metadata(
-        CreateTask(media_id="42", kind="tv", season=1, episodes=[1]), media, season, 2
+        CreateTask(media_id="43", kind="tv", season=1, episodes=[1]),
+        media.model_copy(update={"id": "43"}),
+        season,
+        2,
     )
 
     async def get_season(self, media_id, number):
@@ -87,12 +96,13 @@ async def test_refresh_adds_episodes_only_to_whole_season(core, media, season, m
 
     monkeypatch.setattr(plugins.classes["tmdb"], "get_season", get_season)
     with db.session() as session:
-        session.scalar(select(Season)).refreshed_at = 0
+        for row in session.scalars(select(Season)):
+            row.refreshed_at = 0
     await service.refresh_seasons()
     with db.session() as session:
         assert len(list(session.scalars(select(Subtask).where(Subtask.task_id == first)))) == 4
         assert len(list(session.scalars(select(Subtask).where(Subtask.task_id == second)))) == 1
-        assert len(list(session.scalars(select(Episode)))) == 4
+        assert len(list(session.scalars(select(Episode)))) == 8
 
 
 def test_settings_validate_timezone_and_container_paths(monkeypatch):

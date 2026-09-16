@@ -1,6 +1,6 @@
 import time
 from typing import Any
-from sqlalchemy import Boolean, Float, ForeignKey, JSON, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Float, ForeignKey, JSON, String, Text, UniqueConstraint, Index
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -81,6 +81,7 @@ class Episode(Base):
 
 class Task(Base):
     __tablename__ = "tasks"
+    __table_args__ = (Index("uq_tasks_media_id", "media_id", unique=True),)
     numbering: Mapped[dict] = mapped_column(JSON, default=dict)
     id: Mapped[int] = mapped_column(primary_key=True)
     media_id: Mapped[int] = mapped_column(ForeignKey("media.id"))
@@ -92,6 +93,17 @@ class Task(Base):
     paused: Mapped[bool] = mapped_column(default=False)
     created_at: Mapped[float] = mapped_column(default=time.time)
     updated_at: Mapped[float] = mapped_column(default=time.time)
+
+
+class TaskSeason(Base):
+    __tablename__ = "task_seasons"
+    __table_args__ = (UniqueConstraint("task_id", "selection_key"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"))
+    season_id: Mapped[int] = mapped_column(ForeignKey("seasons.id"))
+    selection_key: Mapped[str]
+    whole_season: Mapped[bool] = mapped_column(default=True)
+    numbering: Mapped[dict] = mapped_column(JSON, default=dict)
 
 
 class Subtask(Base):

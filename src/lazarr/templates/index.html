@@ -23,10 +23,13 @@
       <div class="section-heading"><div><p class="eyebrow">Новая задача</p><h2 id="selection-title"></h2></div><button class="ghost" id="clear-selection">Отмена</button></div>
       <p id="selection-overview" class="muted"></p>
       <form id="task-form">
-        <div id="season-fields" class="form-grid" hidden><label>Сезон<select name="season" id="season-select"></select></label>
-          <label>Серии<input name="episodes" placeholder="Все серии сезона" aria-describedby="episodes-help"><small id="episodes-help">Пусто — весь сезон; либо 1, 2, 5–8</small></label></div>
+        <div id="season-fields" hidden>
+          <div id="task-seasons"></div>
+          <button type="button" class="ghost" id="add-task-season">＋ Добавить сезон</button>
+          <p class="fine">В одной задаче можно выбрать несколько сезонов. Пустой список серий — весь сезон, включая новые серии.</p>
+        </div>
         <div id="task-requirements" class="requirements-fields"></div>
-        <div class="form-footer"><span class="fine">Субтитры можно будет дополнить позже.</span><button class="primary" type="submit">Создать задачу <span>＋</span></button></div>
+        <div class="form-footer"><span class="fine">Отсутствие субтитров не блокирует загрузку.</span><button class="primary" type="submit">Создать задачу <span>＋</span></button></div>
         <p class="form-error" role="alert"></p>
       </form>
     </section>
@@ -36,11 +39,13 @@
     </section>
   </section>
   <section id="tab-library" class="tab-panel" hidden>
-    <div class="library-page-heading"><h2>Библиотеки</h2><button type="button" class="ghost" id="run-queue">Запустить очередь</button></div>
+    <div class="library-page-heading"><h2>Библиотеки</h2></div>
+    <div id="all-tasks-control"><section class="panel all-tasks-heading"><div><h3>Поиск по всем задачам</h3><p class="fine">Запускает поиск для всех активных задач во всех библиотеках. Задачи на паузе пропускаются.</p></div><button type="button" class="primary" id="run-queue">Запустить все задачи</button></section>
     <section id="search-activity" class="panel search-activity" hidden><div class="search-activity-heading"><h2 id="search-state"></h2><span id="search-counts" class="fine"></span></div><div id="search-progress" class="progress" role="progressbar" aria-label="Прогресс поиска"><span></span></div><p id="search-current" role="status" aria-live="polite"></p><p id="search-query" class="fine"></p><div id="search-providers" class="search-providers"></div><details><summary>Ход поиска</summary><ol id="search-history"></ol></details></section>
     <div id="engine-notice"></div>
+    </div>
     <div id="library-overview"><div id="library-nav" class="library-nav" aria-label="Выбор библиотеки"></div><div id="library-items" class="library-grid"></div></div>
-    <div id="library-detail" hidden><div class="library-toolbar"><button id="library-back" class="ghost">← К библиотекам</button><div><button id="library-subtitles" class="primary">Загрузить субтитры</button> <button id="library-refresh" class="ghost">Обновить</button> <button id="library-delete" class="danger-button">Удалить</button></div></div><div id="library-detail-body"></div></div>
+    <div id="library-detail" hidden><div class="library-toolbar"><button id="library-back" class="ghost">← К библиотекам</button><div><button id="library-delete" class="danger-button">Удалить</button></div></div><div id="library-detail-body"></div></div>
   </section>
   <section id="tab-settings" class="tab-panel" hidden>
     <div class="page-heading"><h1>Настройки</h1></div>
