@@ -19,6 +19,8 @@ from lazarr.sdk import (
     SearchPage,
     DownloadSource,
     TorrentFile,
+    SeasonInfo,
+    EpisodeInfo,
 )
 from lazarr.services import CreateTask
 from lazarr.config import Requirements
@@ -144,6 +146,29 @@ def worker_setup(core, media):
 
     worker._probe = probe
     return worker, engine, Demo
+
+
+async def test_new_episode_candidates_include_season_release(core, media, season, worker_setup):
+    _, db, _, service = core
+    worker, _, _ = worker_setup
+    service.create_from_metadata(
+        CreateTask(media_id="42", kind="tv", season=1, episodes=[1]), media, season, 1
+    )
+    await worker.run_due()
+    service.create_from_metadata(
+        CreateTask(media_id="42", kind="tv", season=1, episodes=[2, 3]), media, season, 1
+    )
+    with db.session() as session:
+        ids = dict(session.execute(select(Episode.number, Subtask.id).join(Subtask)).all())
+    for number in [2, 3]:
+        choices = service.candidates(ids[number])
+        assert len(choices) == 1
+        assert choices[0]["used_in_season"] == [1]
+        assert choices[0]["episode_missing"] is (number == 3)
+        assert len(service.candidates(ids[number])) == 1
+    with db.session() as session:
+        session.delete(session.scalar(select(SubtaskAsset)))
+    assert service.candidates(ids[2])[0]["used_in_season"] == []
 
 
 async def test_grouped_subtasks_share_one_download(core, media, season, worker_setup):
@@ -380,6 +405,55 @@ async def test_manual_choice_can_apply_one_release_to_all_matching_episodes(
             session.scalars(select(CandidateDecision).where(CandidateDecision.action == "selected"))
         )
         assert len(selected) == 2
+
+
+async def test_manual_choice_can_be_scoped_to_one_season(core, media, worker_setup):
+    _, db, _, service = core
+    worker, engine, _ = worker_setup
+    seasons = [
+        SeasonInfo(
+            number=number,
+            episodes=[
+                EpisodeInfo(
+                    id=f"{number}:{episode}",
+                    number=episode,
+                    title=f"S{number}E{episode}",
+                    air_date="2020-01-01",
+                )
+                for episode in ([1] if number == 1 else [1, 2])
+            ],
+        )
+        for number in [1, 2]
+    ]
+    task_id = service.create_from_metadata(
+        CreateTask(media_id="42", kind="tv", seasons=[{"season": 1}, {"season": 2}]),
+        media,
+        seasons,
+        1,
+    )
+    torrent = json.dumps(
+        ["Example.Show.S01E01.1080p.mkv", "Example.Show.S02E01.1080p.mkv", "Example.Show.S02E02.1080p.mkv"]
+    ).encode()
+    metadata = engine.inspect(DownloadSource(torrent=torrent))
+    item = candidate(provider="demo", id="season-batch", evidence=[])
+    with db.session() as session:
+        requests = [
+            service.request_for(session, sub)
+            for sub in session.scalars(select(Subtask).where(Subtask.task_id == task_id))
+        ]
+    worker._record(item, metadata, worker.matcher.evaluate(item, requests, metadata.files, metadata.infohash))
+
+    choices = service.task_candidates(task_id, 2)
+    assert len(choices) == 1
+    assert choices[0]["matched"] == choices[0]["total"] == 2
+    result = await worker.choose_all(choices[0]["id"], 1, season_number=2, task_id=task_id)
+
+    assert result == {"selected": 2, "total": 2, "skipped": 0}
+    assert [binding.subtask_id for binding in engine.plans[metadata.infohash].bindings] == [2, 3]
+    with db.session() as session:
+        assert session.get(Subtask, 1).status == "queued"
+        assert session.get(Subtask, 2).status == "starting"
+        assert session.get(Subtask, 3).status == "starting"
 
 
 async def test_delete_task_preserves_shared_download_and_removes_last_consumer(

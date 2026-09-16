@@ -278,6 +278,7 @@ input[role="switch"]{appearance:none;width:36px;height:21px;border-radius:12px;p
 .downloads-heading,.search-activity-heading{display:flex;align-items:center;justify-content:space-between;gap:16px}.search-activity-heading{flex-wrap:wrap;margin-bottom:14px}.search-activity-heading h2{margin:0}.is-searching h2::before{content:"";display:inline-block;width:12px;height:12px;margin-right:10px;border:2px solid #555;border-top-color:#ddd;border-radius:50%;animation:search-spin .8s linear infinite}.search-activity{margin-bottom:20px}.search-activity p{overflow-wrap:anywhere}.search-activity details summary{cursor:pointer;color:var(--muted)}#search-history{padding:0;list-style:none;max-height:240px;overflow:auto}#search-history li{display:flex;gap:12px;padding:5px 0;font-size:12px;overflow-wrap:anywhere}#search-history time{color:var(--muted);flex-shrink:0}.progress.indeterminate span{width:30%!important;animation:search-slide 1.6s ease-in-out infinite}@keyframes search-spin{to{transform:rotate(360deg)}}@keyframes search-slide{from{transform:translateX(-100%)}to{transform:translateX(350%)}}@media(prefers-reduced-motion:reduce){.is-searching h2::before,.progress.indeterminate span{animation:none}}@media(max-width:600px){.downloads-heading{align-items:flex-start;flex-direction:column}}
 
 .search-providers{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,260px),1fr));gap:12px;margin:16px 0}.search-provider{border:1px solid var(--line);border-radius:5px;padding:12px}.search-provider>div{display:flex;justify-content:space-between;gap:12px}.search-provider p{font-size:12px;color:var(--muted);margin:7px 0}.search-provider small{color:var(--muted)}
+.candidate-search-log{border:1px solid var(--line);border-radius:5px;margin:16px 0;padding:12px}.candidate-search-log summary{cursor:pointer;color:var(--muted)}.candidate-search-log>p{margin:10px 0 4px}.candidate-search-log ol{list-style:none;margin:0;padding:0;max-height:240px;overflow:auto}.candidate-search-log li{display:flex;gap:12px;padding:5px 0;font-size:12px;overflow-wrap:anywhere}.candidate-search-log time{color:var(--muted);flex-shrink:0}
 
 .provider-order { margin: 1rem 0; max-width: 36rem; }
 .provider-order ol { padding-left: 1.5rem; }
@@ -323,6 +324,7 @@ input[role="switch"]{appearance:none;width:36px;height:21px;border-radius:12px;p
 .library-season.is-unrequested>summary { color:#888; }
 .library-season.is-unrequested>summary::marker { color:#555; }
 .library-season-summary { display:flex; align-items:center; justify-content:flex-end; gap:1rem; margin-left:auto; }
+.library-season-actions { display:flex; justify-content:flex-end; margin-top:1rem; }
 .library-season.is-unrequested .primary { color:#151515; }
 .library-season-episodes { margin-top:1rem; }
 .library-season .library-episode { margin-left:.25rem; margin-right:.25rem; background:#191919; }

@@ -14,6 +14,7 @@ from lazarr.models import (
     Subtask,
     Task,
     Episode,
+    Season,
     Media,
     Release,
     Download,
@@ -219,16 +220,34 @@ class Worker:
     async def search_alternatives(self, subtask_id):
         async with self.lock:
             with self.db.session() as db:
-                if not db.get(Subtask, subtask_id):
+                subtask = db.get(Subtask, subtask_id)
+                if not subtask:
                     raise ValueError("Серия не найдена")
+                task_id = subtask.task_id
             self.progress.begin()
             self.progress.value["providers"] = self.plugins.search_status()
+            self.progress.value["groups_total"] = 1
+            self.progress.prepare_tasks([[task_id]])
+            self.progress.start_group([task_id])
+            completed = False
             try:
                 await self._run_group([subtask_id], acquire=False)
                 if not self.progress.value["search_requests"]:
+                    self.progress.value["errors"] += 1
+                    self.progress.record(
+                        "error",
+                        "Поиск не выполнен. Проверьте доступность провайдеров в настройках.",
+                        state="error",
+                    )
                     raise ValueError("Поиск не выполнен. Проверьте доступность провайдеров в настройках.")
+                completed = True
             finally:
-                self.progress.value.update(running=False, state="finished")
+                self.progress.finish_group(completed)
+                self.progress.value["groups_done"] = int(completed)
+                state = "error" if self.progress.value["errors"] else "finished"
+                self.progress.value.update(running=False, state=state)
+                task = self.progress.tasks[task_id]
+                task.update(running=False, state=state, message=self.progress.value["message"])
 
     async def _run_group(self, ids, provider_filter=None, acquire=True):
         settings = self.service.settings()
@@ -632,8 +651,8 @@ class Worker:
                 db.get(CandidateDecision, decision_id).report = evaluation.model_dump(mode="json")
                 audit(db, user_id, "candidate.select", str(decision_id), {"override": True})
 
-    async def choose_all(self, decision_id, user_id):
-        """Apply one release to every episode it can unambiguously bind in the task."""
+    async def choose_all(self, decision_id, user_id, season_number=None, task_id=None):
+        """Apply one release to matching episodes in the task or one season."""
         async with self.lock:
             with self.db.session() as db:
                 decision = db.get(CandidateDecision, decision_id)
@@ -641,12 +660,21 @@ class Worker:
                     raise ValueError("Кандидат не найден")
                 source_subtask = db.get(Subtask, decision.subtask_id)
                 task = db.get(Task, source_subtask.task_id)
+                if task_id is not None and task.id != task_id:
+                    raise ValueError("Кандидат не относится к указанной задаче")
                 release = db.get(Release, decision.release_id)
                 release_id, infohash = release.id, release.revision
                 candidate = Candidate.model_validate(release.data)
-                subtasks = list(
-                    db.scalars(select(Subtask).where(Subtask.task_id == task.id).order_by(Subtask.id))
-                )
+                subtasks_query = select(Subtask).where(Subtask.task_id == task.id)
+                if season_number is not None:
+                    subtasks_query = (
+                        subtasks_query.join(Episode, Subtask.episode_id == Episode.id)
+                        .join(Season, Episode.season_id == Season.id)
+                        .where(Season.number == season_number)
+                    )
+                subtasks = list(db.scalars(subtasks_query.order_by(Subtask.id)))
+                if not subtasks:
+                    raise ValueError("В сезоне нет серий этой задачи")
                 current_ids = set(
                     db.scalars(
                         select(SubtaskAsset.subtask_id)
@@ -705,9 +733,14 @@ class Worker:
                 audit(
                     db,
                     user_id,
-                    "candidate.select_all",
+                    "candidate.select_season" if season_number is not None else "candidate.select_all",
                     str(decision_id),
-                    {"task_id": task.id, "selected": len(selected_ids), "total": len(subtasks)},
+                    {
+                        "task_id": task.id,
+                        "season": season_number,
+                        "selected": len(selected_ids),
+                        "total": len(subtasks),
+                    },
                 )
             selected = len(selected_ids | current_ids)
             return {"selected": selected, "total": len(subtasks), "skipped": len(subtasks) - selected}

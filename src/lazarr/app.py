@@ -23,6 +23,7 @@ from lazarr.models import (
     CandidateDecision,
     Release,
     Task,
+    Subtask,
     SubtaskAsset,
     MediaAsset,
     LibraryAsset,
@@ -191,6 +192,7 @@ def create_app(config: RuntimeConfig | None = None):
     app = FastAPI(title="Lazarr", version="0.1.0", lifespan=lifespan)
     package = Path(__file__).parent
     templates = Jinja2Templates(directory=package / "templates")
+    templates.env.globals["test_environment"] = config.test_environment
     from lazarr.languages import LABELS, ALIASES
 
     templates.env.globals["asset_version"] = hashlib.sha256(
@@ -516,6 +518,16 @@ def create_app(config: RuntimeConfig | None = None):
     async def candidates(identity: int, request: Request, user=Depends(authenticated)):
         return context(request).service.candidates(identity)
 
+    @app.get("/api/v1/subtasks/{identity}/search")
+    async def subtask_search(identity: int, request: Request, user=Depends(authenticated)):
+        ctx = context(request)
+        with ctx.db.session() as db:
+            subtask = db.get(Subtask, identity)
+            if not subtask:
+                raise HTTPException(404, "Серия не найдена")
+            task_id = subtask.task_id
+        return ctx.scheduler.snapshot(task_id)
+
     @app.post("/api/v1/subtasks/{identity}/candidates/search")
     async def search_alternatives(identity: int, request: Request, user=Depends(permission("tasks"))):
         ctx = context(request)
@@ -527,6 +539,10 @@ def create_app(config: RuntimeConfig | None = None):
     @app.get("/api/v1/tasks/{identity}/candidates")
     async def task_candidates(identity: int, request: Request, user=Depends(authenticated)):
         return context(request).service.task_candidates(identity)
+
+    @app.get("/api/v1/tasks/{identity}/seasons/{season}/candidates")
+    async def season_candidates(identity: int, season: int, request: Request, user=Depends(authenticated)):
+        return context(request).service.task_candidates(identity, season)
 
     @app.get("/api/v1/candidates/{identity}/selection")
     async def candidate_selection(
@@ -614,6 +630,19 @@ def create_app(config: RuntimeConfig | None = None):
         if ctx.engine is None:
             raise HTTPException(503, ctx.engine_error)
         return await ctx.worker.choose_all(identity, user.id)
+
+    @app.post("/api/v1/tasks/{task_id}/seasons/{season}/candidates/{identity}/choice")
+    async def choose_candidate_for_season(
+        task_id: int,
+        season: int,
+        identity: int,
+        request: Request,
+        user=Depends(permission("tasks")),
+    ):
+        ctx = context(request)
+        if ctx.engine is None:
+            raise HTTPException(503, ctx.engine_error)
+        return await ctx.worker.choose_all(identity, user.id, season, task_id)
 
     @app.get("/api/v1/settings")
     async def settings(request: Request, user=Depends(permission("settings"))):

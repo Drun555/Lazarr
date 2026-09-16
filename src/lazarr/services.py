@@ -12,6 +12,7 @@ from lazarr.models import (
     TaskSeason,
     Subtask,
     SubtaskAsset,
+    LibraryAsset,
     MediaAsset,
     CandidateDecision,
     Release,
@@ -472,6 +473,66 @@ class TaskService:
 
     def candidates(self, subtask_id):
         with self.db.session() as db:
+            subtask = db.get(Subtask, subtask_id)
+            episode = db.get(Episode, subtask.episode_id) if subtask and subtask.episode_id else None
+            used = {}
+            if episode:
+                # Actual file bindings, not historical candidate decisions, define usage.
+                for link, episode_join in (
+                    (SubtaskAsset, SubtaskAsset.subtask_id == Subtask.id),
+                    (LibraryAsset, LibraryAsset.episode_id == Episode.id),
+                ):
+                    query = select(Download, Episode.number).select_from(link)
+                    if link is SubtaskAsset:
+                        query = query.join(Subtask, episode_join).join(
+                            Episode, Subtask.episode_id == Episode.id
+                        )
+                        query = query.where(SubtaskAsset.current | SubtaskAsset.pending)
+                    else:
+                        query = query.join(Episode, episode_join)
+                    query = (
+                        query.join(MediaAsset, link.asset_id == MediaAsset.id)
+                        .join(Download, MediaAsset.download_id == Download.id)
+                        .where(Episode.season_id == episode.season_id, Episode.id != episode.id)
+                    )
+                    for download, number in db.execute(query):
+                        entry = used.setdefault(
+                            download.release_id, {"download": download, "episodes": set()}
+                        )
+                        entry["episodes"].add(number)
+                # A newly added episode may never have been evaluated against the
+                # season's existing torrent. Reuse its saved, authoritative file list.
+                from lazarr.matcher import Matcher
+                from lazarr.sdk import Candidate, TorrentFile
+
+                for release_id, entry in used.items():
+                    decision = db.scalar(
+                        select(CandidateDecision).where(
+                            CandidateDecision.subtask_id == subtask_id,
+                            CandidateDecision.release_id == release_id,
+                        )
+                    )
+                    if decision is None:
+                        download = entry["download"]
+                        release = db.get(Release, release_id)
+                        report = (
+                            Matcher()
+                            .evaluate(
+                                Candidate.model_validate(release.data),
+                                [self.request_for(db, subtask)],
+                                [TorrentFile.model_validate(file) for file in download.plan.get("files", [])],
+                                download.infohash,
+                            )
+                            .evaluations[0]
+                        )
+                        db.add(
+                            CandidateDecision(
+                                subtask_id=subtask_id,
+                                release_id=release_id,
+                                report=report.model_dump(mode="json"),
+                            )
+                        )
+                db.flush()
             result = []
             for decision, release in db.execute(
                 select(CandidateDecision, Release)
@@ -487,17 +548,29 @@ class TaskService:
                         "candidate": candidate,
                         "report": decision.report,
                         "action": decision.action,
+                        "used_in_season": sorted(used[release.id]["episodes"]) if release.id in used else [],
+                        "episode_missing": any(
+                            criterion.get("field") == "episode" and criterion.get("result") == "MISMATCH"
+                            for criterion in (decision.report or {}).get("criteria", [])
+                        ),
                     }
                 )
-            return result
+            return sorted(result, key=lambda choice: not bool(choice["used_in_season"]))
 
-    def task_candidates(self, task_id):
-        """Return each release once, with its existing per-episode evaluations."""
+    def task_candidates(self, task_id, season_number=None):
+        """Return each release once, scoped to the task or one of its seasons."""
         with self.db.session() as db:
             task = db.get(Task, task_id)
             if not task:
                 raise ValueError("Задача не найдена")
-            subtasks = list(db.scalars(select(Subtask).where(Subtask.task_id == task_id)))
+            subtasks_query = select(Subtask).where(Subtask.task_id == task_id)
+            if season_number is not None:
+                subtasks_query = (
+                    subtasks_query.join(Episode, Subtask.episode_id == Episode.id)
+                    .join(Season, Episode.season_id == Season.id)
+                    .where(Season.number == season_number)
+                )
+            subtasks = list(db.scalars(subtasks_query))
             subtask_ids = [sub.id for sub in subtasks]
             if not subtask_ids:
                 return []

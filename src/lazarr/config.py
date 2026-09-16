@@ -86,6 +86,7 @@ class RuntimeConfig:
         self.plugin_dir = Path(os.getenv("LAZARR_PLUGIN_DIR", str(self.data_dir / "plugins")))
         self.plugin_dir.mkdir(parents=True, exist_ok=True)
         self.background = background
+        self.test_environment = os.getenv("LAZARR_TEST", "0") == "1"
         self.secure_cookie = os.getenv("LAZARR_SECURE_COOKIE", "0") == "1"
         self.ffprobe = os.getenv("LAZARR_FFPROBE", "ffprobe")
         self.listen_interfaces = os.getenv("LAZARR_TORRENT_LISTEN", "0.0.0.0:6881,[::]:6881")

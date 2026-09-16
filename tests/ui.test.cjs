@@ -39,6 +39,8 @@ async function setup(){
     else if(/^\/api\/v1\/candidates\/\d+\/files$/.test(url))result=choiceFiles;
     else if(/^\/api\/v1\/candidates\/\d+\/selection$/.test(url))result=choiceSelection;
     else if(/^\/api\/v1\/candidates\/\d+\/selection\?/.test(url))result=choiceBindings[new URL(url,'http://localhost').searchParams.get('video_index')]??null;
+    else if(/^\/api\/v1\/subtasks\/\d+\/search$/.test(url))result=activity;
+    else if(/^\/api\/v1\/subtasks\/\d+\/candidates$/.test(url))result=[];
     else if(url==='/api/v1/libraries')result=libraries;
     else if(url.endsWith('/seasons')&&options.method==='POST'){
       const task=tasks.find(t=>t.media_id===Number(url.split('/')[5]));
@@ -55,7 +57,9 @@ async function setup(){
       result={id:1,search_queued:true};
       tasks.push({id:1,title:'Test',year:2020,season:1,requirements:payload.requirements,subtasks:[],paused:false});
       activity={running:true,state:'running',pending_requests:1,groups_total:2,groups_done:1,candidates_found:3,candidates_checked:1,message:'Чтение описания',provider:'Demo',media:'Test',season:1,episodes:[1,2],history:[{time:1,message:'Demo: поиск Test'}]};
-    }else if(/^\/api\/v1\/tasks\/\d+\/candidates$/.test(url))result=taskChoices;
+    }else if(/^\/api\/v1\/tasks\/\d+\/seasons\/\d+\/candidates\/\d+\/choice$/.test(url)&&options.method==='POST')result={selected:2,total:2,skipped:0};
+    else if(/^\/api\/v1\/tasks\/\d+\/seasons\/\d+\/candidates$/.test(url))result=taskChoices;
+    else if(/^\/api\/v1\/tasks\/\d+\/candidates$/.test(url))result=taskChoices;
     else if(/^\/api\/v1\/candidates\/\d+\/choice-all$/.test(url)&&options.method==='POST')result={selected:8,total:8,skipped:0};
     else if(url==='/api/v1/tasks')result=tasks;
     else if(url==='/api/v1/search/run'){activity={...activity,running:true,state:'running',pending_requests:1};result={queued:true};}
@@ -273,6 +277,30 @@ test('manual queue button starts search without waiting for results',async()=>{
   }finally{dom.window.close();}
 });
 
+test('release choices expose a live expandable search log',async()=>{
+  const {dom,w,document:d,errors,setActivity,setLibrary}=await setup();
+  try{
+    setActivity({running:true,state:'running',message:'Проверка кандидата',history:[{time:1,message:'Demo: найден кандидат'}]});
+    setLibrary([{id:'series',name:'Сериалы',items:[{id:2,title:'Show'}]}],{id:2,title:'Show',kind:'tv',metadata:{},episodes:[{id:1,season:1,episode:1,title:'Episode',subtasks:[{id:11}],files:[]}]});
+    d.querySelector('[data-tab=library]').click();await settle();await settle();
+    d.querySelector('[data-library-media="2"]').click();await settle();await settle();
+    d.querySelector('.library-episode summary').click();
+    d.querySelector('[data-candidates="11"]').click();await settle();await settle();
+    const log=d.querySelector('.candidate-search-log');
+    assert.equal(log.open,false);
+    assert.match(log.querySelector('summary').textContent,/Лог поиска · 1/);
+    assert.match(log.textContent,/Проверка кандидата.*Demo: найден кандидат/s);
+    log.open=true;
+    setActivity({running:true,state:'running',message:'Чтение структуры торрента',history:[{time:1,message:'Demo: найден кандидат'},{time:2,message:'Получение структуры торрента'}]});
+    d.querySelector('[data-search-alternatives="11"]').click();await settle();await settle();
+    const updated=d.querySelector('.candidate-search-log');
+    assert.equal(updated.open,true);
+    assert.match(updated.querySelector('summary').textContent,/Лог поиска · 2/);
+    assert.match(updated.textContent,/Чтение структуры торрента.*Получение структуры торрента/s);
+    assert.deepEqual(errors,[]);
+  }finally{dom.window.close();}
+});
+
 test('failed search shows cooldown cause and disabled provider separately',async()=>{
   const {dom,document:d,setActivity,errors}=await setup();
   try{
@@ -337,6 +365,38 @@ test('one release can be selected for every matching episode in a task',async()=
     const call=calls.find(item=>item.url==='/api/v1/candidates/91/choice-all');
     assert.equal(call.method,'POST');
     assert.deepEqual(call.payload,{});
+    assert.deepEqual(errors,[]);
+  }finally{dom.window.close();}
+});
+
+test('one release can be selected only for the expanded season',async()=>{
+  const {dom,document:d,calls,errors,setTasks,setTaskChoices,setLibrary}=await setup();
+  try{
+    const task={id:7,media_id:7,title:'Show',seasons:[{season:1},{season:2}],subtasks:[
+      {id:1,season:1,episode:1,status:'needs_selection'},
+      {id:2,season:2,episode:1,status:'needs_selection'},
+      {id:3,season:2,episode:2,status:'needs_selection'}
+    ],requirements:{audio_languages:[],subtitle_languages:[],min_resolution:720,max_resolution:1080},paused:false};
+    setTasks([task]);
+    setLibrary([{id:'series',name:'Сериалы',items:[{id:7,title:'Show'}]}],{id:7,title:'Show',kind:'tv',metadata:{overview:'',genres:[]},episodes:[
+      {id:1,season:1,episode:1,title:'S1E1',released:true,subtasks:[{id:1,task_id:7}],files:[]},
+      {id:2,season:2,episode:1,title:'S2E1',released:true,subtasks:[{id:2,task_id:7}],files:[]},
+      {id:3,season:2,episode:2,title:'S2E2',released:true,subtasks:[{id:3,task_id:7}],files:[]}
+    ]});
+    setTaskChoices([{id:91,total:2,matched:2,candidate:{title:'Show S02',provider:'demo',url:'https://example.org/s02',size:1024,seeds:4}}]);
+    d.querySelector('[data-tab=library]').click();await settle();await settle();
+    d.querySelector('[data-library-media="7"]').click();await settle();await settle();
+    const season=d.querySelector('[data-season="2"]');season.open=true;
+    const button=season.querySelector('[data-season-candidates="7"]');
+    assert.equal(button.textContent,'Выбрать раздачу для сезона');
+    button.click();await settle();await settle();
+    assert.equal(calls.some(call=>call.url==='/api/v1/tasks/7/seasons/2/candidates'),true);
+    assert.match(d.querySelector('#modal-title').textContent,/сезона 2/);
+    assert.match(d.querySelector('#modal-body').textContent,/2 из 2/);
+    d.querySelector('[data-choose-season="91"]').click();await settle();await settle();
+    const call=calls.find(item=>item.url==='/api/v1/tasks/7/seasons/2/candidates/91/choice');
+    assert.equal(call.method,'POST');assert.deepEqual(call.payload,{});
+    assert.equal(calls.some(item=>item.url==='/api/v1/candidates/91/choice-all'),false);
     assert.deepEqual(errors,[]);
   }finally{dom.window.close();}
 });

@@ -440,6 +440,9 @@ async def test_explicit_alternative_search_keeps_completed_selection(
     demo.quality = 2160
     await worker.search_alternatives(1)
     assert len(service.candidates(1)) == 2
+    progress = worker.progress.tasks[task]
+    assert progress["state"] == "finished" and progress["groups_done"] == 1
+    assert any(event["stage"] == "alternatives" for event in progress["history"])
     with db.session() as session:
         assert session.scalar(select(SubtaskAsset.id)) == original_link
         assert session.scalar(select(Download.id)) == original_download

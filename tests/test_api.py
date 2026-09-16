@@ -3,6 +3,7 @@ import time
 from fastapi.testclient import TestClient
 from lazarr.app import create_app
 from lazarr.models import ProviderConfig, User
+from lazarr.services import CreateTask
 
 
 def login(client):
@@ -75,6 +76,23 @@ def test_create_task_and_provider_secret_via_api(core, media, season, monkeypatc
         )
         assert "secret-value" not in client.get("/api/v1/providers").text
         assert client.get("/openapi.json").status_code == 200
+
+
+def test_subtask_search_log_requires_auth_and_is_scoped_to_its_task(core, media, season):
+    config, _, _, service = core
+    service.create_from_metadata(
+        CreateTask(media_id="42", kind="tv", season=1, episodes=[1]), media, season, 1
+    )
+    with TestClient(create_app(config)) as client:
+        assert client.get("/api/v1/subtasks/1/search").status_code == 401
+        assert client.get("/api/v1/tasks/1/seasons/1/candidates").status_code == 401
+        login(client)
+        result = client.get("/api/v1/subtasks/1/search")
+        assert result.status_code == 200
+        assert isinstance(result.json()["history"], list)
+        assert result.json()["message"]
+        assert client.get("/api/v1/tasks/1/seasons/1/candidates").json() == []
+        assert client.get("/api/v1/subtasks/999/search").status_code == 404
 
 
 def test_permissions_are_enforced_centrally(core):

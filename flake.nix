@@ -19,6 +19,7 @@
           ]);
         in {
           default = pkgs.mkShell {
+            LAZARR_TEST = "1";
             packages = [ python pkgs.ffmpeg-headless pkgs.ruff pkgs.nodejs ];
             shellHook = ''
               export PYTHONPATH="$PWD/src''${PYTHONPATH:+:$PYTHONPATH}"
