@@ -289,7 +289,7 @@ test('manual queue button starts search without waiting for results',async()=>{
 });
 
 test('release choices expose a live expandable search log',async()=>{
-  const {dom,w,document:d,errors,setActivity,setLibrary}=await setup();
+  const {dom,w,document:d,errors,calls,setActivity,setLibrary}=await setup();
   try{
     setActivity({running:true,state:'running',message:'Проверка кандидата',history:[{time:1,message:'Demo: найден кандидат'}]});
     setLibrary([{id:'series',name:'Сериалы',items:[{id:2,title:'Show'}]}],{id:2,title:'Show',kind:'tv',metadata:{},episodes:[{id:1,season:1,episode:1,title:'Episode',subtasks:[{id:11}],files:[]}]});
@@ -297,10 +297,15 @@ test('release choices expose a live expandable search log',async()=>{
     d.querySelector('[data-library-media="2"]').click();await settle();await settle();
     d.querySelector('.library-episode summary').click();
     d.querySelector('[data-candidates="11"]').click();await settle();await settle();
-    const log=d.querySelector('.candidate-search-log');
+    let log=d.querySelector('.candidate-search-log');
     assert.equal(log.open,false);
     assert.match(log.querySelector('summary').textContent,/Лог поиска · 1/);
     assert.match(log.textContent,/Проверка кандидата.*Demo: найден кандидат/s);
+    const manual=d.querySelector('#manual-candidate-form');
+    manual.elements.url.value='https://nyaa.si/view/321';
+    manual.dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}));await settle();await settle();
+    assert.deepEqual(calls.find(c=>c.url==='/api/v1/subtasks/11/candidates/manual').payload,{url:'https://nyaa.si/view/321'});
+    log=d.querySelector('.candidate-search-log');
     log.open=true;
     setActivity({running:true,state:'running',message:'Чтение структуры торрента',history:[{time:1,message:'Demo: найден кандидат'},{time:2,message:'Получение структуры торрента'}]});
     d.querySelector('[data-search-alternatives="11"]').click();await settle();await settle();
@@ -381,7 +386,7 @@ test('one release can be selected for every matching episode in a task',async()=
 });
 
 test('one release can be selected only for the expanded season',async()=>{
-  const {dom,document:d,calls,errors,setTasks,setTaskChoices,setLibrary}=await setup();
+  const {dom,w,document:d,calls,errors,setTasks,setTaskChoices,setLibrary}=await setup();
   try{
     const task={id:7,media_id:7,title:'Show',seasons:[{season:1},{season:2}],subtasks:[
       {id:1,season:1,episode:1,status:'needs_selection'},
@@ -404,6 +409,10 @@ test('one release can be selected only for the expanded season',async()=>{
     assert.equal(calls.some(call=>call.url==='/api/v1/tasks/7/seasons/2/candidates'),true);
     assert.match(d.querySelector('#modal-title').textContent,/сезона 2/);
     assert.match(d.querySelector('#modal-body').textContent,/2 из 2/);
+    const manual=d.querySelector('#manual-candidate-form');
+    manual.elements.url.value='https://nyaa.si/view/322';
+    manual.dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}));await settle();await settle();
+    assert.deepEqual(calls.find(call=>call.url==='/api/v1/tasks/7/seasons/2/candidates/manual').payload,{url:'https://nyaa.si/view/322'});
     d.querySelector('[data-choose-season="91"]').click();await settle();await settle();
     const call=calls.find(item=>item.url==='/api/v1/tasks/7/seasons/2/candidates/91/choice');
     assert.equal(call.method,'POST');assert.deepEqual(call.payload,{});

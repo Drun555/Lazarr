@@ -95,6 +95,51 @@ def test_subtask_search_log_requires_auth_and_is_scoped_to_its_task(core, media,
         assert client.get("/api/v1/subtasks/999/search").status_code == 404
 
 
+def test_manual_candidate_url_endpoint_delegates_to_worker(core, media, season, monkeypatch):
+    config, _, _, service = core
+    service.create_from_metadata(
+        CreateTask(media_id="42", kind="tv", season=1, episodes=[1]), media, season, 1
+    )
+    with TestClient(create_app(config)) as client:
+        login(client)
+        ctx = client.app.state.ctx
+        if ctx.engine is None:
+
+            class StubEngine:
+                def close(self):
+                    pass
+
+            ctx.engine = StubEngine()
+        received = []
+
+        async def add_manual_candidate(subtask_id, url):
+            received.append(("subtask", subtask_id, url))
+            return 77
+
+        async def add_manual_task_candidate(task_id, url, season_number=None):
+            received.append(("task", task_id, season_number, url))
+            return 78
+
+        monkeypatch.setattr(ctx.worker, "add_manual_candidate", add_manual_candidate)
+        monkeypatch.setattr(ctx.worker, "add_manual_task_candidate", add_manual_task_candidate)
+        response = client.post(
+            "/api/v1/subtasks/1/candidates/manual",
+            json={"url": "https://nyaa.si/view/321"},
+        )
+        assert response.status_code == 200, response.text
+        assert response.json() == {"id": 77}
+        response = client.post(
+            "/api/v1/tasks/1/seasons/1/candidates/manual",
+            json={"url": "https://nyaa.si/view/322"},
+        )
+        assert response.status_code == 200, response.text
+        assert response.json() == {"id": 78}
+        assert received == [
+            ("subtask", 1, "https://nyaa.si/view/321"),
+            ("task", 1, 1, "https://nyaa.si/view/322"),
+        ]
+
+
 def test_permissions_are_enforced_centrally(core):
     config, db, _, _ = core
     with db.session() as session:

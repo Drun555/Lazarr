@@ -4,7 +4,7 @@ from lazarr.provider_utils import search_titles
 import asyncio
 import logging
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from sqlalchemy import select, update
 from lazarr.calendar import next_search_start, released, TMDBCalendar
 from lazarr.matcher import Matcher
@@ -75,23 +75,84 @@ class Worker:
         self.last_checkpoint = 0
         self.progress = SearchProgress()
 
-    async def evaluate(self, candidate, subtasks):
+    async def evaluate(self, candidate, subtasks, *, allow_preference_mismatch=False, ignore_filters=False):
         """Only TorrentEngine supplies the authoritative file list to Matcher."""
         self.progress.record("inspect", f"Чтение описания: {candidate.title}", candidate=candidate.title)
         async with self.plugins.open(candidate.provider) as provider:
             detailed = await provider.inspect(candidate)
-            reason = reject_reason(detailed, subtasks, detailed=True)
+            reason = (
+                None
+                if ignore_filters
+                else reject_reason(
+                    detailed,
+                    subtasks,
+                    detailed=True,
+                    allow_preference_mismatch=allow_preference_mismatch,
+                )
+            )
             if reason:
                 raise CandidateFiltered(reason)
             self.progress.record("resolve", f"Получение torrent / magnet: {candidate.title}")
             source = await provider.resolve_download(detailed)
         self.progress.record("metadata", f"Получение структуры торрента: {candidate.title}")
         metadata = await asyncio.to_thread(self.engine.inspect, source)
+        if any(
+            part.casefold() == "bdmv" for file in metadata.files for part in PurePosixPath(file.path).parts
+        ):
+            raise CandidateFiltered("Blu-ray контейнер BDMV не поддерживается")
         self.progress.record(
             "matching", f"Сопоставление {len(metadata.files)} файлов с эпизодами и дорожками"
         )
         report = self.matcher.evaluate(detailed, subtasks, metadata.files, metadata.infohash)
         return detailed, metadata, report
+
+    async def add_manual_candidate(self, subtask_id, url):
+        """Inspect and save one explicitly supplied torrent URL for manual selection."""
+        async with self.lock:
+            with self.db.session() as db:
+                subtask = db.get(Subtask, subtask_id)
+                if not subtask:
+                    raise ValueError("Серия не найдена")
+                requests = [self.service.request_for(db, subtask)]
+            return await self._save_manual_candidate(requests, url)
+
+    async def add_manual_task_candidate(self, task_id, url, season_number=None):
+        """Inspect one supplied URL against every subtask in a task or season."""
+        async with self.lock:
+            with self.db.session() as db:
+                task = db.get(Task, task_id)
+                if not task:
+                    raise ValueError("Задача не найдена")
+                query = select(Subtask).where(Subtask.task_id == task_id)
+                if season_number is not None:
+                    query = (
+                        query.join(Episode, Subtask.episode_id == Episode.id)
+                        .join(Season, Episode.season_id == Season.id)
+                        .where(Season.number == season_number)
+                    )
+                subtasks = list(db.scalars(query.order_by(Subtask.id)))
+                if not subtasks:
+                    raise ValueError("В выбранной области нет серий")
+                requests = [self.service.request_for(db, subtask) for subtask in subtasks]
+            return await self._save_manual_candidate(requests, url)
+
+    async def _save_manual_candidate(self, requests, url):
+        candidate = self.plugins.manual_candidate(url)
+        try:
+            detailed, metadata, report = await self.evaluate(
+                candidate, requests, allow_preference_mismatch=True, ignore_filters=True
+            )
+        except CandidateFiltered as exc:
+            raise ValueError(str(exc)) from exc
+        release_id, _ = self._record(detailed, metadata, report)
+        with self.db.session() as db:
+            decision = db.scalar(
+                select(CandidateDecision).where(
+                    CandidateDecision.subtask_id == requests[0].id,
+                    CandidateDecision.release_id == release_id,
+                )
+            )
+            return decision.id
 
     async def due_groups(self, task_ids=None, force=False):
         settings = self.service.settings()
@@ -380,7 +441,7 @@ class Worker:
                     self.progress.value["candidates_found"] += len(unique)
                     shortlist = []
                     for candidate in unique:
-                        reason = reject_reason(candidate, requests)
+                        reason = reject_reason(candidate, requests, allow_preference_mismatch=not acquire)
                         if reason:
                             self.progress.value["candidates_filtered"] += 1
                             self.progress.record("filtered", f"Отсеяно: {candidate.title} — {reason}")
@@ -391,7 +452,11 @@ class Worker:
                         if acquire and all(r.id in covered for r in requests):
                             break
                         try:
-                            detailed, metadata, report = await self.evaluate(candidate, requests)
+                            detailed, metadata, report = await self.evaluate(
+                                candidate,
+                                requests,
+                                allow_preference_mismatch=not acquire,
+                            )
                             release_id, allowed = self._record(detailed, metadata, report)
                             choices.append((detailed, metadata, report, release_id, allowed))
                             self.progress.value["candidates_checked"] += 1

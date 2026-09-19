@@ -154,6 +154,7 @@ dialog::backdrop{background:#0a0a0ac9;}
 .modal-heading h2{margin:0}
 .candidate{padding:17px;border:1px solid var(--line);border-radius:10px;margin:13px 0}
 .candidate h3{font-size:13px;overflow-wrap:anywhere}
+.manual-candidate-form{margin:14px 0}
 .criterion{display:flex;gap:10px;align-items:baseline;font-size:12px;padding:4px 0}
 .criterion .MATCH{color:var(--accent)}
 .criterion .MISMATCH{color:var(--danger)}

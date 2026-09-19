@@ -300,6 +300,86 @@ async def test_completed_tasks_do_not_search_or_upgrade(core, media, season, wor
     assert all(task["completed"] for task in service.list_tasks())
 
 
+async def test_alternative_search_records_quality_and_language_mismatches(core, media, season, worker_setup):
+    _, db, _, service = core
+    worker, _, demo = worker_setup
+    demo.quality = 2160
+    service.create_from_metadata(
+        CreateTask(
+            media_id="42",
+            kind="tv",
+            season=1,
+            episodes=[1],
+            requirements=Requirements(audio_languages=["en"], max_resolution=1080),
+        ),
+        media,
+        season,
+        1,
+    )
+    await worker.run_due()
+    with db.session() as session:
+        assert session.scalar(select(CandidateDecision)) is None
+    await worker.search_alternatives(1)
+    choice = service.candidates(1)[0]
+    criteria = {item["field"]: item["result"] for item in choice["report"]["criteria"]}
+    assert criteria["resolution"] == "MISMATCH"
+    assert criteria["audio"] == "MISMATCH"
+
+
+async def test_bluray_bdmv_candidates_are_never_recorded(core, media, season, worker_setup, monkeypatch):
+    _, db, _, service = core
+    worker, _, demo = worker_setup
+    service.create_from_metadata(
+        CreateTask(media_id="42", kind="tv", season=1, episodes=[1]), media, season, 1
+    )
+
+    async def bluray_download(self, item):
+        return DownloadSource(torrent=json.dumps(["Movie/BDMV/STREAM/00001.m2ts"]).encode())
+
+    monkeypatch.setattr(demo, "resolve_download", bluray_download)
+    await worker.search_alternatives(1)
+    with db.session() as session:
+        assert session.scalar(select(CandidateDecision)) is None
+        assert session.scalar(select(Download)) is None
+    assert any("BDMV" in item["message"] for item in worker.progress.snapshot()["history"])
+
+
+async def test_manual_url_is_inspected_and_saved_for_selection(
+    core, media, season, worker_setup, monkeypatch
+):
+    _, _, plugins, service = core
+    worker, _, _ = worker_setup
+    task_id = service.create_from_metadata(
+        CreateTask(media_id="42", kind="tv", season=1, episodes=[1, 2]), media, season, 1
+    )
+    plugins.configure("nyaa", {}, True)
+    provider = plugins.classes["nyaa"]
+
+    async def inspect(self, item):
+        return item.model_copy(
+            update={
+                "title": "Example Show (2020) 1080p",
+                "evidence": [audio_claim("Show.S01E01.1080p.mkv")],
+            }
+        )
+
+    async def resolve_download(self, item):
+        return DownloadSource(torrent=json.dumps(["Show.S01E01.1080p.mkv"]).encode())
+
+    monkeypatch.setattr(provider, "inspect", inspect)
+    monkeypatch.setattr(provider, "resolve_download", resolve_download)
+    decision_id = await worker.add_manual_candidate(1, "https://nyaa.si/view/321")
+    choices = service.candidates(1)
+    assert choices[0]["id"] == decision_id
+    assert choices[0]["candidate"]["id"] == "321"
+    await worker.add_manual_task_candidate(task_id, "https://nyaa.si/view/322", season_number=1)
+    task_choice = next(
+        choice for choice in service.task_candidates(task_id, 1) if choice["candidate"]["id"] == "322"
+    )
+    assert task_choice["total"] == 2
+    assert {episode["subtask_id"] for episode in task_choice["episodes"]} == {1, 2}
+
+
 async def test_future_dates_block_but_unknown_dates_search(core, media, season, worker_setup):
     _, db, _, service = core
     worker, engine, demo = worker_setup

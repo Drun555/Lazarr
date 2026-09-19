@@ -53,7 +53,7 @@ def request_seasons(request):
     return {a["season"] for a in aliases} if aliases else {request.season}
 
 
-def reject_reason(candidate, requests, *, detailed=False):
+def reject_reason(candidate, requests, *, detailed=False, allow_preference_mismatch=False):
     from lazarr.matcher import resolution, episode_numbers
 
     title = candidate.title
@@ -107,6 +107,7 @@ def reject_reason(candidate, requests, *, detailed=False):
             reason = "Указанные эпизоды не пересекаются с запросом"
         elif (
             quality
+            and not allow_preference_mismatch
             and not request.requirements.min_resolution <= quality <= request.requirements.max_resolution
         ):
             reason = "Заявленное разрешение вне диапазона задачи"
@@ -124,6 +125,7 @@ def reject_reason(candidate, requests, *, detailed=False):
         # Only an explicitly complete, release-wide declaration can prove absence.
         elif (
             detailed
+            and not allow_preference_mismatch
             and len(complete_audio) == 1
             and not set(request.requirements.audio_languages) <= next(iter(complete_audio))
         ):

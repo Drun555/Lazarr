@@ -38,6 +38,35 @@ async def test_concurrent_requests_are_spaced_and_providers_are_independent():
     assert clock() == 1006
 
 
+async def test_randomized_request_spacing_stays_inside_configured_range():
+    clock = Clock()
+    delays = iter([10, 30, 17, 22])
+    pacer = RequestPacer(
+        10,
+        30,
+        clock=clock,
+        sleep=clock.sleep,
+        choose_delay=lambda minimum, maximum: next(delays),
+    )
+    times = []
+    for _ in range(4):
+        await pacer.wait()
+        times.append(clock())
+    assert times == [1000, 1010, 1040, 1057]
+
+
+def test_rutracker_uses_long_randomized_pacing_and_manual_urls_are_scoped(core):
+    _, _, manager, _ = core
+    manager.request_interval = 2
+    pacer = manager.request_pacer("rutracker")
+    assert (pacer.min_interval, pacer.max_interval) == (10, 30)
+    manager.configure("rutracker", {}, True)
+    item = manager.manual_candidate("https://rutracker.org/forum/viewtopic.php?t=12345")
+    assert (item.provider, item.id) == ("rutracker", "12345")
+    with pytest.raises(ValueError, match="не распознан"):
+        manager.manual_candidate("https://attacker.example/viewtopic.php?t=12345")
+
+
 async def test_cancelled_wait_does_not_reserve_a_request_slot():
     clock = Clock()
     waiting = asyncio.Event()

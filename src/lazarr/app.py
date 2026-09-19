@@ -171,6 +171,10 @@ class ChoiceInput(BaseModel):
     track_indices: list[int] = Field(default_factory=list)
 
 
+class ManualCandidateInput(BaseModel):
+    url: str = Field(min_length=8, max_length=2048)
+
+
 class DownloadAction(BaseModel):
     action: str = Field(pattern="^(pause|resume)$")
 
@@ -536,13 +540,65 @@ def create_app(config: RuntimeConfig | None = None):
         await ctx.worker.search_alternatives(identity)
         return ctx.service.candidates(identity)
 
+    @app.post("/api/v1/subtasks/{identity}/candidates/manual")
+    async def add_manual_candidate(
+        identity: int,
+        payload: ManualCandidateInput,
+        request: Request,
+        user=Depends(permission("tasks")),
+    ):
+        ctx = context(request)
+        if ctx.engine is None:
+            raise HTTPException(503, ctx.engine_error)
+        decision_id = await ctx.worker.add_manual_candidate(identity, payload.url)
+        with ctx.db.session() as db:
+            audit(db, user.id, "candidate.manual", str(decision_id), {"subtask_id": identity})
+        return {"id": decision_id}
+
     @app.get("/api/v1/tasks/{identity}/candidates")
     async def task_candidates(identity: int, request: Request, user=Depends(authenticated)):
         return context(request).service.task_candidates(identity)
 
+    @app.post("/api/v1/tasks/{identity}/candidates/manual")
+    async def add_manual_task_candidate(
+        identity: int,
+        payload: ManualCandidateInput,
+        request: Request,
+        user=Depends(permission("tasks")),
+    ):
+        ctx = context(request)
+        if ctx.engine is None:
+            raise HTTPException(503, ctx.engine_error)
+        decision_id = await ctx.worker.add_manual_task_candidate(identity, payload.url)
+        with ctx.db.session() as db:
+            audit(db, user.id, "candidate.manual_task", str(decision_id), {"task_id": identity})
+        return {"id": decision_id}
+
     @app.get("/api/v1/tasks/{identity}/seasons/{season}/candidates")
     async def season_candidates(identity: int, season: int, request: Request, user=Depends(authenticated)):
         return context(request).service.task_candidates(identity, season)
+
+    @app.post("/api/v1/tasks/{identity}/seasons/{season}/candidates/manual")
+    async def add_manual_season_candidate(
+        identity: int,
+        season: int,
+        payload: ManualCandidateInput,
+        request: Request,
+        user=Depends(permission("tasks")),
+    ):
+        ctx = context(request)
+        if ctx.engine is None:
+            raise HTTPException(503, ctx.engine_error)
+        decision_id = await ctx.worker.add_manual_task_candidate(identity, payload.url, season)
+        with ctx.db.session() as db:
+            audit(
+                db,
+                user.id,
+                "candidate.manual_season",
+                str(decision_id),
+                {"task_id": identity, "season": season},
+            )
+        return {"id": decision_id}
 
     @app.get("/api/v1/candidates/{identity}/selection")
     async def candidate_selection(
