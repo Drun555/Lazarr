@@ -58,6 +58,18 @@ class Scheduler:
         self.wake.set()
         return key
 
+    def retry_now(self, task_id=None):
+        """Reset provider pauses and make matching deferred searches runnable now."""
+        self.worker.plugins.reset_content_cooldowns()
+        with self.service.db.session() as db:
+            entries = db.scalars(select(ConfigEntry).where(ConfigEntry.key.startswith(PREFIX)))
+            for row in entries:
+                if task_id is not None and row.value.get("task_id") != task_id:
+                    continue
+                if row.value.get("not_before", 0) > 0:
+                    row.value = {**row.value, "not_before": 0}
+        return self.enqueue(task_id)
+
     def discard_satisfied(self):
         """Remove queued searches whose episodes already have a download."""
         with self.service.db.session() as db:

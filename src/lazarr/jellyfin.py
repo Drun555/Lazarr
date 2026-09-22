@@ -21,6 +21,7 @@ from lazarr.jellyfin_state import (
     bool_parameter,
     csv_parameter,
     filter_items,
+    number_parameter,
     page,
     parameter,
 )
@@ -55,6 +56,207 @@ KINDS = {"media": 1, "season": 2, "episode": 3, "asset": 4, "user": 5, "playlist
 KIND_NAMES = {value: key for key, value in KINDS.items()}
 LIBRARY_COLLECTIONS = {"series": "tvshows", "movies": "movies", "anime": "tvshows"}
 VISIBLE_DOWNLOAD_STATES = {"starting", "downloading", "ready"}
+
+
+class JellyfinDtoBatch:
+    """Request-scoped cache for the data shared by Jellyfin DTOs."""
+
+    def __init__(self, ctx, user=None):
+        self.ctx = ctx
+        self.user_id = user.id if user else None
+        self._details = {}
+        self._progress = None
+        self._playables = None
+        self._playables_by_asset = None
+        self._media_metadata = None
+        self._settings = None
+        self._selections = None
+        self._episode_media = None
+        self._user_configuration = None
+
+    def detail(self, media_id):
+        if media_id not in self._details:
+            self._details[media_id] = self.ctx.library.detail(media_id)
+        return self._details[media_id]
+
+    def progress(self, item_id):
+        if self._progress is None:
+            if self.user_id is None:
+                self._progress = {}
+            else:
+                with self.ctx.db.session() as db:
+                    self._progress = {
+                        row.item_id: row
+                        for row in db.scalars(
+                            select(PlaybackProgress).where(PlaybackProgress.user_id == self.user_id)
+                        )
+                    }
+        return self._progress.get(item_id)
+
+    def progress_rows(self, item_ids):
+        result = {}
+        for identity in item_ids:
+            row = self.progress(identity)
+            if row:
+                result[identity] = row
+        return result
+
+    def settings(self):
+        if self._settings is None:
+            self._settings = self.ctx.service.settings()
+        return self._settings
+
+    def stored_user_configuration(self):
+        if self._user_configuration is None:
+            if self.user_id is None:
+                self._user_configuration = {}
+            else:
+                with self.ctx.db.session() as db:
+                    row = db.get(ConfigEntry, f"jellyfin.user.{self.user_id}")
+                    self._user_configuration = dict(row.value) if row else {}
+        return self._user_configuration
+
+    def media_id_for_item(self, item_id):
+        kind, identity, _ = parse_object_id(item_id)
+        if kind in {"media", "season"}:
+            return identity
+        if kind == "episode":
+            if self._episode_media is None:
+                with self.ctx.db.session() as db:
+                    self._episode_media = {
+                        episode_id: media_id
+                        for episode_id, media_id in db.execute(
+                            select(Episode.id, Season.media_id).join(Season, Season.id == Episode.season_id)
+                        )
+                    }
+            return self._episode_media.get(identity)
+        if kind == "asset":
+            playable = self.playable(kind, identity)
+            return playable["asset"].media_id if playable else None
+        return None
+
+    def playback_selection(self, item_id):
+        media_id = self.media_id_for_item(item_id)
+        if media_id is None or self.user_id is None:
+            return {}
+        if self._selections is None:
+            prefix = f"jellyfin.selection.{self.user_id}."
+            with self.ctx.db.session() as db:
+                self._selections = {
+                    int(row.key.removeprefix(prefix)): dict(row.value)
+                    for row in db.scalars(select(ConfigEntry).where(ConfigEntry.key.startswith(prefix)))
+                }
+        return self._selections.get(media_id, {})
+
+    def media_metadata(self, media_id):
+        if self._media_metadata is None:
+            self._media_metadata = {}
+            with self.ctx.db.session() as db:
+                for identity, created_at, part_key, asset_id in db.execute(
+                    select(
+                        LibraryAsset.media_id,
+                        LibraryAsset.created_at,
+                        LibraryAsset.part_key,
+                        LibraryAsset.asset_id,
+                    ).order_by(LibraryAsset.created_at)
+                ):
+                    row = self._media_metadata.setdefault(identity, {"added": None, "extras": []})
+                    row["added"] = row["added"] or created_at
+                    row["extras"].append((part_key, asset_id))
+                for identity, created_at in db.execute(select(Task.media_id, Task.created_at)):
+                    row = self._media_metadata.setdefault(identity, {"added": None, "extras": []})
+                    row["added"] = row["added"] or created_at
+        return self._media_metadata.get(media_id, {"added": None, "extras": []})
+
+    def _load_playables(self):
+        if self._playables is not None:
+            return
+        self._playables = {}
+        self._playables_by_asset = {}
+        with self.ctx.db.session() as db:
+            stored = db.execute(
+                select(LibraryAsset, MediaAsset, Download)
+                .join(MediaAsset, MediaAsset.id == LibraryAsset.asset_id)
+                .join(Download, Download.id == MediaAsset.download_id)
+                .order_by(MediaAsset.id.desc())
+            )
+            for link, asset, download in stored:
+                if not link.verification.get("complete"):
+                    continue
+                path = playable_path(download, asset.path)
+                if not path:
+                    continue
+                playable = {"asset": asset, "download": download, "link": link, "path": path}
+                self._playables_by_asset.setdefault(asset.id, playable)
+                if jellyfin_resources.is_extra(link.part_key) or link.part_key.startswith("part:"):
+                    continue
+                key = ("episode", link.episode_id) if link.episode_id else ("media", link.media_id)
+                self._playables.setdefault(key, playable)
+
+            partial = db.execute(
+                select(SubtaskAsset, Subtask, MediaAsset, Download)
+                .join(Subtask, Subtask.id == SubtaskAsset.subtask_id)
+                .join(MediaAsset, MediaAsset.id == SubtaskAsset.asset_id)
+                .join(Download, Download.id == MediaAsset.download_id)
+                .where(Subtask.status == "ready")
+                .order_by(SubtaskAsset.current.desc(), SubtaskAsset.id.desc())
+            )
+            for link, subtask, asset, download in partial:
+                binding = (download.stats or {}).get("bindings", {}).get(str(subtask.id), {})
+                path = playable_path(download, asset.path)
+                if not binding.get("buffer_ready") or not path:
+                    continue
+                playable = {"asset": asset, "download": download, "link": link, "path": path}
+                self._playables_by_asset.setdefault(asset.id, playable)
+                key = ("episode", subtask.episode_id) if subtask.episode_id else ("media", asset.media_id)
+                self._playables.setdefault(key, playable)
+
+    def playable(self, kind, identity, source_id=None):
+        self._load_playables()
+        asset_id = None
+        if source_id and source_id != object_id(kind, identity):
+            source_kind, asset_id, _ = parse_object_id(source_id)
+            if source_kind != "asset":
+                return None
+        if kind == "asset":
+            asset_id = identity
+        if asset_id is not None:
+            candidate = self._playables_by_asset.get(asset_id)
+            if not candidate:
+                return None
+            link = candidate["link"]
+            if kind == "episode":
+                linked = getattr(link, "episode_id", None)
+                if linked is None and isinstance(link, SubtaskAsset):
+                    with self.ctx.db.session() as db:
+                        linked = db.get(Subtask, link.subtask_id).episode_id
+                if linked != identity:
+                    return None
+            elif kind == "media" and candidate["asset"].media_id != identity:
+                return None
+            return candidate
+        return self._playables.get((kind, identity))
+
+    def versions(self, item_id, current):
+        self._load_playables()
+        kind, identity, _ = parse_object_id(item_id)
+        if kind == "asset" or not isinstance(current["link"], LibraryAsset):
+            return [current]
+        part_key = current["link"].part_key
+        candidates = []
+        for playable in self._playables_by_asset.values():
+            link = playable["link"]
+            if not isinstance(link, LibraryAsset) or link.part_key != part_key:
+                continue
+            if jellyfin_resources.is_extra(link.part_key):
+                continue
+            if kind == "episode" and link.episode_id != identity:
+                continue
+            if kind == "media" and (link.media_id != identity or link.episode_id is not None):
+                continue
+            candidates.append(playable)
+        candidates.sort(key=lambda value: value["asset"].id, reverse=True)
+        return [current] + [value for value in candidates if value["asset"].id != current["asset"].id]
 
 
 def is_fladder(request):
@@ -110,8 +312,8 @@ def jellyfin_language(value):
     return next((code for code in CODES[normalized].split() if len(code) == 3), normalized)
 
 
-def user_configuration(ctx, user):
-    preferences = ctx.service.settings().jellyfin
+def user_configuration(ctx, user, batch=None):
+    preferences = (batch.settings() if batch else ctx.service.settings()).jellyfin
     configuration = {
         "AudioLanguagePreference": jellyfin_language(preferences.audio_languages[0])
         if preferences.audio_languages
@@ -125,10 +327,13 @@ def user_configuration(ctx, user):
         "RememberSubtitleSelections": False,
         "EnableNextEpisodeAutoPlay": True,
     }
-    with ctx.db.session() as db:
-        stored = db.get(ConfigEntry, f"jellyfin.user.{user.id}")
-        if stored:
-            configuration.update(stored.value)
+    if batch is not None and batch.user_id == user.id:
+        configuration.update(batch.stored_user_configuration())
+    else:
+        with ctx.db.session() as db:
+            stored = db.get(ConfigEntry, f"jellyfin.user.{user.id}")
+            if stored:
+                configuration.update(stored.value)
     return configuration
 
 
@@ -179,7 +384,7 @@ def provider_ids(media):
     return values
 
 
-def user_data(ctx, user, item_id, runtime_ticks=0):
+def user_data(ctx, user, item_id, runtime_ticks=0, batch=None):
     if user is None:
         return {
             "ItemId": item_id,
@@ -189,12 +394,15 @@ def user_data(ctx, user, item_id, runtime_ticks=0):
             "IsFavorite": False,
             "Played": False,
         }
-    with ctx.db.session() as db:
-        row = db.scalar(
-            select(PlaybackProgress).where(
-                PlaybackProgress.user_id == user.id, PlaybackProgress.item_id == item_id
+    if batch is not None and batch.user_id == user.id:
+        row = batch.progress(item_id)
+    else:
+        with ctx.db.session() as db:
+            row = db.scalar(
+                select(PlaybackProgress).where(
+                    PlaybackProgress.user_id == user.id, PlaybackProgress.item_id == item_id
+                )
             )
-        )
     position = row.position_ticks if row else 0
     result = {
         "ItemId": item_id,
@@ -215,28 +423,32 @@ def user_data(ctx, user, item_id, runtime_ticks=0):
     return result
 
 
-def visible_episode_item_ids(ctx, media_id, season_number=None):
+def visible_episode_item_ids(ctx, media_id, season_number=None, batch=None):
     return [
         object_id("episode", episode["id"])
-        for episode in ctx.library.detail(media_id)["episodes"]
-        if (season_number is None or episode["season"] == season_number) and episode_is_visible(ctx, episode)
+        for episode in (batch.detail(media_id) if batch else ctx.library.detail(media_id))["episodes"]
+        if (season_number is None or episode["season"] == season_number)
+        and episode_is_visible(ctx, episode, batch)
     ]
 
 
-def grouped_user_data(ctx, user, item_id, episode_ids):
-    result = user_data(ctx, user, item_id)
+def grouped_user_data(ctx, user, item_id, episode_ids, batch=None):
+    result = user_data(ctx, user, item_id, batch=batch)
     if user is None:
         return result
-    with ctx.db.session() as db:
-        rows = {
-            row.item_id: row
-            for row in db.scalars(
-                select(PlaybackProgress).where(
-                    PlaybackProgress.user_id == user.id,
-                    PlaybackProgress.item_id.in_(episode_ids),
+    if batch is not None and batch.user_id == user.id:
+        rows = batch.progress_rows(episode_ids)
+    else:
+        with ctx.db.session() as db:
+            rows = {
+                row.item_id: row
+                for row in db.scalars(
+                    select(PlaybackProgress).where(
+                        PlaybackProgress.user_id == user.id,
+                        PlaybackProgress.item_id.in_(episode_ids),
+                    )
                 )
-            )
-        }
+            }
     played = sum(bool(rows.get(identity) and rows[identity].played) for identity in episode_ids)
     result.update(
         {
@@ -258,14 +470,14 @@ def grouped_user_data(ctx, user, item_id, episode_ids):
     return result
 
 
-def media_dto(ctx, media, user=None):
+def media_dto(ctx, media, user=None, batch=None):
     image = poster_tag(media)
     backdrop = backdrop_tag(media)
     kind = "Movie" if media.kind == "movie" else "Series"
     data = media.metadata_json
     result = {
         "Name": media.title,
-        **jellyfin_catalog.metadata_fields(ctx, media),
+        **jellyfin_catalog.metadata_fields(ctx, media, batch),
         "OriginalTitle": data.get("original_title"),
         "ServerId": server_id(ctx),
         "Id": object_id("media", media.id),
@@ -287,27 +499,38 @@ def media_dto(ctx, media, user=None):
         "BackdropImageTags": [backdrop] if backdrop else [],
         "UserData": {},
     }
-    playable = playable_asset(ctx, "media", media.id) if media.kind == "movie" else None
+    playable = playable_asset(ctx, "media", media.id, batch=batch) if media.kind == "movie" else None
     if playable:
         result.update(playable_item_fields(playable, result["Id"]))
-        source = media_source(ctx, playable, result["Id"], user)
+        source = media_source(ctx, playable, result["Id"], user, batch=batch)
         result["MediaSources"] = [source] + [
-            media_source(ctx, version, result["Id"], user, source_id=object_id("asset", version["asset"].id))
-            for version in playback_versions(ctx, result["Id"], playable)[1:]
+            media_source(
+                ctx,
+                version,
+                result["Id"],
+                user,
+                source_id=object_id("asset", version["asset"].id),
+                batch=batch,
+            )
+            for version in playback_versions(ctx, result["Id"], playable, batch)[1:]
         ]
         result["MediaSourceCount"] = len(result["MediaSources"])
         result["MediaStreams"] = source["MediaStreams"]
         result["HasSubtitles"] = any(s["Type"] == "Subtitle" for s in source["MediaStreams"])
     if media.kind == "tv":
         result["UserData"] = grouped_user_data(
-            ctx, user, result["Id"], visible_episode_item_ids(ctx, media.id)
+            ctx,
+            user,
+            result["Id"],
+            visible_episode_item_ids(ctx, media.id, batch=batch),
+            batch,
         )
     else:
-        result["UserData"] = user_data(ctx, user, result["Id"], result.get("RunTimeTicks", 0))
+        result["UserData"] = user_data(ctx, user, result["Id"], result.get("RunTimeTicks", 0), batch)
     return result
 
 
-def library_dto(ctx, key, name, user=None):
+def library_dto(ctx, key, name, user=None, batch=None):
     identity = library_ids(ctx)[key]
     return {
         "Name": name,
@@ -323,15 +546,15 @@ def library_dto(ctx, key, name, user=None):
         "LocationType": "FileSystem",
         "ImageTags": {},
         "BackdropImageTags": [],
-        "UserData": user_data(ctx, user, identity),
+        "UserData": user_data(ctx, user, identity, batch=batch),
     }
 
 
-def season_dto(ctx, media, number, user=None):
+def season_dto(ctx, media, number, user=None, batch=None):
     count = sum(
         1
-        for episode in ctx.library.detail(media.id)["episodes"]
-        if episode["season"] == number and episode_is_visible(ctx, episode)
+        for episode in (batch.detail(media.id) if batch else ctx.library.detail(media.id))["episodes"]
+        if episode["season"] == number and episode_is_visible(ctx, episode, batch)
     )
     backdrop = backdrop_tag(media)
     identity = object_id("season", media.id, number)
@@ -355,11 +578,19 @@ def season_dto(ctx, media, number, user=None):
         "ImageTags": {},
         "BackdropImageTags": [backdrop] if backdrop else [],
         "SeriesPrimaryImageTag": poster_tag(media),
-        "UserData": grouped_user_data(ctx, user, identity, visible_episode_item_ids(ctx, media.id, number)),
+        "UserData": grouped_user_data(
+            ctx,
+            user,
+            identity,
+            visible_episode_item_ids(ctx, media.id, number, batch),
+            batch,
+        ),
     }
 
 
 def playable_path(download, relative):
+    if not isinstance(relative, str) or not relative:
+        return None
     root = Path(download.save_path).resolve()
     path = (root / relative).resolve()
     if not path.is_relative_to(root) or not path.is_file():
@@ -367,14 +598,20 @@ def playable_path(download, relative):
     return path
 
 
-def available_seasons(ctx, media):
-    detail = ctx.library.detail(media.id)
+def available_seasons(ctx, media, batch=None):
+    detail = batch.detail(media.id) if batch else ctx.library.detail(media.id)
     return sorted(
-        {e["season"] for e in detail["episodes"] if e["season"] is not None and episode_is_visible(ctx, e)}
+        {
+            e["season"]
+            for e in detail["episodes"]
+            if e["season"] is not None and episode_is_visible(ctx, e, batch)
+        }
     )
 
 
-def playable_asset(ctx, kind, identity, source_id=None):
+def playable_asset(ctx, kind, identity, source_id=None, batch=None):
+    if batch is not None:
+        return batch.playable(kind, identity, source_id)
     asset_id = None
     if source_id and source_id != object_id(kind, identity):
         source_kind, asset_id, _ = parse_object_id(source_id)
@@ -446,9 +683,9 @@ def playable_asset(ctx, kind, identity, source_id=None):
     return None
 
 
-def episode_is_visible(ctx, episode_data):
+def episode_is_visible(ctx, episode_data, batch=None):
     return bool(VISIBLE_DOWNLOAD_STATES.intersection(episode_data.get("statuses", []))) or bool(
-        playable_asset(ctx, "episode", episode_data["id"])
+        playable_asset(ctx, "episode", episode_data["id"], batch=batch)
     )
 
 
@@ -500,7 +737,9 @@ def media_identity_for_item(ctx, item_id):
     return None
 
 
-def playback_selection(ctx, user, item_id):
+def playback_selection(ctx, user, item_id, batch=None):
+    if batch is not None and (user is None or batch.user_id == user.id):
+        return batch.playback_selection(item_id)
     media_id = media_identity_for_item(ctx, item_id)
     if media_id is None or user is None:
         return {}
@@ -552,11 +791,12 @@ def media_streams(
     user=None,
     play_session_id=None,
     subtitle_compatibility=False,
+    batch=None,
 ):
     asset, link, download = playable["asset"], playable["link"], playable["download"]
-    settings = ctx.service.settings()
+    settings = batch.settings() if batch else ctx.service.settings()
     preferences = settings.jellyfin
-    configuration = user_configuration(ctx, user) if user else {}
+    configuration = user_configuration(ctx, user, batch) if user else {}
     audio_priorities = list(
         dict.fromkeys(
             [
@@ -735,7 +975,14 @@ def media_streams(
 
 
 def media_source(
-    ctx, playable, item_id, user=None, play_session_id=None, subtitle_compatibility=False, source_id=None
+    ctx,
+    playable,
+    item_id,
+    user=None,
+    play_session_id=None,
+    subtitle_compatibility=False,
+    source_id=None,
+    batch=None,
 ):
     asset, path = playable["asset"], playable["path"]
     # Fladder requests /Videos/{MediaSource.Id}/stream. Keeping the source id
@@ -743,9 +990,16 @@ def media_source(
     # filesystem path or requiring the client to know Lazarr's asset ids.
     source_id = source_id or item_id
     streams, audio_index, subtitle_index = media_streams(
-        ctx, playable, item_id, source_id, user, play_session_id, subtitle_compatibility
+        ctx,
+        playable,
+        item_id,
+        source_id,
+        user,
+        play_session_id,
+        subtitle_compatibility,
+        batch,
     )
-    remembered = playback_selection(ctx, user, item_id)
+    remembered = playback_selection(ctx, user, item_id, batch)
     if "audio" in remembered:
         selected_audio = selected_stream(streams, "Audio", remembered["audio"])
         if selected_audio:
@@ -813,8 +1067,8 @@ def playable_item_fields(playable, item_id):
     }
 
 
-def episode_dto(ctx, media, episode_data, user=None, *, include_missing=False):
-    playable = playable_asset(ctx, "episode", episode_data["id"])
+def episode_dto(ctx, media, episode_data, user=None, *, include_missing=False, batch=None):
+    playable = playable_asset(ctx, "episode", episode_data["id"], batch=batch)
     if (
         not include_missing
         and not playable
@@ -828,7 +1082,7 @@ def episode_dto(ctx, media, episode_data, user=None, *, include_missing=False):
     title = episode_data["title"] or f"Серия {episode_number}"
     backdrop = backdrop_tag(media)
     result = {
-        **jellyfin_catalog.metadata_fields(ctx, media),
+        **jellyfin_catalog.metadata_fields(ctx, media, batch),
         "Name": title,
         "SortName": title.casefold(),
         "ServerId": server_id(ctx),
@@ -858,43 +1112,50 @@ def episode_dto(ctx, media, episode_data, user=None, *, include_missing=False):
         "MediaSources": [],
         "MediaStreams": [],
         "HasSubtitles": False,
-        "UserData": user_data(ctx, user, object_id("episode", episode_data["id"])),
+        "UserData": user_data(ctx, user, object_id("episode", episode_data["id"]), batch=batch),
     }
     if playable:
         result.update(playable_item_fields(playable, result["Id"]))
-        source = media_source(ctx, playable, result["Id"], user)
+        source = media_source(ctx, playable, result["Id"], user, batch=batch)
         result["MediaSources"] = [source] + [
-            media_source(ctx, version, result["Id"], user, source_id=object_id("asset", version["asset"].id))
-            for version in playback_versions(ctx, result["Id"], playable)[1:]
+            media_source(
+                ctx,
+                version,
+                result["Id"],
+                user,
+                source_id=object_id("asset", version["asset"].id),
+                batch=batch,
+            )
+            for version in playback_versions(ctx, result["Id"], playable, batch)[1:]
         ]
         result["MediaSourceCount"] = len(result["MediaSources"])
         result["MediaStreams"] = source["MediaStreams"]
         result["HasSubtitles"] = any(s["Type"] == "Subtitle" for s in source["MediaStreams"])
-        result["UserData"] = user_data(ctx, user, result["Id"], result["RunTimeTicks"])
+        result["UserData"] = user_data(ctx, user, result["Id"], result["RunTimeTicks"], batch)
     return result
 
 
-def item_dto(ctx, item_id, user=None):
+def item_dto(ctx, item_id, user=None, batch=None):
     try:
         item_id = str(uuid.UUID(item_id))
     except ValueError as exc:
         raise HTTPException(404, "Item not found") from exc
     if item_id in library_ids(ctx).values():
         key = next(key for key, value in library_ids(ctx).items() if value == item_id)
-        return library_dto(ctx, key, dict(LIBRARIES)[key], user)
+        return library_dto(ctx, key, dict(LIBRARIES)[key], user, batch)
     if uuid.UUID(item_id).version == 5:
         with ctx.db.session() as db:
-            rows = [media_dto(ctx, m, user) for m in db.scalars(select(Media))]
+            rows = [media_dto(ctx, m, user, batch) for m in db.scalars(select(Media))]
         for kind in ("Genre", "Person", "Studio", "Year", "BoxSet"):
             match = next((i for i in jellyfin_catalog.entities(rows, kind) if i["Id"] == item_id), None)
             if match:
-                match["UserData"] = user_data(ctx, user, match["Id"])
+                match["UserData"] = user_data(ctx, user, match["Id"], batch=batch)
                 return match
     kind, identity, secondary = parse_object_id(item_id)
     if kind == "playlist":
         return jellyfin_playlists.playlist_item(ctx, item_id, user)
     if kind == "asset":
-        playable = playable_asset(ctx, kind, identity)
+        playable = playable_asset(ctx, kind, identity, batch=batch)
         if not playable:
             raise HTTPException(404, "Media source not found")
         link = playable["link"]
@@ -912,12 +1173,12 @@ def item_dto(ctx, item_id, user=None):
                     if task.episode_id
                     else object_id("media", playable["asset"].media_id)
                 )
-        result = item_dto(ctx, parent, user)
+        result = item_dto(ctx, parent, user, batch)
         result.update(playable_item_fields(playable, item_id))
         result["Id"] = item_id
-        result["MediaSources"] = [media_source(ctx, playable, item_id, user)]
+        result["MediaSources"] = [media_source(ctx, playable, item_id, user, batch=batch)]
         result["MediaStreams"] = result["MediaSources"][0]["MediaStreams"]
-        result["UserData"] = user_data(ctx, user, item_id, result.get("RunTimeTicks", 0))
+        result["UserData"] = user_data(ctx, user, item_id, result.get("RunTimeTicks", 0), batch)
         if isinstance(link, LibraryAsset) and jellyfin_resources.is_extra(link.part_key):
             result["Type"] = "Trailer" if link.part_key.startswith("trailer:") else "Video"
             result["MediaType"] = "Video"
@@ -928,20 +1189,20 @@ def item_dto(ctx, item_id, user=None):
         if kind == "media":
             media = db.get(Media, identity)
             if media:
-                return media_dto(ctx, media, user)
+                return media_dto(ctx, media, user, batch)
         elif kind == "season":
             media = db.get(Media, identity)
             if media:
-                return season_dto(ctx, media, secondary, user)
+                return season_dto(ctx, media, secondary, user, batch)
         elif kind == "episode":
             episode = db.get(Episode, identity)
             season = db.get(Season, episode.season_id) if episode else None
             media = db.get(Media, season.media_id) if season else None
             if media:
-                detail = ctx.library.detail(media.id)
+                detail = batch.detail(media.id) if batch else ctx.library.detail(media.id)
                 data = next((e for e in detail["episodes"] if e["id"] == identity), None)
                 if data:
-                    item = episode_dto(ctx, media, data, user, include_missing=True)
+                    item = episode_dto(ctx, media, data, user, include_missing=True, batch=batch)
                     if item:
                         return item
     raise HTTPException(404, "Item not found")
@@ -1129,8 +1390,10 @@ def playback_for_item(ctx, item_id, source_id=None):
     return playable_asset(ctx, kind, identity, source_id) if kind in {"media", "episode", "asset"} else None
 
 
-def playback_versions(ctx, item_id, current):
+def playback_versions(ctx, item_id, current, batch=None):
     """Expose verified versions while preserving the existing single-source URL."""
+    if batch is not None:
+        return batch.versions(item_id, current)
     kind, identity, _ = parse_object_id(item_id)
     if kind == "asset":
         return [current]
@@ -1393,7 +1656,10 @@ def install_jellyfin_api(app, context):
         include_types=None,
         recursive=False,
         include_missing=False,
+        batch=None,
     ):
+        batch = batch or JellyfinDtoBatch(ctx, user)
+        allowed = {value.strip() for value in include_types.split(",")} if include_types else set()
         ids = library_ids(ctx)
         if parent_id == str(uuid.UUID(int=0)):
             parent_id = None
@@ -1403,13 +1669,13 @@ def install_jellyfin_api(app, context):
             except ValueError as exc:
                 raise HTTPException(404, "Parent not found") from exc
         if parent_id and parent_id not in ids.values() and uuid.UUID(parent_id).version == 5:
-            entity = item_dto(ctx, parent_id, user)
+            entity = item_dto(ctx, parent_id, user, batch)
             key = {"Genre": "genreIds", "Studio": "studioIds", "Person": "personIds", "Year": "years"}.get(
                 entity["Type"]
             )
             items = (
                 filter_items(
-                    items_response(ctx, user, recursive=True),
+                    items_response(ctx, user, include_types=include_types, recursive=True, batch=batch),
                     {key: entity["Name"] if key == "years" else entity["Id"]},
                 )
                 if key
@@ -1418,7 +1684,9 @@ def install_jellyfin_api(app, context):
             if entity["Type"] == "BoxSet":
                 items = [
                     i
-                    for i in items_response(ctx, user, recursive=True)
+                    for i in items_response(
+                        ctx, user, include_types=include_types, recursive=True, batch=batch
+                    )
                     if i.get("CollectionName") == entity["Name"]
                 ]
         elif parent_id and parent_id not in ids.values() and parse_object_id(parent_id)[0] == "playlist":
@@ -1428,32 +1696,58 @@ def install_jellyfin_api(app, context):
             for library_id in ids.values():
                 items.extend(
                     items_response(
-                        ctx, user, library_id, recursive=recursive, include_missing=include_missing
+                        ctx,
+                        user,
+                        library_id,
+                        include_types=include_types,
+                        recursive=recursive,
+                        include_missing=include_missing,
+                        batch=batch,
                     )
                 )
-            items.extend(jellyfin_playlists.visible(ctx, user))
+            if not allowed or "Playlist" in allowed:
+                items.extend(jellyfin_playlists.visible(ctx, user))
         elif not parent_id:
-            items = [library_dto(ctx, key, name, user) for key, name in LIBRARIES]
-            items.extend(jellyfin_playlists.visible(ctx, user))
+            items = [library_dto(ctx, key, name, user, batch) for key, name in LIBRARIES]
+            if not allowed or "Playlist" in allowed:
+                items.extend(jellyfin_playlists.visible(ctx, user))
         elif parent_id in ids.values():
             key = next(key for key, value in ids.items() if value == parent_id)
             with ctx.db.session() as db:
-                rows = list(db.scalars(select(Media).order_by(Media.title, Media.id)))
-                items = [media_dto(ctx, media, user) for media in rows if library_kind(media) == key]
+                rows = [
+                    media
+                    for media in db.scalars(select(Media).order_by(Media.title, Media.id))
+                    if library_kind(media) == key
+                ]
+            items = [
+                media_dto(ctx, media, user, batch)
+                for media in rows
+                if not allowed
+                or (media.kind == "movie" and "Movie" in allowed)
+                or (media.kind == "tv" and "Series" in allowed)
+            ]
             if recursive:
-                items.extend(jellyfin_catalog.entities(items, "BoxSet"))
+                if not allowed or "BoxSet" in allowed:
+                    entity_source = items or [media_dto(ctx, media, user, batch) for media in rows]
+                    items.extend(jellyfin_catalog.entities(entity_source, "BoxSet"))
                 for media in rows:
-                    if library_kind(media) == key and media.kind == "tv":
-                        items.extend(
-                            season_dto(ctx, media, number, user) for number in available_seasons(ctx, media)
-                        )
+                    if media.kind == "tv":
+                        if not allowed or "Season" in allowed:
+                            items.extend(
+                                season_dto(ctx, media, number, user, batch)
+                                for number in available_seasons(ctx, media, batch)
+                            )
+                        if allowed and "Episode" not in allowed:
+                            continue
                         items.extend(
                             items_response(
                                 ctx,
                                 user,
                                 object_id("media", media.id),
+                                include_types="Episode" if allowed else None,
                                 recursive=True,
                                 include_missing=include_missing,
+                                batch=batch,
                             )
                         )
         else:
@@ -1462,52 +1756,81 @@ def install_jellyfin_api(app, context):
                 media = db.get(Media, identity) if kind in {"media", "season"} else None
             if not media:
                 raise HTTPException(404, "Item not found")
-            detail = ctx.library.detail(media.id)
+            detail = batch.detail(media.id)
             if kind == "media" and media.kind == "tv":
-                if recursive or include_types == "Episode":
+                if recursive or "Episode" in allowed:
                     items = [
                         item
                         for e in detail["episodes"]
-                        for item in [episode_dto(ctx, media, e, user, include_missing=include_missing)]
+                        for item in [
+                            episode_dto(
+                                ctx,
+                                media,
+                                e,
+                                user,
+                                include_missing=include_missing,
+                                batch=batch,
+                            )
+                        ]
                         if item
                     ]
+                elif not allowed or "Season" in allowed:
+                    items = [
+                        season_dto(ctx, media, number, user, batch)
+                        for number in available_seasons(ctx, media, batch)
+                    ]
                 else:
-                    items = [season_dto(ctx, media, number, user) for number in available_seasons(ctx, media)]
+                    items = []
             elif kind == "season":
-                items = [
-                    item
-                    for episode in detail["episodes"]
-                    if episode["season"] == secondary
-                    for item in [episode_dto(ctx, media, episode, user, include_missing=include_missing)]
-                    if item
-                ]
+                items = (
+                    [
+                        item
+                        for episode in detail["episodes"]
+                        if episode["season"] == secondary
+                        for item in [
+                            episode_dto(
+                                ctx,
+                                media,
+                                episode,
+                                user,
+                                include_missing=include_missing,
+                                batch=batch,
+                            )
+                        ]
+                        if item
+                    ]
+                    if not allowed or "Episode" in allowed
+                    else []
+                )
             else:
                 items = []
         if search_term:
             items = [item for item in items if search_term.casefold() in item["Name"].casefold()]
-        if include_types:
-            allowed = {value.strip() for value in include_types.split(",")}
+        if allowed:
             items = [item for item in items if item.get("Type") in allowed]
         return items
 
     async def jellyfin_items_impl(request, user, parent_id=None):
-        await context(request).library.enrich()
+        ctx = context(request)
+        await ctx.library.enrich()
         params = request.query_params
         requested_user = params.get("userId") or params.get("UserId")
         if requested_user:
             require_user_id(requested_user, user)
+        batch = JellyfinDtoBatch(ctx, user)
         items = items_response(
-            context(request),
+            ctx,
             user,
             parent_id or params.get("parentId") or params.get("ParentId"),
             params.get("searchTerm") or params.get("SearchTerm"),
             ",".join(csv_parameter(params, "includeItemTypes")) or None,
             (params.get("recursive") or params.get("Recursive") or "false").lower() == "true",
             include_missing=bool_parameter(params, "isMissing") or bool_parameter(params, "isUnaired"),
+            batch=batch,
         )
         requested_ids = csv_parameter(params, "ids")
         if requested_ids and not (parent_id or parameter(params, "parentId")):
-            items = [item_dto(context(request), identity, user) for identity in requested_ids]
+            items = [item_dto(ctx, identity, user, batch) for identity in requested_ids]
         return page(filter_items(items, params), params)
 
     jellyfin_catalog.install(app, context, authenticated, check_requested_user, items_response)
@@ -1534,28 +1857,121 @@ def install_jellyfin_api(app, context):
 
     @app.get("/Items/Latest")
     async def jellyfin_latest(request: Request, user=Depends(authenticated)):
-        await context(request).library.enrich()
+        ctx = context(request)
+        await ctx.library.enrich()
         params = request.query_params
         check_requested_user(request, user)
-        items = items_response(context(request), user, parameter(params, "parentId"), recursive=True)
         options = dict(params)
         options.setdefault("includeItemTypes", "Movie,Episode")
         options.setdefault("sortBy", "DateCreated,SortName")
         options.setdefault("sortOrder", "Descending,Ascending")
         options.setdefault("limit", "20")
-        if user_configuration(context(request), user).get("HidePlayedInLatest", False):
+        batch = JellyfinDtoBatch(ctx, user)
+        grouped = bool_parameter(params, "groupItems", True)
+        include_types = set(csv_parameter(options, "includeItemTypes"))
+        parent_id = parameter(params, "parentId")
+        ids = library_ids(ctx)
+        library_key = next((key for key, value in ids.items() if value == parent_id), None)
+        selection_keys = {
+            key.casefold()
+            for key in params
+            if key.casefold()
+            not in {
+                "userid",
+                "parentid",
+                "fields",
+                "enableuserdata",
+                "enableimages",
+                "enableimagetypes",
+                "imagetypelimit",
+                "limit",
+                "startindex",
+                "groupitems",
+                "includeitemtypes",
+                "enabletotalrecordcount",
+            }
+        }
+        simple_grouped = (
+            grouped
+            and include_types.issubset({"Movie", "Episode"})
+            and not selection_keys
+            and (not parent_id or library_key is not None)
+            and csv_parameter(options, "sortBy") == ["DateCreated", "SortName"]
+            and csv_parameter(options, "sortOrder") == ["Descending", "Ascending"]
+        )
+        hide_played = user_configuration(ctx, user, batch).get("HidePlayedInLatest", False)
+        if simple_grouped:
+            with ctx.db.session() as db:
+                rows = [
+                    media
+                    for media in db.scalars(select(Media))
+                    if (library_key is None or library_kind(media) == library_key)
+                    and (
+                        (media.kind == "movie" and "Movie" in include_types)
+                        or (media.kind == "tv" and "Episode" in include_types)
+                    )
+                ]
+            rows.sort(key=lambda media: media.title.casefold())
+            rows.sort(key=lambda media: batch.media_metadata(media.id)["added"] or 0, reverse=True)
+            needed = number_parameter(options, "startIndex", 0) + number_parameter(options, "limit", 20)
+            items = []
+            for media in rows:
+                count = 1
+                if media.kind == "tv":
+                    visible = [
+                        episode
+                        for episode in batch.detail(media.id)["episodes"]
+                        if episode_is_visible(ctx, episode, batch)
+                    ]
+                    if hide_played:
+                        visible = [
+                            episode
+                            for episode in visible
+                            if not user_data(
+                                ctx,
+                                user,
+                                object_id("episode", episode["id"]),
+                                batch=batch,
+                            ).get("Played")
+                        ]
+                    count = len(visible)
+                elif hide_played and user_data(ctx, user, object_id("media", media.id), batch=batch).get(
+                    "Played"
+                ):
+                    count = 0
+                if not count:
+                    continue
+                item = media_dto(ctx, media, user, batch)
+                item["ChildCount"] = count
+                items.append(item)
+                if len(items) >= needed:
+                    break
+            group_options = {
+                key: value for key, value in options.items() if key.casefold() != "includeitemtypes"
+            }
+            return page(items, group_options)["Items"]
+
+        items = items_response(
+            ctx,
+            user,
+            parameter(params, "parentId"),
+            include_types=",".join(include_types),
+            recursive=True,
+            batch=batch,
+        )
+        if hide_played:
             items = [item for item in items if not item.get("UserData", {}).get("Played")]
         items = filter_items(items, options)
-        if bool_parameter(params, "groupItems", True):
-            grouped = {}
+        if grouped:
+            groups = {}
             for item in items:
                 key = item.get("SeriesId") or item["Id"]
-                if key not in grouped:
-                    grouped[key] = dict(item_dto(context(request), key, user) if key != item["Id"] else item)
-                    grouped[key]["ChildCount"] = 0
-                grouped[key]["ChildCount"] += 1
+                if key not in groups:
+                    groups[key] = dict(item_dto(ctx, key, user, batch) if key != item["Id"] else item)
+                    groups[key]["ChildCount"] = 0
+                groups[key]["ChildCount"] += 1
             # Preserve the chronological order of each group's newest child.
-            items = list(grouped.values())
+            items = list(groups.values())
         return page(items, options)["Items"]
 
     @app.get("/Users/{user_id}/Items/Latest")
@@ -1565,17 +1981,19 @@ def install_jellyfin_api(app, context):
 
     @app.get("/Shows/{series_id}/Seasons")
     async def jellyfin_seasons(series_id: str, request: Request, user=Depends(authenticated)):
-        await context(request).library.enrich()
+        ctx = context(request)
+        await ctx.library.enrich()
         kind, identity, _ = parse_object_id(series_id)
-        with context(request).db.session() as db:
+        with ctx.db.session() as db:
             media = db.get(Media, identity) if kind == "media" else None
         if not media or media.kind != "tv":
             raise HTTPException(404, "Series not found")
-        numbers = available_seasons(context(request), media)
+        batch = JellyfinDtoBatch(ctx, user)
+        numbers = available_seasons(ctx, media, batch)
         check_requested_user(request, user)
         return page(
             filter_items(
-                [season_dto(context(request), media, number, user) for number in numbers],
+                [season_dto(ctx, media, number, user, batch) for number in numbers],
                 request.query_params,
             ),
             request.query_params,
@@ -1584,19 +2002,21 @@ def install_jellyfin_api(app, context):
     @app.get("/Shows/NextUp")
     async def jellyfin_next_up(request: Request, userId: str | None = None, user=Depends(authenticated)):
         check_requested_user(request, user)
-        return jellyfin_state.next_up(context(request), user, request.query_params)
+        ctx = context(request)
+        return jellyfin_state.next_up(ctx, user, request.query_params, batch=JellyfinDtoBatch(ctx, user))
 
     @app.get("/Shows/{series_id}/Episodes")
     async def jellyfin_episodes(series_id: str, request: Request, user=Depends(authenticated)):
+        ctx = context(request)
         kind, identity, secondary = parse_object_id(series_id)
         if kind not in {"media", "season"}:
             raise HTTPException(404, "Series not found")
         implied_season = secondary if kind == "season" else None
-        with context(request).db.session() as db:
+        with ctx.db.session() as db:
             media = db.get(Media, identity)
         if not media or media.kind != "tv":
             raise HTTPException(404, "Series not found")
-        await context(request).library.enrich_media(identity)
+        await ctx.library.enrich_media(identity)
         params = request.query_params
         season = jellyfin_state.number_parameter(params, "season", implied_season)
         season_id = params.get("seasonId") or params.get("SeasonId")
@@ -1609,12 +2029,13 @@ def install_jellyfin_api(app, context):
             ):
                 raise HTTPException(404, "Season not found")
             season = season_number
-        detail = context(request).library.detail(identity)
+        batch = JellyfinDtoBatch(ctx, user)
+        detail = batch.detail(identity)
         items = [
             item
             for episode in detail["episodes"]
             if season is None or episode["season"] == int(season)
-            for item in [episode_dto(context(request), media, episode, user)]
+            for item in [episode_dto(ctx, media, episode, user, batch=batch)]
             if item
         ]
         check_requested_user(request, user)
@@ -1622,20 +2043,23 @@ def install_jellyfin_api(app, context):
 
     @app.get("/Items/{item_id}")
     async def jellyfin_item(item_id: str, request: Request, user=Depends(authenticated)):
-        await context(request).library.enrich()
+        ctx = context(request)
+        await ctx.library.enrich()
         try:
             version = uuid.UUID(item_id).version
         except ValueError as exc:
             raise HTTPException(404, "Item not found") from exc
         if version != 5:
-            playable = playback_for_item(context(request), item_id)
+            playable = playback_for_item(ctx, item_id)
             if playable:
-                await jellyfin_resources.ensure_probe(context(request), playable)
-            media_id = media_identity_for_item(context(request), item_id)
+                await jellyfin_resources.ensure_probe(ctx, playable)
+            media_id = media_identity_for_item(ctx, item_id)
             if media_id is not None:
-                await jellyfin_resources.discover_extras(context(request), media_id)
+                await jellyfin_resources.discover_extras(ctx, media_id)
         check_requested_user(request, user)
-        return jellyfin_catalog.project(item_dto(context(request), item_id, user), request.query_params)
+        return jellyfin_catalog.project(
+            item_dto(ctx, item_id, user, JellyfinDtoBatch(ctx, user)), request.query_params
+        )
 
     @app.get("/Users/{user_id}/Items/Resume")
     async def jellyfin_legacy_resume(user_id: str, request: Request, user=Depends(authenticated)):
@@ -1653,7 +2077,8 @@ def install_jellyfin_api(app, context):
     ):
         if userId:
             require_user_id(userId, user)
-        item = item_dto(context(request), item_id, user)
+        ctx = context(request)
+        item = item_dto(ctx, item_id, user, JellyfinDtoBatch(ctx, user))
         return item["UserData"]
 
     @app.post("/UserItems/{item_id}/UserData")
@@ -1739,6 +2164,7 @@ def install_jellyfin_api(app, context):
     async def jellyfin_resume_items(request: Request, userId: str | None = None, user=Depends(authenticated)):
         check_requested_user(request, user)
         ctx = context(request)
+        batch = JellyfinDtoBatch(ctx, user)
         with ctx.db.session() as db:
             rows = list(
                 db.scalars(
@@ -1765,7 +2191,17 @@ def install_jellyfin_api(app, context):
         parent_id = parameter(request.query_params, "parentId")
         allowed = None
         if parent_id:
-            allowed = {item["Id"] for item in items_response(ctx, user, parent_id, recursive=True)}
+            allowed = {
+                item["Id"]
+                for item in items_response(
+                    ctx,
+                    user,
+                    parent_id,
+                    include_types="Movie,Episode",
+                    recursive=True,
+                    batch=batch,
+                )
+            }
         active = set()
         if bool_parameter(request.query_params, "excludeActiveSessions"):
             with ctx.db.session() as db:
@@ -1782,7 +2218,7 @@ def install_jellyfin_api(app, context):
             try:
                 if row.item_id in source_backed:
                     continue
-                item = item_dto(ctx, row.item_id, user)
+                item = item_dto(ctx, row.item_id, user, batch)
                 parent_item = source_parents.get(row.item_id, row.item_id)
                 if (
                     item.get("MediaType") != "Video"

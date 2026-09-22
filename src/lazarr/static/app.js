@@ -93,9 +93,10 @@ async function switchTab(tab) {
 function renderSearchActivity(status) {
   const search=status.search||{};state.search=search;
   const visible=search.state!=='idle'||search.pending_requests;
+  const cooldown=Boolean(search.pending_requests&&(search.next_attempt_at>Date.now()/1000||(search.providers||[]).some(provider=>provider.state==='cooldown')));
   $('#search-activity').hidden=!visible;
-  $('#run-queue').disabled=Boolean(search.running||search.pending_requests||!status.engine_available||!status.content_providers.length);
-  $('#run-queue').textContent=search.running?'Поиск выполняется':search.pending_requests?'Все задачи поставлены в очередь':'Запустить поиск по всем задачам';
+  $('#run-queue').disabled=Boolean(search.running||(search.pending_requests&&!cooldown)||!status.engine_available||!status.content_providers.length);
+  $('#run-queue').textContent=search.running?'Поиск выполняется':cooldown?'Сбросить паузу и запустить поиск':search.pending_requests?'Все задачи поставлены в очередь':'Запустить поиск по всем задачам';
   $('#search-state').textContent=search.running?'Поиск раздач':({queued:'Ожидание поиска',blocked:'Поиск ожидает настройки',error:'Поиск не выполнен',finished:'Поиск завершён'}[search.state]||'Поиск');
   $('#search-activity').classList.toggle('is-searching',Boolean(search.running));
   const total=search.groups_total||0, done=search.groups_done||0;

@@ -27,6 +27,10 @@ def title_seasons(title):
         if int(end) < int(start) or int(end) - int(start) > 100:
             return set()
         seasons.update(range(int(start), int(end) + 1))
+    # Tracker titles commonly use a standalone [TV] / [ТВ] tag for the
+    # original television run. A numbered TV-2 tag is handled above.
+    if re.search(r"(?:^|[\s[(])(?:тв|tv)(?=$|[\s\])])", title, re.I):
+        seasons.add(1)
     return seasons
 
 

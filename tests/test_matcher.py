@@ -149,6 +149,70 @@ def test_absolute_anime_numbers_need_explicit_mapping(media):
     assert Matcher().evaluate(c, [req], paths).plan is not None
 
 
+def test_tv_tag_infers_first_season_for_two_digit_anime_files(media):
+    paths = files("Example Show/Example Show - 01.mkv", "Example Show/Example Show - 02.mkv")
+    c = candidate(
+        title="Example Show [TV] (2020) 1080p",
+        evidence=[audio_claim(path.path) for path in paths],
+    )
+    requests = [request(media, 1, 1), request(media, 2, 2)]
+
+    report = Matcher().evaluate(c, requests, paths)
+
+    assert [evaluation.result for evaluation in report.evaluations] == [
+        MatchResult.MATCH,
+        MatchResult.MATCH,
+    ]
+    assert [binding.video_index for binding in report.plan.bindings] == [0, 1]
+
+
+def test_matching_year_and_complete_episode_count_infer_first_season(media):
+    media.seasons = [{"number": 0, "episode_count": 1}, {"number": 1, "episode_count": 2}]
+    paths = files("Example Show/Example Show - 01.mkv", "Example Show/Example Show - 02.mkv")
+    c = candidate(
+        title="Example Show (2020) [2 из 2] 1080p",
+        evidence=[audio_claim(path.path) for path in paths],
+    )
+
+    report = Matcher().evaluate(c, [request(media, 1, 1), request(media, 2, 2)], paths)
+
+    assert [evaluation.result for evaluation in report.evaluations] == [
+        MatchResult.MATCH,
+        MatchResult.MATCH,
+    ]
+    assert [binding.video_index for binding in report.plan.bindings] == [0, 1]
+
+
+def test_first_season_count_fallback_requires_matching_year_and_full_count(media):
+    media.seasons = [{"number": 1, "episode_count": 2}]
+    paths = files("Example Show/Example Show - 01.mkv")
+    evidence = [audio_claim(paths[0].path)]
+    for title in (
+        "Example Show (2019) [2 из 2] 1080p",
+        "Example Show (2020) [1 из 2] 1080p",
+        "Example Show (2020) [3 из 3] 1080p",
+    ):
+        assert (
+            Matcher().evaluate(candidate(title=title, evidence=evidence), [request(media)], paths).plan
+            is None
+        )
+
+
+def test_anime_pack_without_season_or_tv_tag_remains_ambiguous(media):
+    paths = files("Example Show/Example Show - 01.mkv")
+    c = candidate(evidence=[audio_claim(paths[0].path)])
+    requests = [request(media, 1, 1), request(media, 2, 1)]
+    requests[1].season = 2
+
+    report = Matcher().evaluate(c, requests, paths)
+
+    assert [evaluation.result for evaluation in report.evaluations] == [
+        MatchResult.UNKNOWN,
+        MatchResult.UNKNOWN,
+    ]
+    assert report.plan is None
+
+
 def test_multi_episode_range(media):
     paths = files("Show.S01E01-E03.1080p.mkv")
     c = candidate(evidence=[audio_claim(paths[0].path)])

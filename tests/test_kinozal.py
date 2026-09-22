@@ -209,6 +209,9 @@ async def test_cloudflare_binary_failure_uses_same_release_infohash():
         ("Сериал (1-2 сезон: 1-20 серии из 20)", {1, 2}, (None, set())),
         ("Сериал (2 сезон: 8-1 серии из 8)", {2}, (None, set())),
         ("Сериал / Сезон: 02 / Серии: 1-8", {2}, (None, set())),
+        ("Аниме [TV] [12 из 12]", {1}, (None, set())),
+        ("Аниме [ТВ] [12 из 12]", {1}, (None, set())),
+        ("Аниме [TV-2] [12 из 12]", {2}, (None, set())),
     ],
 )
 def test_kinozal_season_and_partial_episode_coverage(title, seasons, coverage):

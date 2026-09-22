@@ -468,7 +468,7 @@ def create_app(config: RuntimeConfig | None = None):
             raise HTTPException(503, ctx.engine_error)
         if not ctx.plugins.available("content"):
             raise ValueError("Включите провайдеры контента в настройках")
-        identity = ctx.scheduler.enqueue()
+        identity = ctx.scheduler.retry_now()
         with ctx.db.session() as db:
             audit(db, user.id, "search.run", identity)
         snapshot = ctx.scheduler.snapshot()
@@ -494,7 +494,7 @@ def create_app(config: RuntimeConfig | None = None):
                 raise HTTPException(404, "Задача не найдена")
             if task.paused:
                 raise ValueError("Сначала возобновите задачу")
-        ctx.scheduler.enqueue(identity)
+        ctx.scheduler.retry_now(identity)
         return {"queued": True}
 
     @app.post("/api/v1/libraries/media/{identity}/seasons")

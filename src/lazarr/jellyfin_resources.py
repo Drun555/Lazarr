@@ -196,9 +196,15 @@ async def ensure_probe(ctx, playable):
         asset.tracks or []
     )
     for track in tracks:
-        if track.get("kind") != "audio" or not isinstance(playable["link"], LibraryAsset):
+        relative = track.get("path")
+        if (
+            track.get("kind") != "audio"
+            or not relative
+            or not isinstance(relative, str)
+            or not isinstance(playable["link"], LibraryAsset)
+        ):
             continue
-        path = playable_path(playable["download"], track.get("path", ""))
+        path = playable_path(playable["download"], relative)
         if not path or not path.is_file():
             continue
         stamp = f"{path.stat().st_mtime_ns}:{path.stat().st_size}"

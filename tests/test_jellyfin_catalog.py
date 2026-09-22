@@ -1,11 +1,12 @@
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import event, select
 
 from lazarr.app import create_app
 from lazarr.jellyfin import object_id, user_object_id
 from lazarr.jellyfin_catalog import named_id
 from lazarr.models import LibraryAsset, Media
 from test_jellyfin import jellyfin_login, playable_episode
+from test_jellyfin_state import add_more_episodes
 
 
 def test_catalog_filters_discovery_projection_and_scope(core, media, season):
@@ -124,3 +125,68 @@ def test_latest_multisort_suggestions_and_similarity(core, media, season):
         assert recs[0]["RecommendationType"] == "SimilarToLikedItem"
         assert client.get("/Items/Suggestions", params={"limit": 1}).json()["TotalRecordCount"] == 4
         assert client.get("/Items", params={"recursive": "true", "sortOrder": "Wrong"}).status_code == 400
+
+
+def test_media_lists_filter_before_dto_work_and_batch_queries(core, media, season, monkeypatch):
+    template = season.episodes[0]
+    season.episodes = [
+        template.model_copy(update={"id": str(number), "number": number, "title": f"Episode {number}"})
+        for number in range(1, 81)
+    ]
+    media.seasons[0]["episode_count"] = len(season.episodes)
+    playable_episode(core, media, season)
+    add_more_episodes(core)
+
+    import lazarr.jellyfin as jellyfin
+
+    original_episode_dto = jellyfin.episode_dto
+    episode_dto_calls = 0
+
+    def counted_episode_dto(*args, **kwargs):
+        nonlocal episode_dto_calls
+        episode_dto_calls += 1
+        return original_episode_dto(*args, **kwargs)
+
+    monkeypatch.setattr(jellyfin, "episode_dto", counted_episode_dto)
+    with TestClient(create_app(core[0])) as client:
+        jellyfin_login(client)
+        anime = next(item for item in client.get("/UserViews").json()["Items"] if item["Name"] == "Аниме")
+
+        series = client.get(
+            "/Items",
+            params={
+                "parentId": anime["Id"],
+                "recursive": "true",
+                "includeItemTypes": "Series",
+            },
+        )
+        assert series.status_code == 200
+        assert [item["Type"] for item in series.json()["Items"]] == ["Series"]
+        assert episode_dto_calls == 0
+
+        latest = client.get("/Items/Latest", params={"parentId": anime["Id"], "limit": 1})
+        assert latest.status_code == 200 and latest.json()[0]["Type"] == "Series"
+        assert episode_dto_calls == 0
+
+        statements = []
+
+        def record_query(*args):
+            statements.append(args[2])
+
+        engine = client.app.state.ctx.db.engine
+        event.listen(engine, "before_cursor_execute", record_query)
+        try:
+            episodes = client.get(
+                "/Items",
+                params={
+                    "parentId": anime["Id"],
+                    "recursive": "true",
+                    "includeItemTypes": "Episode",
+                },
+            )
+        finally:
+            event.remove(engine, "before_cursor_execute", record_query)
+        assert episodes.status_code == 200
+        assert len(episodes.json()["Items"]) == 80
+        assert episode_dto_calls == 80
+        assert len(statements) < 30, f"expected batched reads, got {len(statements)} SQL statements"

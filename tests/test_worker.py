@@ -172,6 +172,37 @@ async def test_new_episode_candidates_include_season_release(core, media, season
     assert service.candidates(ids[2])[0]["used_in_season"] == []
 
 
+async def test_new_search_clears_previous_error_when_it_starts(
+    core, media, season, worker_setup, monkeypatch
+):
+    _, db, _, service = core
+    worker, _, demo = worker_setup
+    task_id = service.create_from_metadata(
+        CreateTask(media_id="42", kind="tv", season=1, episodes=[1]), media, season, 1
+    )
+    with db.session() as session:
+        subtask = session.scalar(select(Subtask).where(Subtask.task_id == task_id))
+        subtask.last_error = "unavailable: previous provider failure"
+
+    started = asyncio.Event()
+    resume = asyncio.Event()
+
+    async def waiting_search(self, query, cursor=None):
+        started.set()
+        await resume.wait()
+        return SearchPage(items=[])
+
+    monkeypatch.setattr(demo, "search", waiting_search)
+    search = asyncio.create_task(worker.run_due())
+    await started.wait()
+    with db.session() as session:
+        subtask = session.scalar(select(Subtask).where(Subtask.task_id == task_id))
+        assert subtask.status == "searching"
+        assert subtask.last_error is None
+    resume.set()
+    await search
+
+
 async def test_grouped_subtasks_share_one_download(core, media, season, worker_setup):
     _, db, _, service = core
     worker, engine, demo = worker_setup

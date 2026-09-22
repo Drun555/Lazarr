@@ -226,6 +226,24 @@ test('completed media task is labelled and does not offer another search',async(
   }finally{dom.window.close();}
 });
 
+test('task search can reset a provider cooldown',async()=>{
+  const {dom,document:d,calls,errors,setTasks,setLibrary}=await setup();
+  try{
+    const task={id:7,media_id:2,title:'Show',kind:'tv',completed:false,season:1,seasons:[{season:1,whole_season:true}],subtasks:[{id:1,season:1,episode:1,status:'queued'}],requirements:{audio_languages:[],subtitle_languages:[],min_resolution:720,max_resolution:2160},paused:false};
+    const search={running:false,state:'queued',pending_requests:1,next_attempt_at:Date.now()/1000+120,message:'Повтор поиска запланирован после паузы провайдера',providers:[{id:'demo',state:'cooldown'}]};
+    setTasks([task]);
+    setLibrary([{id:'series',name:'Сериалы',items:[{id:2,title:'Show'}]}],{id:2,title:'Show',kind:'tv',metadata:{},episodes:[],task,search});
+    d.querySelector('[data-tab=library]').click();await settle();await settle();
+    d.querySelector('[data-library-media="2"]').click();await settle();await settle();
+    const button=d.querySelector('[data-run-task="7"]');
+    assert.equal(button.disabled,false);
+    assert.equal(button.textContent,'Сбросить паузу и запустить поиск');
+    button.click();await settle();await settle();
+    assert.equal(calls.filter(call=>call.url==='/api/v1/tasks/7/search').length,1);
+    assert.deepEqual(errors,[]);
+  }finally{dom.window.close();}
+});
+
 test('language autocomplete pills, aliases, keyboard, removal, and no duplicates',async()=>{
   const {dom,w,document:d,errors}=await setup();
   try{
@@ -549,12 +567,17 @@ test('provider CAPTCHA appears when settings are opened after an auth error',asy
 });
 
 test('activity distinguishes actual checks, filtering, failures and delayed retry',async()=>{
-  const {dom,document:d,setActivity}=await setup();
+  const {dom,document:d,calls,setActivity}=await setup();
   try{
     setActivity({running:false,state:'queued',pending_requests:1,next_attempt_at:Date.now()/1000+120,groups_total:1,groups_done:1,candidates_found:50,candidates_checked:7,candidates_filtered:26,candidates_failed:1,candidates_deferred:16,message:'Повтор поиска запланирован после паузы провайдера',history:[]});
     d.querySelector('[data-tab=library]').click();await settle();
     assert.match(d.querySelector('#search-counts').textContent,/Найдено: 50.*Проверено: 7.*Отсеяно: 26.*Отложено: 16.*Ошибки проверки: 1/);
     assert.match(d.querySelector('#search-current').textContent,/Не раньше/);
+    const button=d.querySelector('#run-queue');
+    assert.equal(button.disabled,false);
+    assert.equal(button.textContent,'Сбросить паузу и запустить поиск');
+    button.click();await settle();await settle();
+    assert.equal(calls.filter(call=>call.url==='/api/v1/search/run').length,1);
   }finally{dom.window.close();}
 });
 

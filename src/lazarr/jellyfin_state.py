@@ -389,7 +389,7 @@ def record_playback(ctx, user, item_id, payload, event, fallback_key):
         version.updated_at = now
 
 
-def next_up(ctx, user, params):
+def next_up(ctx, user, params, batch=None):
     from lazarr.jellyfin import episode_dto, library_ids, object_id
     from lazarr.library import library_kind
 
@@ -397,7 +397,7 @@ def next_up(ctx, user, params):
     series_id = parameter(params, "seriesId")
     from lazarr.jellyfin import user_configuration
 
-    config = user_configuration(ctx, user)
+    config = user_configuration(ctx, user, batch)
     with ctx.db.session() as db:
         series = list(db.scalars(select(Media).where(Media.kind == "tv")))
     candidates = []
@@ -420,9 +420,9 @@ def next_up(ctx, user, params):
             continue
         episodes = [
             item
-            for e in ctx.library.detail(media.id)["episodes"]
+            for e in (batch.detail(media.id) if batch else ctx.library.detail(media.id))["episodes"]
             if e["season"] and e["season"] > 0
-            for item in [episode_dto(ctx, media, e, user)]
+            for item in [episode_dto(ctx, media, e, user, batch=batch)]
             if item and item.get("PlayAccess") == "Full"
         ]
         episodes.sort(key=lambda i: (i["ParentIndexNumber"], i["IndexNumber"], i["Id"]))

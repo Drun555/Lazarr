@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from lazarr.app import create_app
-from lazarr.jellyfin import object_id
+from lazarr.jellyfin import object_id, playable_path
 from lazarr.models import Download, Episode, LibraryAsset, MediaAsset
 from lazarr.torrent import probe_file
 from test_jellyfin import jellyfin_login, playable_episode
@@ -37,6 +37,10 @@ def video(core, media, season):
             "lavfi",
             "-i",
             "color=c=blue:s=160x90:r=10:d=3",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=1000:duration=3",
             "-i",
             str(sidecar),
             "-i",
@@ -44,13 +48,17 @@ def video(core, media, season):
             "-map",
             "0:v",
             "-map",
-            "1:s",
+            "1:a",
+            "-map",
+            "2:s",
             "-map_metadata",
-            "2",
+            "3",
             "-map_chapters",
-            "2",
+            "3",
             "-c:v",
             "mpeg4",
+            "-c:a",
+            "pcm_s16le",
             "-c:s",
             "srt",
             "-metadata:s:s:0",
@@ -165,9 +173,19 @@ def test_upcoming_and_probe_backfill(video, core):
         missing.air_date = "2099-01-01"
         upcoming_id = object_id("episode", missing.id)
         asset = db.scalar(select(MediaAsset))
+        download = db.scalar(select(Download))
         asset.probe = {k: v for k, v in asset.probe.items() if k != "chapters"}
+        asset.tracks = [{"kind": "audio", "path": None, "embedded": True, "language": "ja"}]
+        assert playable_path(download, None) is None
     item = client.get(f"/Items/{identity}").json()
     assert len(item["Chapters"]) == 2
+    assert client.get(f"/MediaSegments/{identity}").status_code == 200
+    playback = client.get(f"/Items/{identity}/PlaybackInfo")
+    assert playback.status_code == 200
+    audio = [
+        stream for stream in playback.json()["MediaSources"][0]["MediaStreams"] if stream["Type"] == "Audio"
+    ]
+    assert audio and all(not stream["IsExternal"] for stream in audio)
     response = client.get("/Shows/Upcoming", params={"enableImages": "false", "enableUserData": "false"})
     assert response.status_code == 200
     assert [i["Id"] for i in response.json()["Items"]] == [upcoming_id]

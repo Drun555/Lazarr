@@ -76,6 +76,34 @@ async def test_queue_survives_restart_and_deduplicates_manual_requests(core, med
     assert not await restarted.process_queue()
 
 
+async def test_manual_retry_clears_provider_cooldown_and_deferred_search(core, media, season, worker_setup):
+    import time
+
+    from lazarr.models import ProviderConfig
+    from lazarr.search import defer
+
+    _, db, _, service = core
+    worker, _, demo = worker_setup
+    task_id = add(service, media, season)
+    with db.session() as session:
+        session.execute(delete(ConfigEntry).where(ConfigEntry.key.startswith(PREFIX)))
+        provider = session.get(ProviderConfig, "demo")
+        provider.retry_at = time.time() + 300
+        provider.last_error = "unavailable: temporary outage"
+        defer(session, [task_id], "demo", provider.retry_at)
+
+    scheduler = Scheduler(worker, service)
+    assert scheduler.snapshot(task_id)["next_attempt_at"] > time.time()
+    scheduler.retry_now(task_id)
+
+    with db.session() as session:
+        assert session.get(ProviderConfig, "demo").retry_at == 0
+    assert scheduler.snapshot(task_id)["next_attempt_at"] == 0
+    assert await scheduler.process_queue()
+    assert demo.calls == 1
+    assert scheduler.snapshot(task_id)["pending_requests"] == 0
+
+
 async def test_new_task_can_arrive_during_search(core, media, season, worker_setup, monkeypatch):
     _, _, _, service = core
     worker, _, demo = worker_setup
@@ -145,7 +173,13 @@ def test_run_queue_api_auth_csrf_and_create_without_waiting_for_worker(core, med
         assert client.post("/api/v1/search/run", headers={"x-csrf-token": "wrong"}).status_code == 403
         assert client.post("/api/v1/search/run").status_code == 422
         ctx.plugins.configure("nyaa", {}, True)
+        from lazarr.models import ProviderConfig
+
+        with ctx.db.session() as db:
+            db.get(ProviderConfig, "nyaa").retry_at = 2_000_000_000
         assert client.post("/api/v1/search/run").status_code == 202
+        with ctx.db.session() as db:
+            assert db.get(ProviderConfig, "nyaa").retry_at == 0
         assert client.post("/api/v1/search/run").status_code == 202
 
         async def get_media(*args):

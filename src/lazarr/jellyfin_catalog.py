@@ -16,23 +16,29 @@ def named_id(kind, name):
     return str(uuid.uuid5(uuid.NAMESPACE_URL, f"lazarr:{kind}:{str(name).casefold()}"))
 
 
-def metadata_fields(ctx, media):
+def metadata_fields(ctx, media, batch=None):
     from lazarr.jellyfin import library_ids
     from lazarr.library import library_kind
 
     data = media.metadata_json
-    with ctx.db.session() as db:
-        added = db.scalar(
-            select(LibraryAsset.created_at)
-            .where(LibraryAsset.media_id == media.id)
-            .order_by(LibraryAsset.created_at)
-        )
-        added = added or db.scalar(select(Task.created_at).where(Task.media_id == media.id))
-        extras = list(
-            db.execute(
-                select(LibraryAsset.part_key, LibraryAsset.asset_id).where(LibraryAsset.media_id == media.id)
+    if batch is not None:
+        cached = batch.media_metadata(media.id)
+        added, extras = cached["added"], cached["extras"]
+    else:
+        with ctx.db.session() as db:
+            added = db.scalar(
+                select(LibraryAsset.created_at)
+                .where(LibraryAsset.media_id == media.id)
+                .order_by(LibraryAsset.created_at)
             )
-        )
+            added = added or db.scalar(select(Task.created_at).where(Task.media_id == media.id))
+            extras = list(
+                db.execute(
+                    select(LibraryAsset.part_key, LibraryAsset.asset_id).where(
+                        LibraryAsset.media_id == media.id
+                    )
+                )
+            )
     from lazarr.jellyfin import object_id
     from lazarr.jellyfin_resources import EXTRA_KINDS
 
@@ -319,7 +325,14 @@ def install(app, context, authenticated, check_user, listing):
 
     def all_items(request, user):
         check_user(request, user)
-        return listing(context(request), user, parameter(request.query_params, "parentId"), recursive=True)
+        include_types = ",".join(csv_parameter(request.query_params, "includeItemTypes")) or None
+        return listing(
+            context(request),
+            user,
+            parameter(request.query_params, "parentId"),
+            include_types=include_types,
+            recursive=True,
+        )
 
     @app.get("/Items/Counts")
     async def counts(request: Request, user=Depends(authenticated)):

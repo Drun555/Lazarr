@@ -352,6 +352,19 @@ class PluginManager:
         order = self.content_order()
         return sorted(result, key=lambda item: order.index(item["id"]))
 
+    def reset_content_cooldowns(self):
+        """Let an explicit user search retry enabled content providers immediately."""
+        reset = []
+        with self.db.session() as db:
+            for identity, cls in self.classes.items():
+                if cls.manifest.kind != "content":
+                    continue
+                row = db.get(ProviderConfig, identity)
+                if row and row.enabled and row.retry_at > 0:
+                    row.retry_at = 0
+                    reset.append(identity)
+        return reset
+
     def describe(self):
         with self.db.session() as db:
             result = []

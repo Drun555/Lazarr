@@ -198,6 +198,27 @@ def playable_video(file):
     )
 
 
+def first_season_by_year_and_count(candidate, requests):
+    """Infer S01 only when a complete pack matches the work year and TMDB count."""
+    if not requests or requests[0].media.kind != "tv":
+        return False
+    media = requests[0].media
+    years = {int(value) for value in re.findall(r"\b(?:19|20)\d{2}\b", candidate.title)}
+    if media.year is None or media.year not in years:
+        return False
+    complete_counts = {
+        int(total)
+        for available, total in re.findall(r"(?<!\d)(\d{1,4})\s+из\s+(\d{1,4})(?!\d)", candidate.title, re.I)
+        if int(available) == int(total)
+    }
+    first_season_counts = {
+        int(season["episode_count"])
+        for season in media.seasons
+        if season.get("number") == 1 and season.get("episode_count") is not None
+    }
+    return len(complete_counts) == 1 and complete_counts == first_season_counts
+
+
 class Matcher:
     def identity(self, candidate, request):
         common = set(candidate.external_ids) & set(request.media.external_ids)
@@ -309,6 +330,12 @@ class Matcher:
 
         release_seasons = title_seasons(candidate.title)
         season_hint = next(iter(release_seasons)) if len(release_seasons) == 1 else None
+        if (
+            season_hint is None
+            and not release_seasons
+            and first_season_by_year_and_count(candidate, requests)
+        ):
+            season_hint = 1
         videos = [file for file in files if playable_video(file)]
         reports = []
         for request in requests:

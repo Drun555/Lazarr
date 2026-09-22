@@ -391,7 +391,7 @@ class Worker:
                 result = db.execute(
                     update(Subtask)
                     .where(Subtask.id == identity, Subtask.lease_until <= now)
-                    .values(lease_until=now + 600, status="searching")
+                    .values(lease_until=now + 600, status="searching", last_error=None)
                 )
                 if result.rowcount:
                     claimed.append(identity)
