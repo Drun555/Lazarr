@@ -1,6 +1,7 @@
 from pathlib import Path
 from zoneinfo import ZoneInfo
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from typing import Literal
 import os
 
 
@@ -31,10 +32,22 @@ class Requirements(BaseModel):
         return self
 
 
+class JellyfinSettings(BaseModel):
+    audio_languages: list[str] = Field(default_factory=lambda: ["ru"])
+    subtitle_languages: list[str] = Field(default_factory=list)
+
+    @field_validator("audio_languages", "subtitle_languages")
+    @classmethod
+    def languages(cls, values):
+        return Requirements.languages(values)
+
+
 class Settings(BaseModel):
     model_config = ConfigDict(validate_default=True)
     defaults: Requirements = Field(default_factory=Requirements)
+    jellyfin: JellyfinSettings = Field(default_factory=JellyfinSettings)
     prefer_full_subtitles: bool = True
+    theme_color: Literal["purple", "green", "cyan", "gray", "pink", "blue", "yellow", "orange"] = "purple"
     movie_path: str = Field(default_factory=lambda: os.getenv("LAZARR_MOVIE_PATH", "downloads/movies"))
     series_path: str = Field(default_factory=lambda: os.getenv("LAZARR_SERIES_PATH", "downloads/series"))
     search_start: str = "00:00"
@@ -43,10 +56,16 @@ class Settings(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def migrate_schedule(cls, values):
+    def migrate_settings(cls, values):
         values = dict(values)
         if "search_start" not in values and "window_start" in values:
             values["search_start"] = values["window_start"]
+        if "jellyfin" not in values and "defaults" in values:
+            defaults = Requirements.model_validate(values["defaults"])
+            values["jellyfin"] = {
+                "audio_languages": defaults.audio_languages,
+                "subtitle_languages": defaults.subtitle_languages,
+            }
         return values
 
     @property

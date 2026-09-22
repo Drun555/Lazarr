@@ -247,7 +247,12 @@ async def test_cooldown_stops_candidate_loop_and_pagination_and_retries_only_fai
     )
     scheduler = Scheduler(worker, service)
     await scheduler.process_queue()
-    assert calls == [("demo", "search", None), ("demo", "inspect", "0"), ("second", "search", None)]
+    assert calls == [
+        ("demo", "search", None),
+        ("demo", "inspect", "0"),
+        ("second", "search", None),
+        ("second", "search", None),
+    ]
     p = worker.progress.snapshot()
     assert p["candidates_failed"] == 1 and p["candidates_deferred"] == 2 and p["candidates_checked"] == 0
     assert not await scheduler.process_queue()
@@ -280,7 +285,7 @@ async def test_search_expands_query_and_logs_actual_text(core, media, season, wo
         CreateTask(media_id="42", kind="tv", season=1, episodes=[1]), media, season, 1
     )
     await worker.run_due()
-    assert calls == ["Re:Zero", "Re Zero", "ReZero"]
+    assert calls == ["Re:Zero 2020", "Re Zero 2020", "ReZero 2020", "Re:Zero", "Re Zero", "ReZero"]
     history = [v["message"] for v in worker.progress.snapshot()["history"] if v["stage"] == "search"]
     assert "Re:Zero" in history[0] and "Re Zero" in history[1]
 

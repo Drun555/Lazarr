@@ -36,6 +36,7 @@ async def test_new_task_searches_immediately_and_only_it(core, media, season, wo
     assert scheduler.snapshot()["pending_requests"] == 0
     progress = scheduler.snapshot()
     assert progress["groups_done"] == progress["groups_total"] == 1
+    assert progress["pages_checked"] == 1
     stages = {event["stage"] for event in progress["history"]}
     assert {
         "search",
@@ -47,6 +48,18 @@ async def test_new_task_searches_immediately_and_only_it(core, media, season, wo
         "download",
         "finished",
     } <= stages
+
+
+async def test_selected_episodes_remove_redundant_search_request(core, media, season, worker_setup):
+    _, _, _, service = core
+    worker, _, _ = worker_setup
+    task_id = add(service, media, season)
+    await worker.run_due()
+    scheduler = Scheduler(worker, service)
+    scheduler.enqueue(task_id)
+    assert scheduler.snapshot(task_id)["pending_requests"] == 1
+    scheduler.discard_satisfied()
+    assert scheduler.snapshot(task_id)["pending_requests"] == 0
 
 
 async def test_queue_survives_restart_and_deduplicates_manual_requests(core, media, season, worker_setup):
@@ -181,13 +194,13 @@ async def test_failing_provider_does_not_skip_next_enabled_provider(
         session.add(ProviderConfig(id="second", enabled=True))
     add(service, media, season)
     await worker.run_due()
-    assert calls == ["demo", "second"]
+    assert calls == ["demo", "second", "second"]
     progress = worker.progress.snapshot()
     providers = {p["id"]: p for p in progress["providers"]}
     assert providers["demo"]["state"] == "error"
     assert "504" in providers["demo"]["reason"]
     assert providers["second"]["state"] == "completed"
-    assert providers["second"]["requests"] == 1
+    assert providers["second"]["requests"] == 2
     assert providers["rutracker"]["state"] == "disabled"
     assert progress["state"] == "finished" and progress["errors"] == 1
 
@@ -252,7 +265,7 @@ async def test_worker_uses_configured_provider_order(core, media, season, worker
     plugins.set_content_order(["second", "demo"])
     add(service, media, season)
     await worker.run_due()
-    assert calls == ["second", "demo"]
+    assert calls == ["second", "second", "demo", "demo"]
 
 
 def test_provider_order_api_permissions_validation_and_persistence(core):

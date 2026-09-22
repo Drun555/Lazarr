@@ -40,20 +40,28 @@
   </section>
   <section id="tab-library" class="tab-panel" hidden>
     <div class="library-page-heading"><h2>Библиотеки</h2></div>
-    <div id="all-tasks-control"><section class="panel all-tasks-heading"><div><h3>Поиск по всем задачам</h3><p class="fine">Запускает поиск для всех активных задач во всех библиотеках. Задачи на паузе пропускаются.</p></div><button type="button" class="primary" id="run-queue">Запустить все задачи</button></section>
-    <section id="search-activity" class="panel search-activity" hidden><div class="search-activity-heading"><h2 id="search-state"></h2><span id="search-counts" class="fine"></span></div><div id="search-progress" class="progress" role="progressbar" aria-label="Прогресс поиска"><span></span></div><p id="search-current" role="status" aria-live="polite"></p><p id="search-query" class="fine"></p><div id="search-providers" class="search-providers"></div><details><summary>Ход поиска</summary><ol id="search-history"></ol></details></section>
-    <div id="engine-notice"></div>
-    </div>
     <div id="library-overview"><div id="library-nav" class="library-nav" aria-label="Выбор библиотеки"></div><div id="library-items" class="library-grid"></div></div>
+    <div id="all-tasks-control"><section class="panel search-activity"><div id="search-activity" hidden><div class="search-activity-heading"><h2 id="search-state"></h2><span id="search-counts" class="fine"></span></div><div id="search-progress" class="progress" role="progressbar" aria-label="Прогресс поиска"><span></span></div><p id="search-current" role="status" aria-live="polite"></p><p id="search-query" class="fine"></p><details><summary>Ход поиска</summary><div id="search-providers" class="search-providers"></div><ol id="search-history"></ol></details></div><div class="all-tasks-heading"><p class="fine">Поиск во всех активных задачах. Задачи на паузе пропускаются.</p><button type="button" class="primary" id="run-queue">Запустить поиск по всем задачам</button></div><div id="engine-notice"></div></section></div>
     <div id="library-detail" hidden><div class="library-toolbar"><button id="library-back" class="ghost">← К библиотекам</button><div><button id="library-delete" class="danger-button">Удалить</button></div></div><div id="library-detail-body"></div></div>
   </section>
   <section id="tab-settings" class="tab-panel" hidden>
     <div class="page-heading"><h1>Настройки</h1></div>
     <form id="settings-form" class="panel">
       <h2>Медиа по умолчанию</h2><p class="muted small">Изменения применяются к новым задачам.</p><div id="settings-requirements"></div>
-      <div class="divider"></div><h2>Воспроизведение</h2>
+      <fieldset class="theme-colors"><legend>Цвет интерфейса</legend><div class="theme-color-options">
+        <label title="Пурпурный"><input type="radio" name="theme_color" value="purple" aria-label="Пурпурный"><span class="theme-swatch" data-color="purple"></span></label>
+        <label title="Зелёный"><input type="radio" name="theme_color" value="green" aria-label="Зелёный"><span class="theme-swatch" data-color="green"></span></label>
+        <label title="Голубой"><input type="radio" name="theme_color" value="cyan" aria-label="Голубой"><span class="theme-swatch" data-color="cyan"></span></label>
+        <label title="Серый"><input type="radio" name="theme_color" value="gray" aria-label="Серый"><span class="theme-swatch" data-color="gray"></span></label>
+        <label title="Розовый"><input type="radio" name="theme_color" value="pink" aria-label="Розовый"><span class="theme-swatch" data-color="pink"></span></label>
+        <label title="Синий"><input type="radio" name="theme_color" value="blue" aria-label="Синий"><span class="theme-swatch" data-color="blue"></span></label>
+        <label title="Жёлтый"><input type="radio" name="theme_color" value="yellow" aria-label="Жёлтый"><span class="theme-swatch" data-color="yellow"></span></label>
+        <label title="Оранжевый"><input type="radio" name="theme_color" value="orange" aria-label="Оранжевый"><span class="theme-swatch" data-color="orange"></span></label>
+      </div></fieldset>
+      <div class="divider"></div><h2>Jellyfin</h2>
+      <p class="muted small">Порядок языков задаёт приоритет дорожек при воспроизведении через Jellyfin. Первый язык будет более предпочтительным.</p>
+      <div id="settings-jellyfin" class="form-grid"></div>
       <label class="check"><input type="checkbox" role="switch" name="prefer_full_subtitles">Предпочитать Full-субтитры</label>
-      <p class="muted small">Для выбранного языка плееру сначала предлагаются полные субтитры, а затем Forced.</p>
       <div class="divider"></div><h2>Хранение и расписание</h2>
       <div class="form-grid"><label>Папка фильмов<input name="movie_path" required></label><label>Папка сериалов<input name="series_path" required></label>
         <label>Время начала поиска<input name="search_start" type="time" required><small>Ежедневно. Начавшийся поиск выполняется до завершения.</small></label>
@@ -61,6 +69,17 @@
         <label>Каталог плагинов<input name="plugin_repository" type="url" placeholder="https://…/catalog.json"><small>Плагины обновляются автоматически.</small></label>
       </div><div class="form-footer"><p class="form-error" role="alert"></p><button class="primary" type="submit">Сохранить настройки</button></div>
     </form>
+    <section class="panel" id="telegram-panel">
+      <div class="section-heading"><h2>Telegram</h2><button type="button" class="ghost" id="telegram-blocked">Заблокированные пользователи</button></div>
+      <div id="telegram-form" class="stack">
+        <label>Токен бота<input type="password" name="token" autocomplete="new-password" maxlength="256" placeholder="Токен от BotFather"></label>
+        <p class="fine">Вставьте токен от @BotFather — бот подключится автоматически. Отправьте ему /start для запроса доступа.</p>
+        <p class="form-error" role="alert"></p>
+      </div>
+      <p id="telegram-status" class="fine" role="status"></p>
+      <h3>Заявки на авторизацию</h3><div id="telegram-pending"></div>
+      <h3>Авторизованные пользователи</h3><div id="telegram-approved"></div>
+    </section>
     <div class="section-heading settings-heading"><h2>Провайдеры</h2></div>
     <div id="provider-list" class="provider-grid"></div>
     <section class="panel accounts-panel"><div class="section-heading"><div><h2>Учётные записи</h2><p class="muted small">Все аккаунты пока имеют права администратора.</p></div></div>

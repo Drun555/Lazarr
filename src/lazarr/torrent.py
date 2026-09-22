@@ -71,7 +71,19 @@ def desired_priorities(plan, progress):
 def probe_file(path: Path, executable="ffprobe") -> dict:
     try:
         result = subprocess.run(
-            [executable, "-v", "error", "-show_streams", "-show_format", "-of", "json", str(path)],
+            [
+                executable,
+                "-v",
+                "error",
+                "-protocol_whitelist",
+                "file,pipe",
+                "-show_streams",
+                "-show_format",
+                "-show_chapters",
+                "-of",
+                "json",
+                str(path),
+            ],
             capture_output=True,
             timeout=20,
             check=False,

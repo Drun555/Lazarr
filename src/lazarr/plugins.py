@@ -229,10 +229,11 @@ class PluginManager:
         return [key for key in saved if key in ids] + [key for key in ids if key not in saved]
 
     def set_content_order(self, ids):
+        current = self.content_order()
         enabled = self.available("content")
-        if len(ids) != len(set(ids)) or set(ids) != set(enabled):
-            raise ValueError("Укажите все включённые контент-провайдеры ровно один раз; обновите настройки")
-        order = ids + [key for key in self.content_order() if key not in ids]
+        if len(ids) != len(set(ids)) or set(ids) not in (set(current), set(enabled)):
+            raise ValueError("Укажите контент-провайдеры ровно один раз; обновите настройки")
+        order = ids + [key for key in current if key not in ids]
         with self.db.session() as db:
             row = db.get(ConfigEntry, "providers.content_order")
             if row:
@@ -381,6 +382,16 @@ class PluginManager:
                 )
             order = self.content_order()
             return sorted(result, key=lambda item: order.index(item["id"]) if item["id"] in order else -1)
+
+    def secret(self, plugin_id, field_name):
+        cls = self.classes.get(plugin_id)
+        if not cls or not any(
+            field.name == field_name and field.secret for field in cls.manifest.config_fields
+        ):
+            return None
+        with self.db.session() as db:
+            row = db.get(ProviderConfig, plugin_id)
+            return self.secrets.decrypt(row.secrets).get(field_name) if row else None
 
     def configure(self, plugin_id, values, enabled):
         cls = self.classes.get(plugin_id)

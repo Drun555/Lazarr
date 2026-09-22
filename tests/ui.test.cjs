@@ -19,23 +19,30 @@ async function setup(){
   w.HTMLDialogElement.prototype.showModal=function(){this.open=true};
   w.HTMLDialogElement.prototype.close=function(){this.open=false};
   const defaults={audio_languages:['ru'],subtitle_languages:[],min_resolution:720,max_resolution:1080,keyword:''};
+  const jellyfin={audio_languages:['ja','ru'],subtitle_languages:['en','ru']};
   let activity={running:false,state:'idle',pending_requests:0,history:[]};
   const status=()=>({engine_available:true,content_providers:['demo'],search:activity});
   const tasks=[];
   let taskChoices=[];
   let choiceFiles=[],choiceSelection=null,choiceBindings={};
   let providers=[];
+  const telegramUsers=[{id:1,user_id:5000000001,name:'<Alice>',username:'alice',status:'pending'}];
   let metadata={provider:'tmdb',id:'42',kind:'tv',title:'Test',year:2020,seasons:[{number:1,title:'Season 1',episode_count:2}],episode_numbering:{}};
   let libraries=[],libraryDetail={};
   w.fetch=async(url,options={})=>{
     const payload=options.body?JSON.parse(options.body):undefined;calls.push({url,method:options.method,payload});
     let result;
-    if(url==='/api/v1/settings')result={defaults,prefer_full_subtitles:true,movie_path:'/tmp/movies',series_path:'/tmp/series',search_start:'00:00',seed_ratio:1,plugin_repository:''};
+    if(url==='/api/v1/settings')result={defaults,jellyfin,prefer_full_subtitles:true,theme_color:'purple',movie_path:'/tmp/movies',series_path:'/tmp/series',search_start:'00:00',seed_ratio:1,plugin_repository:''};
     else if(url==='/api/v1/status')result=status();
+    else if(url==='/api/v1/telegram')result={enabled:true,token_configured:true,bot_username:'test_bot',error:''};
+    else if(url==='/api/v1/telegram/users')result=telegramUsers;
+    else if(url.startsWith('/api/v1/telegram/users/')){telegramUsers.find(u=>u.id===Number(url.split('/').pop())).status=payload.status;result={ok:true};}
     else if(url==='/api/v1/providers/order'){
       providers.sort((a,b)=>payload.ids.indexOf(a.id)-payload.ids.indexOf(b.id));result={ok:true};
     }
     else if(url==='/api/v1/providers')result=providers;
+    else if(url==='/api/v1/providers/tmdb/secrets/api_key/reveal')result={value:'saved-secret'};
+    else if(url==='/api/v1/providers/rutracker/authenticate')result={status:'challenge',message:'Введите CAPTCHA',fields:[{name:'cap_code',label:'CAPTCHA'}]};
     else if(/^\/api\/v1\/candidates\/\d+\/files$/.test(url))result=choiceFiles;
     else if(/^\/api\/v1\/candidates\/\d+\/selection$/.test(url))result=choiceSelection;
     else if(/^\/api\/v1\/candidates\/\d+\/selection\?/.test(url))result=choiceBindings[new URL(url,'http://localhost').searchParams.get('video_index')]??null;
@@ -68,11 +75,46 @@ async function setup(){
     return {ok:true,status:200,json:async()=>result};
   };
   // A single realm matches ordered classic defer scripts in the real document.
-  w.eval(fs.readFileSync('src/lazarr/static/language-picker.js','utf8')+'\n'+fs.readFileSync('src/lazarr/static/library.js','utf8')+'\n'+fs.readFileSync('src/lazarr/static/app.js','utf8'));
+  w.eval(fs.readFileSync('src/lazarr/static/language-picker.js','utf8')+'\n'+fs.readFileSync('src/lazarr/static/library.js','utf8')+'\n'+fs.readFileSync('src/lazarr/static/app.js','utf8')+'\nwindow.testOpenLibraryMedia=openLibraryMedia;window.testRenderLibraries=renderLibraries;');
   await settle();await settle();
-  return {dom,w,document:w.document,errors,calls,setChoice:(files,selection,bindings={})=>{choiceFiles=files;choiceSelection=selection;choiceBindings=bindings},setMetadata:value=>metadata=value,setActivity:value=>activity=value,setProviders:value=>providers=value,setTasks:value=>{tasks.splice(0,tasks.length,...value)},setTaskChoices:value=>taskChoices=value,setLibrary:(groups,detail)=>{libraries=groups;libraryDetail=detail}};
+  return {dom,w,document:w.document,errors,calls,setChoice:(files,selection,bindings={})=>{choiceFiles=files;choiceSelection=selection;choiceBindings=bindings},setMetadata:value=>metadata=value,setActivity:value=>activity=value,setProviders:value=>providers=value,setTasks:value=>{tasks.splice(0,tasks.length,...value)},setTaskChoices:value=>taskChoices=value,setLibrary:(groups,detail)=>{libraries=groups;libraryDetail=detail},updateLibraryDetail:update=>update(libraryDetail)};
 }
 function input(w,node,value){node.value=value;node.dispatchEvent(new w.Event('input',{bubbles:true}));}
+
+test('Telegram rejection can be reversed from blocked users popup',async()=>{
+  const {dom,document:d,errors,calls}=await setup();
+  try{
+    d.querySelector('[data-tab=settings]').click();await settle();await settle();
+    assert.match(d.querySelector('#telegram-pending').textContent,/<Alice>/);
+    assert.equal(d.querySelector('#telegram-pending alice'),null);
+    d.querySelector('[data-telegram-user="1"][data-status="blocked"]').click();await settle();await settle();
+    assert.equal(d.querySelector('#telegram-pending [data-telegram-user]'),null);
+    d.querySelector('#telegram-blocked').click();await settle();await settle();
+    assert.equal(d.querySelector('#modal').open,true);
+    d.querySelector('#telegram-blocked-list [data-status="approved"]').click();await settle();await settle();
+    assert.equal(d.querySelector('#telegram-blocked-list [data-telegram-user]'),null);
+    assert.match(d.querySelector('#telegram-approved').textContent,/<Alice>/);
+    assert.deepEqual(calls.filter(c=>c.method==='PATCH').map(c=>c.payload.status),['blocked','approved']);
+    assert.deepEqual(errors,[]);
+  }finally{dom.window.close();}
+});
+
+test('Telegram token connects automatically without enable checkbox or save button',async()=>{
+  const {dom,w,document:d,calls,errors}=await setup();
+  try{
+    d.querySelector('[data-tab=settings]').click();await settle();await settle();
+    const panel=d.querySelector('#telegram-form'),field=panel.querySelector('input');
+    assert.equal(panel.querySelector('input[type=checkbox]'),null);
+    assert.equal(panel.querySelector('button'),null);
+    field.value='123:example';field.dispatchEvent(new w.Event('change',{bubbles:true}));
+    await settle();await settle();
+    const saved=calls.filter(c=>c.url==='/api/v1/telegram'&&c.method==='PUT');
+    assert.deepEqual(saved.map(c=>c.payload),[{token:'123:example'}]);
+    assert.equal(field.value,'');
+    assert.equal(field.placeholder,'Токен сохранён');
+    assert.deepEqual(errors,[]);
+  }finally{dom.window.close();}
+});
 function key(w,node,key){node.dispatchEvent(new w.KeyboardEvent('keydown',{key,bubbles:true,cancelable:true}));}
 
 test('mobile viewport prevents interface zoom',()=>{
@@ -225,6 +267,43 @@ test('full subtitles preference loads and saves as a checkbox',async()=>{
   }finally{dom.window.close();}
 });
 
+test('accent presets preview immediately and save with settings',async()=>{
+  const {dom,w,document:d,calls,errors}=await setup();
+  try{
+    d.querySelector('[data-tab=settings]').click();await settle();await settle();
+    const choices=[...d.querySelectorAll('input[name=theme_color]')];
+    assert.equal(choices.length,8);
+    assert.equal(choices.find(choice=>choice.checked).value,'purple');
+    const green=choices.find(choice=>choice.value==='green');
+    green.checked=true;
+    green.dispatchEvent(new w.Event('change',{bubbles:true}));
+    assert.equal(d.documentElement.dataset.accent,'green');
+    d.querySelector('#settings-form').dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}));
+    await settle();await settle();
+    const saved=calls.find(c=>c.url==='/api/v1/settings'&&c.method==='PUT');
+    assert.equal(saved.payload.theme_color,'green');
+    assert.deepEqual(errors,[]);
+  }finally{dom.window.close();}
+});
+
+test('Jellyfin language priorities save independently of task defaults',async()=>{
+  const {dom,w,document:d,calls,errors}=await setup();
+  try{
+    d.querySelector('[data-tab=settings]').click();await settle();await settle();
+    const audio=d.querySelector('[data-language-picker=jellyfin_audio_languages]');
+    const subtitles=d.querySelector('[data-language-picker=jellyfin_subtitle_languages]');
+    assert.deepEqual([...audio.querySelectorAll('input[type=hidden]')].map(i=>i.value),['ja','ru']);
+    assert.deepEqual([...subtitles.querySelectorAll('input[type=hidden]')].map(i=>i.value),['en','ru']);
+    audio.querySelector('[data-remove-language=ja]').click();
+    d.querySelector('#settings-form').dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}));
+    await settle();await settle();
+    const saved=calls.find(c=>c.url==='/api/v1/settings'&&c.method==='PUT');
+    assert.deepEqual(saved.payload.jellyfin,{audio_languages:['ru'],subtitle_languages:['en','ru']});
+    assert.deepEqual(saved.payload.defaults.audio_languages,['ru']);
+    assert.deepEqual(errors,[]);
+  }finally{dom.window.close();}
+});
+
 test('create task sends canonical picks and immediately opens Libraries with live activity',async()=>{
   const {dom,w,document:d,errors,calls}=await setup();
   try{
@@ -239,10 +318,27 @@ test('create task sends canonical picks and immediately opens Libraries with liv
     assert.equal(d.querySelector('#tab-search').hidden,true);
     assert.equal(d.querySelector('#search-activity').hidden,false);
     assert.equal(d.querySelector('#search-current').textContent,'Чтение описания');
-    assert.equal(d.querySelector('#search-progress').getAttribute('aria-valuenow'),'1');
+    assert.equal(d.querySelector('#search-progress').getAttribute('aria-valuenow'),'50');
     assert.equal(d.querySelector('#search-progress span').style.width,'50%');
     assert.equal(d.querySelector('#run-queue').disabled,true);
+    assert.ok(d.querySelector('#library-overview').compareDocumentPosition(d.querySelector('#all-tasks-control'))&w.Node.DOCUMENT_POSITION_FOLLOWING);
     assert.match(d.querySelector('#search-query').textContent,/Demo.*Test.*1, 2/);
+    assert.deepEqual(errors,[]);
+  }finally{dom.window.close();}
+});
+
+test('each checked page advances search progress and provider details stay collapsed',async()=>{
+  const {dom,document:d,errors,setActivity}=await setup();
+  try{
+    setActivity({running:true,state:'running',groups_total:2,groups_done:0,group_pages_checked:1,pages_checked:1,providers:[{name:'Nyaa',state:'disabled',reason:'Выключен',requests:0}],history:[]});
+    d.querySelector('[data-tab=library]').click();await settle();await settle();
+    const progress=d.querySelector('#search-progress');
+    assert.equal(progress.getAttribute('aria-valuenow'),'4.5');
+    assert.equal(d.querySelector('#search-providers').closest('details').open,false);
+    assert.match(d.querySelector('#search-providers').textContent,/Nyaa.*Выключен/s);
+    setActivity({running:true,state:'running',groups_total:2,groups_done:0,group_pages_checked:2,pages_checked:2,providers:[],history:[]});
+    d.querySelector('[data-tab=library]').click();await settle();await settle();
+    assert.equal(progress.getAttribute('aria-valuenow'),'8.2');
     assert.deepEqual(errors,[]);
   }finally{dom.window.close();}
 });
@@ -333,8 +429,8 @@ test('failed search shows cooldown cause and disabled provider separately',async
 });
 
 
-test('enabled provider priority controls save and display the new order',async()=>{
-  const {dom,document:d,calls,errors,setProviders}=await setup();
+test('content provider cards reorder by keyboard and drag, including disabled providers',async()=>{
+  const {dom,w,document:d,calls,errors,setProviders}=await setup();
   try{
     setProviders([
       {id:'nyaa',name:'Nyaa',kind:'content',enabled:true,config_fields:[],config:{},configured_secrets:[]},
@@ -342,14 +438,112 @@ test('enabled provider priority controls save and display the new order',async()
       {id:'off',name:'Disabled',kind:'content',enabled:false,config_fields:[],config:{},configured_secrets:[]}
     ]);
     d.querySelector('[data-tab=settings]').click();await settle();await settle();
-    assert.equal(d.querySelectorAll('.provider-order li').length,2);
-    assert.equal(d.querySelector('[data-provider-move=nyaa][data-direction="-1"]').disabled,true);
-    d.querySelector('[data-provider-move=rutracker][data-direction="-1"]').click();await settle();await settle();
-    const saved=calls.find(c=>c.url==='/api/v1/providers/order');
-    assert.equal(saved.method,'PUT');
-    assert.deepEqual(saved.payload.ids,['rutracker','nyaa']);
-    assert.equal(d.querySelector('.provider-order li span').textContent,'Rutracker');
-    assert.equal(d.querySelector('[data-provider-move=rutracker][data-direction="-1"]').disabled,true);
+    assert.equal(d.querySelector('.provider-order'),null);
+    d.querySelector('[data-provider-drag=rutracker]').dispatchEvent(new w.KeyboardEvent('keydown',{key:'ArrowUp',bubbles:true,cancelable:true}));await settle();await settle();
+    assert.deepEqual(calls.find(c=>c.url==='/api/v1/providers/order').payload.ids,['rutracker','nyaa','off']);
+    assert.equal(d.querySelector('.provider-group-content .provider-accordion').dataset.providerForm,'rutracker');
+    const transfer={setData(){},effectAllowed:''};
+    const drag=new w.Event('dragstart',{bubbles:true,cancelable:true});drag.dataTransfer=transfer;
+    d.querySelector('[data-provider-drag=off]').dispatchEvent(drag);
+    const drop=new w.Event('drop',{bubbles:true,cancelable:true});drop.clientY=0;
+    d.querySelector('[data-provider-form=rutracker]').dispatchEvent(drop);await settle();await settle();
+    assert.deepEqual(calls.filter(c=>c.url==='/api/v1/providers/order').at(-1).payload.ids,['off','rutracker','nyaa']);
+    assert.equal(d.querySelector('.provider-group-content .provider-accordion').dataset.providerForm,'off');
+    assert.deepEqual(errors,[]);
+  }finally{dom.window.close();}
+});
+
+test('provider secret is masked until the eye reveals it',async()=>{
+  const {dom,document:d,calls,errors,setProviders}=await setup();
+  try{
+    setProviders([{id:'tmdb',name:'TMDB',kind:'metadata',enabled:true,config_fields:[{name:'api_key',label:'API ключ',secret:true,default:''}],config:{},configured_secrets:['api_key']}]);
+    d.querySelector('[data-tab=settings]').click();await settle();await settle();
+    const form=d.querySelector('[data-provider-form=tmdb]');
+    const input=form.elements.api_key,eye=form.querySelector('[data-provider-secret]');
+    assert.equal(input.placeholder,'***');
+    assert.equal(input.value,'');
+    assert.equal(input.type,'password');
+    assert.equal(calls.filter(c=>c.url.endsWith('/reveal')).length,0);
+    eye.click();await settle();await settle();
+    assert.equal(input.type,'text');
+    assert.equal(input.value,'saved-secret');
+    assert.equal(eye.getAttribute('aria-pressed'),'true');
+    eye.click();await settle();
+    assert.equal(input.type,'password');
+    assert.equal(calls.filter(c=>c.url.endsWith('/reveal')).length,1);
+    assert.deepEqual(errors,[]);
+  }finally{dom.window.close();}
+});
+
+test('content provider settings have no manual session buttons',async()=>{
+  const {dom,document:d,errors,setProviders}=await setup();
+  try{
+    setProviders([{id:'rutracker',name:'Rutracker',kind:'content',enabled:true,auth_methods:['password','cookie','captcha'],config_fields:[],config:{},configured_secrets:[]}]);
+    d.querySelector('[data-tab=settings]').click();await settle();await settle();
+    const form=d.querySelector('[data-provider-form=rutracker]');
+    assert.ok(form.querySelector('button[type=submit]'));
+    assert.ok(form.querySelector('[data-provider-health]'));
+    assert.equal(form.querySelector('[data-provider-auth]'),null);
+    assert.equal(form.querySelector('[data-provider-logout]'),null);
+    assert.deepEqual(errors,[]);
+  }finally{dom.window.close();}
+});
+
+test('content providers start collapsed and entering credentials enables the switch',async()=>{
+  const {dom,w,document:d,calls,errors,setProviders}=await setup();
+  try{
+    setProviders([{id:'rutracker',name:'Rutracker',kind:'content',enabled:false,config_fields:[{name:'username',label:'Логин',secret:true,default:''},{name:'password',label:'Пароль',secret:true,default:''}],config:{},configured_secrets:[]}]);
+    d.querySelector('[data-tab=settings]').click();await settle();await settle();
+    const form=d.querySelector('[data-provider-form=rutracker]');
+    const expand=form.querySelector('[data-provider-expand]'),body=form.querySelector('.provider-body'),toggle=form.elements.enabled;
+    assert.equal(body.hidden,true);
+    assert.equal(expand.getAttribute('aria-expanded'),'false');
+    assert.equal(toggle.getAttribute('role'),'switch');
+    assert.equal(toggle.checked,false);
+    expand.click();
+    assert.equal(body.hidden,false);
+    assert.equal(expand.getAttribute('aria-expanded'),'true');
+    input(w,form.elements.username,'user');
+    assert.equal(toggle.checked,true);
+    toggle.checked=false;
+    input(w,form.elements.password,'secret');
+    assert.equal(toggle.checked,true);
+    form.dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}));await settle();await settle();
+    const saved=calls.find(c=>c.url==='/api/v1/providers/rutracker'&&c.method==='PUT');
+    assert.equal(saved.payload.enabled,true);
+    assert.equal(saved.payload.config.username,'user');
+    assert.equal(saved.payload.config.password,'secret');
+    assert.deepEqual(errors,[]);
+  }finally{dom.window.close();}
+});
+
+test('content provider switch saves without opening the accordion',async()=>{
+  const {dom,w,document:d,calls,errors,setProviders}=await setup();
+  try{
+    setProviders([{id:'nyaa',name:'Nyaa',kind:'content',enabled:false,config_fields:[],config:{},configured_secrets:[]}]);
+    d.querySelector('[data-tab=settings]').click();await settle();await settle();
+    const form=d.querySelector('[data-provider-form=nyaa]'),toggle=form.elements.enabled;
+    assert.equal(form.querySelector('.provider-body').hidden,true);
+    toggle.checked=true;
+    toggle.dispatchEvent(new w.Event('change',{bubbles:true}));await settle();await settle();
+    const saved=calls.find(c=>c.url==='/api/v1/providers/nyaa'&&c.method==='PUT');
+    assert.deepEqual(saved.payload,{enabled:true,config:{}});
+    assert.equal(form.querySelector('.provider-body').hidden,true);
+    assert.equal(d.querySelector('.provider-order'),null);
+    assert.ok(d.querySelector('[data-provider-drag=nyaa]'));
+    assert.deepEqual(errors,[]);
+  }finally{dom.window.close();}
+});
+
+test('provider CAPTCHA appears when settings are opened after an auth error',async()=>{
+  const {dom,document:d,errors,calls,setProviders}=await setup();
+  try{
+    setProviders([{id:'rutracker',name:'Rutracker',kind:'content',enabled:true,auth_methods:['password','captcha'],error:'auth_required: Введите CAPTCHA',config_fields:[],config:{},configured_secrets:['username','password']}]);
+    d.querySelector('[data-tab=settings]').click();await settle();await settle();
+    assert.equal(d.querySelector('#modal').open,true);
+    assert.ok(d.querySelector('#challenge-form input[name=cap_code]'));
+    assert.ok(calls.some(c=>c.url==='/api/v1/providers/rutracker/authenticate'));
+    assert.equal(d.querySelector('[data-provider-auth]'),null);
     assert.deepEqual(errors,[]);
   }finally{dom.window.close();}
 });
@@ -423,7 +617,7 @@ test('one release can be selected only for the expanded season',async()=>{
 
 
 test('libraries switch categories, show details and delete media',async()=>{
-  const {dom,w,document:d,errors,calls,setLibrary}=await setup();
+  const {dom,w,document:d,errors,calls,setLibrary,updateLibraryDetail}=await setup();
   try{
     const download={id:5,state:'downloading',progress:.42,eta:120,download_rate:2048,upload_rate:128,ratio:.1,seed_ratio:1,seeds:3,peers:4};
     setLibrary([{id:'series',name:'Сериалы',items:[]},{id:'movies',name:'Кино',items:[]},{id:'anime',name:'Аниме',items:[{id:2,title:'Re:Zero',year:2016,taxonomy_known:true,download:{progress:.42,download_rate:2048}}]}],{title:'Re:Zero',kind:'tv',year:2016,metadata:{overview:'Описание',original_title:'Original',genres:['Анимация']},task_count:2,last_search_at:1,episodes:[{id:1,season:1,episode:1,title:'Начало',overview:'',still:null,air_date:'2016-04-04',released:true,statuses:[],subtasks:[],last_search_at:null,files:[]},{id:14,season:2,episode:14,title:'Пари',overview:'Описание серии',still:'https://image.tmdb.org/t/p/w342/still.jpg',air_date:'2021-01-06',released:true,statuses:['downloading'],subtasks:[{id:11,task_id:7,status:'downloading'}],download,last_search_at:1,files:[{current:false,pending:true,verified:false,path:'episode.mkv',directory:'/downloads',resolution:1080,size:1024,tracks:[{kind:'audio',language:'ja',external:false}],release:{provider:'rutracker',title:'Selected release',url:'https://example.org/topic'},missing_subtitle_languages:['ru'],download_state:'downloading',download}]}]});
@@ -441,6 +635,12 @@ test('libraries switch categories, show details and delete media',async()=>{
     assert.match(detail,/1080p/);assert.match(detail,/Японский/);assert.match(detail,/Selected release/);assert.match(detail,/Предварительные сведения/);
     assert.equal(d.querySelector('.episode-still').getAttribute('src'),'/api/v1/posters/tmdb/still.jpg');
     assert.equal(d.querySelector('.episode-download .progress').getAttribute('aria-valuenow'),'42.0');
+    const still=d.querySelector('.episode-still');
+    updateLibraryDetail(item=>{item.episodes[1].download.progress=.55;item.episodes[1].files[0].download.progress=.55;});
+    await w.testOpenLibraryMedia(2,true);
+    assert.ok(d.querySelector('#library-detail-body'));
+    assert.equal(d.querySelector('.episode-still'),still);
+    assert.equal(d.querySelector('.episode-download .progress').getAttribute('aria-valuenow'),'55.0');
     assert.equal(d.querySelector('[data-candidates="11"]').textContent,'Выбрать раздачу');
     d.querySelector('#library-delete').click();
     assert.equal(d.querySelector('#modal').open,true);
@@ -451,6 +651,20 @@ test('libraries switch categories, show details and delete media',async()=>{
     assert.deepEqual(removed.payload,{delete_files:false});
     assert.equal(d.querySelector('#library-overview').hidden,false);
     assert.equal(d.querySelector('[data-library-media="2"]'),null);
+    assert.deepEqual(errors,[]);
+  }finally{dom.window.close();}
+});
+
+test('silent library refresh keeps the tile grid class',async()=>{
+  const {dom,w,document:d,errors,setLibrary}=await setup();
+  try{
+    setLibrary([{id:'series',name:'Сериалы',items:[{id:1,title:'Первый',year:2020},{id:2,title:'Второй',year:2021}]}],{});
+    d.querySelector('[data-tab=library]').click();await settle();await settle();
+    const grid=d.querySelector('#library-items');
+    assert.equal(grid.classList.contains('library-grid'),true);
+    w.testRenderLibraries(true);
+    assert.equal(grid.classList.contains('library-grid'),true);
+    assert.equal(grid.querySelectorAll('.library-tile').length,2);
     assert.deepEqual(errors,[]);
   }finally{dom.window.close();}
 });
@@ -497,7 +711,7 @@ test('download a missing season extends the media task without opening search',a
     assert.match(d.querySelector('#media-task').textContent,/Сезон 3/);
     d.querySelector('#library-back').click();await settle();
     assert.equal(d.querySelector('#all-tasks-control').hidden,false);
-    assert.match(d.querySelector('#all-tasks-control').textContent,/Запустить все задачи/);
+    assert.match(d.querySelector('#all-tasks-control').textContent,/Запустить поиск по всем задачам/);
     assert.deepEqual(errors,[]);
   }finally{dom.window.close();}
 });

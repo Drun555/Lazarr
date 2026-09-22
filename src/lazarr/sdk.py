@@ -75,6 +75,14 @@ class MetadataItem(BaseModel):
     external_ids: dict[str, str] = Field(default_factory=dict)
     release_date: str | None = None
     seasons: list[dict] = Field(default_factory=list)
+    community_rating: float | None = None
+    official_rating: str | None = None
+    status: str | None = None
+    studios: list[str] = Field(default_factory=list)
+    people: list[dict] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list)
+    remote_trailers: list[dict] = Field(default_factory=list)
+    collection: str | None = None
     # Explicit provider mappings, keyed by canonical "season:episode".
     episode_numbering: dict[str, list[dict]] = Field(default_factory=dict)
 
@@ -178,7 +186,7 @@ class Criterion(BaseModel):
 
 
 class TrackBinding(BaseModel):
-    language_source: Literal["filename", "title", "description", "probe"] = "filename"
+    language_source: Literal["filename", "title", "description", "probe", "content"] = "filename"
     kind: Literal["audio", "subtitle"]
     language: str = "und"
     file_index: int | None = None

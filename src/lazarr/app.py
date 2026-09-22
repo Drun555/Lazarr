@@ -46,6 +46,7 @@ from lazarr.worker import Worker
 from lazarr.scheduler import Scheduler
 from lazarr.library import LibraryService
 from lazarr.posters import poster_url, fetch_poster
+from lazarr.telegram import TelegramService, TelegramError
 
 
 class Context:
@@ -73,8 +74,13 @@ class Context:
         self.worker = Worker(self.db, self.plugins, self.service, self.engine, config)
         self.scheduler = Scheduler(self.worker, self.service)
         self.login_attempts = defaultdict(list)
+        self.telegram = TelegramService(self.db, self.secret_store, config.background)
+        from lazarr.telegram_menu import TelegramMenu
+
+        self.telegram.menu = TelegramMenu(self, self.telegram)
 
     async def close(self):
+        await self.telegram.stop()
         if self.config.background:
             await self.scheduler.stop()
         elif self.engine:
@@ -165,6 +171,14 @@ class AuthInput(BaseModel):
     values: dict[str, str] = Field(default_factory=dict)
 
 
+class TelegramSettings(BaseModel):
+    token: str | None = Field(default=None, max_length=256)
+
+
+class TelegramDecision(BaseModel):
+    status: str = Field(pattern="^(approved|blocked)$")
+
+
 class ChoiceInput(BaseModel):
     reject: bool = False
     video_index: int | None = None
@@ -188,6 +202,7 @@ def create_app(config: RuntimeConfig | None = None):
         app.state.ctx = ctx
         if config.background:
             await ctx.scheduler.start()
+            await ctx.telegram.start()
         try:
             yield
         finally:
@@ -258,7 +273,11 @@ def create_app(config: RuntimeConfig | None = None):
 
     def entry_page(request, template):
         token = secrets.token_urlsafe(32)
-        response = templates.TemplateResponse(request=request, name=template, context={"csrf": token})
+        response = templates.TemplateResponse(
+            request=request,
+            name=template,
+            context={"csrf": token, "theme_color": context(request).service.settings().theme_color},
+        )
         response.set_cookie(
             "lazarr_login_csrf",
             token,
@@ -365,7 +384,13 @@ def create_app(config: RuntimeConfig | None = None):
         except HTTPException:
             return RedirectResponse("/login", 303)
         return templates.TemplateResponse(
-            request=request, name="index.html", context={"user": user, "csrf": request.state.csrf}
+            request=request,
+            name="index.html",
+            context={
+                "user": user,
+                "csrf": request.state.csrf,
+                "theme_color": context(request).service.settings().theme_color,
+            },
         )
 
     @app.get("/ui/search", response_class=HTMLResponse)
@@ -678,6 +703,8 @@ def create_app(config: RuntimeConfig | None = None):
         if ctx.engine is None:
             raise HTTPException(503, ctx.engine_error)
         await ctx.worker.choose(identity, user.id, payload.reject, payload.video_index, payload.track_indices)
+        if not payload.reject:
+            ctx.scheduler.discard_satisfied()
         return {"ok": True}
 
     @app.post("/api/v1/candidates/{identity}/choice-all")
@@ -685,7 +712,9 @@ def create_app(config: RuntimeConfig | None = None):
         ctx = context(request)
         if ctx.engine is None:
             raise HTTPException(503, ctx.engine_error)
-        return await ctx.worker.choose_all(identity, user.id)
+        result = await ctx.worker.choose_all(identity, user.id)
+        ctx.scheduler.discard_satisfied()
+        return result
 
     @app.post("/api/v1/tasks/{task_id}/seasons/{season}/candidates/{identity}/choice")
     async def choose_candidate_for_season(
@@ -698,11 +727,40 @@ def create_app(config: RuntimeConfig | None = None):
         ctx = context(request)
         if ctx.engine is None:
             raise HTTPException(503, ctx.engine_error)
-        return await ctx.worker.choose_all(identity, user.id, season, task_id)
+        result = await ctx.worker.choose_all(identity, user.id, season, task_id)
+        ctx.scheduler.discard_satisfied()
+        return result
 
     @app.get("/api/v1/settings")
     async def settings(request: Request, user=Depends(permission("settings"))):
         return context(request).service.settings()
+
+    @app.get("/api/v1/telegram")
+    async def telegram_settings(request: Request, user=Depends(permission("settings"))):
+        return context(request).telegram.describe()
+
+    @app.put("/api/v1/telegram")
+    async def put_telegram(payload: TelegramSettings, request: Request, user=Depends(permission("settings"))):
+        try:
+            await context(request).telegram.configure(
+                True,
+                payload.token,
+                user.id,
+            )
+        except TelegramError as exc:
+            raise HTTPException(502, exc.message) from None
+        return context(request).telegram.describe()
+
+    @app.get("/api/v1/telegram/users")
+    async def telegram_users(request: Request, user=Depends(permission("settings"))):
+        return context(request).telegram.users()
+
+    @app.patch("/api/v1/telegram/users/{identity}")
+    async def telegram_decide(
+        identity: int, payload: TelegramDecision, request: Request, user=Depends(permission("settings"))
+    ):
+        context(request).telegram.decide(identity, payload.status, user.id)
+        return {"ok": True}
 
     @app.put("/api/v1/settings")
     async def put_settings(payload: Settings, request: Request, user=Depends(permission("settings"))):
@@ -743,18 +801,21 @@ def create_app(config: RuntimeConfig | None = None):
     async def libraries(request: Request, user=Depends(permission("library"))):
         ctx = context(request)
         await ctx.library.enrich()
-        return ctx.library.list()
+        return await asyncio.to_thread(ctx.library.list)
 
     @app.get("/api/v1/libraries/media/{identity}")
     async def library_media(identity: int, request: Request, user=Depends(permission("library"))):
         ctx = context(request)
         await ctx.library.enrich_media(identity)
-        result = ctx.library.detail(identity)
+        result = await asyncio.to_thread(ctx.library.detail, identity)
         if result is None:
             raise HTTPException(404, "Произведение не найдено")
-        task = next((t for t in ctx.service.list_tasks() if t["media_id"] == identity), None)
+        task = next(
+            (t for t in await asyncio.to_thread(ctx.service.list_tasks) if t["media_id"] == identity),
+            None,
+        )
         result["task"] = task
-        result["search"] = ctx.scheduler.snapshot(task["id"]) if task else None
+        result["search"] = await asyncio.to_thread(ctx.scheduler.snapshot, task["id"]) if task else None
         return result
 
     @app.delete("/api/v1/libraries/media/{identity}")
@@ -768,6 +829,18 @@ def create_app(config: RuntimeConfig | None = None):
     @app.get("/api/v1/providers")
     async def providers(request: Request, user=Depends(permission("providers"))):
         return context(request).plugins.describe()
+
+    @app.post("/api/v1/providers/{identity}/secrets/{field_name}/reveal")
+    async def reveal_provider_secret(
+        identity: str, field_name: str, request: Request, user=Depends(permission("providers"))
+    ):
+        ctx = context(request)
+        value = ctx.plugins.secret(identity, field_name)
+        if value is None:
+            raise HTTPException(404, "Секрет не найден")
+        with ctx.db.session() as db:
+            audit(db, user.id, "provider.secret.reveal", f"{identity}.{field_name}")
+        return JSONResponse({"value": value}, headers={"Cache-Control": "no-store"})
 
     @app.put("/api/v1/providers/order")
     async def order_providers(

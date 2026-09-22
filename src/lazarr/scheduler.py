@@ -2,7 +2,7 @@ import time
 import asyncio
 import logging
 from datetime import datetime, timezone
-from lazarr.models import ConfigEntry
+from lazarr.models import ConfigEntry, Subtask, SubtaskAsset
 from sqlalchemy import select
 from lazarr.search import PREFIX, enqueue
 
@@ -57,6 +57,28 @@ class Scheduler:
             key = enqueue(db, task_id)
         self.wake.set()
         return key
+
+    def discard_satisfied(self):
+        """Remove queued searches whose episodes already have a download."""
+        with self.service.db.session() as db:
+            assigned = (
+                select(SubtaskAsset.id)
+                .where(
+                    SubtaskAsset.subtask_id == Subtask.id,
+                    SubtaskAsset.current.is_(True) | SubtaskAsset.pending.is_(True),
+                )
+                .exists()
+            )
+            outstanding = set(
+                db.scalars(
+                    select(Subtask.task_id).where(~assigned, Subtask.status.not_in(("done", "removed")))
+                )
+            )
+            for row in db.scalars(select(ConfigEntry).where(ConfigEntry.key.startswith(PREFIX))):
+                task_id = row.value.get("task_id")
+                if task_id is None and outstanding or task_id in outstanding:
+                    continue
+                db.delete(row)
 
     def snapshot(self, task_id=None):
         with self.service.db.session() as db:

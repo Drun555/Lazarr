@@ -6,10 +6,41 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from lazarr.app import create_app
-from lazarr.config import Requirements
+from lazarr.config import JellyfinSettings, Requirements, Settings
 from lazarr.jellyfin import user_object_id
+from lazarr.library import LibraryService
 from lazarr.models import Download, LibraryAsset, Media, MediaAsset, Release, Subtask, SubtaskAsset, Task
 from lazarr.services import CreateTask
+
+
+def test_jellyfin_detects_untagged_external_subtitles(core, media, season):
+    _, db, _, _ = core
+    _, original = playable_episode(core, media, season)
+    subtitle = original.with_suffix(".srt")
+    dialogue = (
+        "We are going to the station together. The train will arrive in a few minutes. "
+        "Please bring your ticket and wait beside the entrance. I can see our friends "
+        "walking toward us now. They have already found a place for everyone to sit. "
+    ) * 3
+    subtitle.write_text("1\n00:00:01,000 --> 00:00:10,000\n" + dialogue + "\n", encoding="utf-8")
+    with db.session() as session:
+        for link in (session.scalar(select(LibraryAsset)), session.scalar(select(SubtaskAsset))):
+            binding = dict(link.preflight["binding"])
+            binding["tracks"] = [{**binding["tracks"][0], "language": "und", "path": subtitle.name}]
+            link.preflight = {"binding": binding}
+    with TestClient(create_app(core[0])) as client:
+        jellyfin_login(client)
+        anime = next(item for item in client.get("/UserViews").json()["Items"] if item["Name"] == "Аниме")
+        series = client.get("/Items", params={"ParentId": anime["Id"]}).json()["Items"][0]
+        episode = client.get(f"/Shows/{series['Id']}/Episodes").json()["Items"][0]
+        streams = client.post(f"/Items/{episode['Id']}/PlaybackInfo", json={}).json()["MediaSources"][0][
+            "MediaStreams"
+        ]
+        external = next(stream for stream in streams if stream["Type"] == "Subtitle" and stream["IsExternal"])
+        assert external["Language"] == "eng"
+    detail = LibraryService(db, core[2], core[3]).detail(1)
+    file = next(episode for episode in detail["episodes"] if episode["files"])["files"][0]
+    assert any(track["external"] and track["language"] == "en" for track in file["tracks"])
 
 
 def playable_episode(core, media, season, *, complete=True, external_forced=False, external_title=None):
@@ -25,6 +56,7 @@ def playable_episode(core, media, season, *, complete=True, external_forced=Fals
     )
     settings = service.settings()
     settings.defaults = Requirements(audio_languages=["ja", "ru"], subtitle_languages=["ru"])
+    settings.jellyfin = JellyfinSettings(audio_languages=["ja", "ru"], subtitle_languages=["ru"])
     service.set_settings(settings, 1)
     infohash = "a" * 40
     root = Path(settings.series_path) / infohash
@@ -171,6 +203,39 @@ def jellyfin_login(client, username="alice", password="a-safe-password"):
     payload = response.json()
     client.headers["X-Emby-Token"] = payload["AccessToken"]
     return payload
+
+
+def test_jellyfin_language_settings_migrate_and_remain_independent():
+    old = Settings.model_validate(
+        {"defaults": {"audio_languages": ["ja", "ru"], "subtitle_languages": ["en"]}}
+    )
+    assert old.jellyfin.audio_languages == ["ja", "ru"]
+    assert old.jellyfin.subtitle_languages == ["en"]
+    old.defaults.audio_languages = ["ru"]
+    assert old.jellyfin.audio_languages == ["ja", "ru"]
+
+
+def test_jellyfin_playback_uses_separate_language_priorities(core, media, season):
+    playable_episode(core, media, season)
+    config, _, _, service = core
+    settings = service.settings()
+    settings.jellyfin = JellyfinSettings(audio_languages=["ru", "ja"], subtitle_languages=[])
+    service.set_settings(settings, 1)
+    with TestClient(create_app(config)) as client:
+        auth = jellyfin_login(client)
+        assert auth["User"]["Configuration"]["AudioLanguagePreference"] == "rus"
+        assert auth["User"]["Configuration"]["SubtitleMode"] == "None"
+        anime = next(item for item in client.get("/UserViews").json()["Items"] if item["Name"] == "Аниме")
+        series = client.get("/Items", params={"ParentId": anime["Id"]}).json()["Items"][0]
+        episode = client.get(f"/Shows/{series['Id']}/Episodes").json()["Items"][0]
+        source = client.post(f"/Items/{episode['Id']}/PlaybackInfo", json={}).json()["MediaSources"][0]
+        selected_audio = next(
+            stream
+            for stream in source["MediaStreams"]
+            if stream["Index"] == source["DefaultAudioStreamIndex"]
+        )
+        assert selected_audio["Language"] == "rus"
+        assert source["DefaultSubtitleStreamIndex"] is None
 
 
 def test_jellyfin_user_ids_are_namespaced_per_server(tmp_path):
@@ -365,6 +430,7 @@ def test_jellyfin_auth_libraries_navigation_and_read_only_api(core, media, seaso
             params=[
                 ("userId", auth["User"]["Id"]),
                 ("fields", "Overview"),
+                ("fields", "MediaStreams"),
                 ("fields", "CanDownload"),
                 ("fields", "ParentId"),
                 ("season", "2"),

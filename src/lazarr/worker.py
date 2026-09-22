@@ -1,8 +1,10 @@
+from lazarr.notifications import queue_episode_notification
 from lazarr.selection import reject_reason, candidate_rank
 from lazarr.provider_utils import search_titles
 
 import asyncio
 import logging
+import re
 import time
 from pathlib import Path, PurePosixPath
 from sqlalchemy import select, update
@@ -39,6 +41,7 @@ from lazarr.sdk import (
 )
 from lazarr.security import audit
 from lazarr.torrent import probe_file
+from lazarr.subtitle_language import detect_subtitle_language
 
 log = logging.getLogger(__name__)
 
@@ -69,10 +72,14 @@ class Worker:
         self.matcher = Matcher()
         self.calendar = TMDBCalendar()
         self.lock = asyncio.Lock()
+        self.selection_lock = asyncio.Lock()
+        self.selection_changed = asyncio.Event()
         self.download_lock = asyncio.Lock()
         self.poll_lock = asyncio.Lock()
         self.probe_cache = {}
         self.last_checkpoint = 0
+        self.last_restore = 0
+        self.consumer_state = {}
         self.progress = SearchProgress()
 
     async def evaluate(self, candidate, subtasks, *, allow_preference_mismatch=False, ignore_filters=False):
@@ -247,7 +254,11 @@ class Worker:
                     finally:
                         self.progress.finish_group(completed)
                     self.progress.value["groups_done"] += 1
-                unavailable = bool(groups) and not self.progress.value["search_requests"]
+                unavailable = (
+                    bool(groups)
+                    and not self.progress.value["search_requests"]
+                    and not self.progress.value.get("satisfied")
+                )
                 self.progress.record(
                     "finished",
                     (
@@ -277,6 +288,64 @@ class Worker:
         with self.db.session() as db:
             task_ids = list(db.scalars(select(Subtask.task_id).where(Subtask.id.in_(claimed))))
             defer(db, task_ids, provider_id, until)
+
+    def unresolved(self, identities):
+        """Return episodes which have no selected or pending download."""
+        with self.db.session() as db:
+            covered = set(
+                db.scalars(
+                    select(SubtaskAsset.subtask_id).where(
+                        SubtaskAsset.subtask_id.in_(identities),
+                        (SubtaskAsset.current.is_(True) | SubtaskAsset.pending.is_(True)),
+                    )
+                )
+            )
+        return set(identities) - covered
+
+    def search_year(self, db, request, subtask_id):
+        """Use the movie year or the first known air date of the requested season."""
+        if request.media.kind == "movie":
+            if request.media.year:
+                return request.media.year
+            date = request.media.release_date or ""
+            return int(date[:4]) if re.fullmatch(r"\d{4}-\d{2}-\d{2}", date) else None
+        subtask = db.get(Subtask, subtask_id)
+        episode = db.get(Episode, subtask.episode_id) if subtask.episode_id else None
+        if not episode:
+            return None
+        dates = db.scalars(
+            select(Episode.air_date)
+            .where(Episode.season_id == episode.season_id, Episode.air_date.is_not(None))
+            .order_by(Episode.air_date)
+        )
+        for date in dates:
+            if re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
+                return int(date[:4])
+        return None
+
+    async def search_page(self, provider, query, cursor, claimed, acquire):
+        if not acquire:
+            return await provider.search(query, cursor)
+        search = asyncio.create_task(provider.search(query, cursor))
+        try:
+            while True:
+                changed = asyncio.create_task(self.selection_changed.wait())
+                try:
+                    done, _ = await asyncio.wait({search, changed}, return_when=asyncio.FIRST_COMPLETED)
+                finally:
+                    changed.cancel()
+                    await asyncio.gather(changed, return_exceptions=True)
+                if search in done:
+                    return await search
+                self.selection_changed.clear()
+                if not self.unresolved(claimed):
+                    search.cancel()
+                    await asyncio.gather(search, return_exceptions=True)
+                    return None
+        except asyncio.CancelledError:
+            search.cancel()
+            await asyncio.gather(search, return_exceptions=True)
+            raise
 
     async def search_alternatives(self, subtask_id):
         async with self.lock:
@@ -327,6 +396,7 @@ class Worker:
                 if result.rowcount:
                     claimed.append(identity)
             requests = [self.service.request_for(db, db.get(Subtask, identity)) for identity in claimed]
+            year = self.search_year(db, requests[0], claimed[0]) if requests else None
         if not requests:
             return
         self.progress.value.update(
@@ -375,6 +445,10 @@ class Worker:
             seen = set()
             covered = set()
             for provider_id in provider_ids:
+                if acquire and not self.unresolved(claimed):
+                    self.progress.value["satisfied"] = True
+                    self.progress.record("finished", "Поиск остановлен: раздачи уже выбраны")
+                    break
                 provider_name = self.plugins.classes[provider_id].manifest.name
                 self.progress.value["provider"] = provider_name
                 participation = provider_state[provider_id]
@@ -392,11 +466,15 @@ class Worker:
                     self.progress.record("provider_cooldown", f"{provider_name}: {reason}")
                     continue
                 cursor = None
-                variants = search_titles(query.media)
+                titles = search_titles(query.media)
+                variants = [f"{title} {year}" for title in titles] + titles if year else titles
                 variant = 0
                 variant_pages = 0
                 stopped = False
                 for _page in range(3 * len(variants)):
+                    if acquire and not self.unresolved(claimed):
+                        self.progress.value["satisfied"] = True
+                        break
                     if acquire and all(r.id in covered for r in requests):
                         break
                     query.text = variants[variant]
@@ -414,7 +492,7 @@ class Worker:
                                     .where(Subtask.id.in_(claimed))
                                     .values(last_search_at=time.time())
                                 )
-                            page = await provider.search(query, cursor)
+                            page = await self.search_page(provider, query, cursor, claimed, acquire)
                     except Exception as exc:
                         errors.append(self._error(exc))
                         participation.update(state="error", reason=self._error(exc))
@@ -423,6 +501,9 @@ class Worker:
                         if acquire:
                             self.defer_requests(claimed, provider_id, latest["retry_at"])
                         self.progress.record("provider_error", f"{provider_name}: {self._error(exc)}")
+                        break
+                    if page is None or acquire and not self.unresolved(claimed):
+                        self.progress.value["satisfied"] = True
                         break
                     variant_pages += 1
                     participation["requests"] += 1
@@ -449,6 +530,9 @@ class Worker:
                             shortlist.append(candidate)
                     ordered = sorted(shortlist, key=lambda c: candidate_rank(c, requests))
                     for position, candidate in enumerate(ordered):
+                        if acquire and not self.unresolved(claimed):
+                            self.progress.value["satisfied"] = True
+                            break
                         if acquire and all(r.id in covered for r in requests):
                             break
                         try:
@@ -497,6 +581,9 @@ class Worker:
                                 .where(Subtask.id.in_(claimed))
                                 .values(lease_until=time.time() + 600)
                             )
+                    if not stopped:
+                        self.progress.value["pages_checked"] += 1
+                        self.progress.value["group_pages_checked"] += 1
                     if stopped:
                         break
                     participation.update(state="completed", reason="Поиск выполнен")
@@ -514,6 +601,8 @@ class Worker:
             self.progress.record("ranking", "Выбор подходящих раздач и объединение загрузок")
             selected = {}
             for request in requests:
+                if request.id not in self.unresolved([request.id]):
+                    continue
                 ranked = []
                 for candidate, metadata, report, release_id, allowed in choices:
                     evaluation = next(e for e in report.evaluations if e.subtask_id == request.id)
@@ -581,6 +670,8 @@ class Worker:
                             for _, _, r, _, _ in choices
                         )
                         sub.status = "done" if current else "needs_selection" if unknown else "queued"
+                    if sub.status == "needs_selection":
+                        queue_episode_notification(db, sub, "selection")
                     sub.attempts = sub.attempts + 1 if errors else 0
                     sub.next_search_at = (
                         0 if interrupted else next_search_start(settings.search_start, settings.timezone)
@@ -641,7 +732,7 @@ class Worker:
             return release.id, allowed
 
     async def choose(self, decision_id, user_id, reject=False, video_index=None, track_indices=None):
-        async with self.lock:
+        async with self.selection_lock:
             with self.db.session() as db:
                 decision = db.get(CandidateDecision, decision_id)
                 if not decision:
@@ -718,6 +809,7 @@ class Worker:
             evaluation.binding = binding
             plan = DownloadPlan(infohash=infohash, files=metadata.files, bindings=[binding])
             await self.submit(release_id, metadata, plan, {request.id: evaluation}, override=True)
+            self.selection_changed.set()
             with self.db.session() as db:
                 db.get(CandidateDecision, decision_id).action = "selected"
                 db.get(CandidateDecision, decision_id).report = evaluation.model_dump(mode="json")
@@ -725,7 +817,7 @@ class Worker:
 
     async def choose_all(self, decision_id, user_id, season_number=None, task_id=None):
         """Apply one release to matching episodes in the task or one season."""
-        async with self.lock:
+        async with self.selection_lock:
             with self.db.session() as db:
                 decision = db.get(CandidateDecision, decision_id)
                 if not decision:
@@ -781,6 +873,7 @@ class Worker:
             reports = {evaluation.subtask_id: evaluation for evaluation in eligible}
             plan = DownloadPlan(infohash=infohash, files=metadata.files, bindings=bindings)
             await self.submit(release_id, metadata, plan, reports, override=True)
+            self.selection_changed.set()
             selected_ids = {evaluation.subtask_id for evaluation in eligible}
             with self.db.session() as db:
                 for evaluation in report.evaluations:
@@ -833,7 +926,13 @@ class Worker:
                 valid = []
                 for binding in plan.bindings:
                     sub = db.get(Subtask, binding.subtask_id)
-                    if sub and (override or not db.get(Task, sub.task_id).paused):
+                    selected = sub and db.scalar(
+                        select(SubtaskAsset.id).where(
+                            SubtaskAsset.subtask_id == sub.id,
+                            (SubtaskAsset.current.is_(True) | SubtaskAsset.pending.is_(True)),
+                        )
+                    )
+                    if sub and (override or not selected and not db.get(Task, sub.task_id).paused):
                         valid.append(binding)
                 if not valid:
                     return
@@ -909,6 +1008,10 @@ class Worker:
                             {},
                         )
                         link.preflight = reports[sub.id].model_dump(mode="json")
+                    if not override:
+                        queue_episode_notification(
+                            db, sub, "found", db.get(Release, release_id).data.get("title")
+                        )
                     sub.status, sub.last_error = "starting", None
                     sub.missing_subtitle_languages = []
                 path = download.save_path
@@ -972,50 +1075,64 @@ class Worker:
                     download.state, download.stats = "error", {"error": "Не удалось восстановить торрент"}
                 log.exception("Torrent restore failed")
 
+    def consumer_rows(self):
+        with self.db.session() as db:
+            rows = []
+            for download in db.scalars(select(Download)):
+                plan = DownloadPlan.model_validate(download.plan)
+                active_ids, referenced_ids = set(), set()
+                for link, sub, task in db.execute(
+                    select(SubtaskAsset, Subtask, Task)
+                    .join(Subtask, SubtaskAsset.subtask_id == Subtask.id)
+                    .join(Task, Subtask.task_id == Task.id)
+                    .join(MediaAsset, SubtaskAsset.asset_id == MediaAsset.id)
+                    .where(
+                        MediaAsset.download_id == download.id,
+                        (SubtaskAsset.current.is_(True) | SubtaskAsset.pending.is_(True)),
+                    )
+                ):
+                    referenced_ids.add(sub.id)
+                    if not task.paused:
+                        active_ids.add(sub.id)
+                active = plan.model_copy(
+                    update={"bindings": [b for b in plan.bindings if b.subtask_id in active_ids]}
+                )
+                if not referenced_ids:
+                    download.state = "replaced"
+                should_pause = (
+                    download.manual_paused or not active_ids or download.state in {"stopped", "replaced"}
+                )
+                rows.append((download.infohash, active, should_pause))
+        return rows
+
     async def sync_consumers(self):
         if self.engine is None:
             return
         async with self.download_lock:
-            with self.db.session() as db:
-                rows = []
-                for download in db.scalars(select(Download)):
-                    plan = DownloadPlan.model_validate(download.plan)
-                    active_ids, referenced_ids = set(), set()
-                    for link, sub, task in db.execute(
-                        select(SubtaskAsset, Subtask, Task)
-                        .join(Subtask, SubtaskAsset.subtask_id == Subtask.id)
-                        .join(Task, Subtask.task_id == Task.id)
-                        .join(MediaAsset, SubtaskAsset.asset_id == MediaAsset.id)
-                        .where(
-                            MediaAsset.download_id == download.id,
-                            (SubtaskAsset.current.is_(True) | SubtaskAsset.pending.is_(True)),
-                        )
-                    ):
-                        referenced_ids.add(sub.id)
-                        if not task.paused:
-                            active_ids.add(sub.id)
-                    active = plan.model_copy(
-                        update={"bindings": [b for b in plan.bindings if b.subtask_id in active_ids]}
-                    )
-                    if not referenced_ids:
-                        download.state = "replaced"
-                    should_pause = (
-                        download.manual_paused or not active_ids or download.state in {"stopped", "replaced"}
-                    )
-                    rows.append((download.infohash, active, should_pause))
+            rows = await asyncio.to_thread(self.consumer_rows)
             for infohash, plan, paused in rows:
                 if not self.engine.contains(infohash):
+                    self.consumer_state.pop(infohash, None)
+                    continue
+                state = (plan.model_dump_json(), paused)
+                if self.consumer_state.get(infohash) == state:
                     continue
                 await asyncio.to_thread(self.engine.update_plan, infohash, plan)
                 await asyncio.to_thread(self.engine.pause if paused else self.engine.resume, infohash)
+                self.consumer_state[infohash] = state
+            self.consumer_state = {
+                key: value for key, value in self.consumer_state.items() if key in {row[0] for row in rows}
+            }
 
     async def poll(self):
         from lazarr.deletion import cleanup
 
         async with self.poll_lock:
-            async with self.download_lock:
-                await asyncio.to_thread(cleanup, self.db)
-                await self.restore(reset_leases=False)
+            if time.time() - self.last_restore > 30:
+                async with self.download_lock:
+                    await asyncio.to_thread(cleanup, self.db)
+                    await self.restore(reset_leases=False)
+                self.last_restore = time.time()
             await self._poll()
 
     async def _poll(self):
@@ -1121,15 +1238,28 @@ class Worker:
         audio = {
             language(s.get("tags", {}).get("language")) for s in streams if s.get("codec_type") == "audio"
         }
-        subtitles = {
-            language(s.get("tags", {}).get("language")) for s in streams if s.get("codec_type") == "subtitle"
-        }
+        subtitles = set()
+        for stream in streams:
+            if stream.get("codec_type") != "subtitle":
+                continue
+            detected = language(stream.get("tags", {}).get("language"))
+            if detected == "und" and stream.get("index") is not None:
+                detected = await asyncio.to_thread(
+                    detect_subtitle_language, path, stream.get("index"), stream.get("codec_name")
+                )
+                if detected != "und":
+                    stream["detected_language"] = detected
+            subtitles.add(detected)
         unknown_external_audio = False
         for track in binding.tracks:
             if track.file_index is None:
                 continue
             if track.kind == "subtitle":
-                # Text subtitles often carry no internal language tag; filename is retained as evidence.
+                if track.language == "und":
+                    detected = await asyncio.to_thread(detect_subtitle_language, Path(root) / track.path)
+                    if detected != "und":
+                        track.language = detected
+                        track.language_source = "content"
                 subtitles.add(track.language)
             else:
                 external = await self._probe(Path(root) / track.path, state["complete"])
@@ -1193,6 +1323,8 @@ class Worker:
             if not link.pending or task.paused or task.requirements != request.requirements.model_dump():
                 return
             asset.probe, asset.resolution = probe, quality
+            if any(track.language_source == "content" for track in binding.tracks):
+                link.preflight = {**link.preflight, "binding": binding.model_dump(mode="json")}
             sub.missing_subtitle_languages = missing_subs
             mismatch = any(c.result == MatchResult.MISMATCH for c in criteria)
             unknown = any(c.result == MatchResult.UNKNOWN for c in criteria)
@@ -1218,12 +1350,14 @@ class Worker:
                 )
                 if decision:
                     decision.action = "rejected"
+                queue_episode_notification(db, sub, "selection")
                 return
             if unknown and not link.override:
                 sub.status, sub.last_error = (
                     "needs_selection",
                     "Не удалось подтвердить фактические параметры; требуется ручной выбор",
                 )
+                queue_episode_notification(db, sub, "selection")
                 return
             sub.status = "done" if state["complete"] else "ready"
             sub.last_error = None

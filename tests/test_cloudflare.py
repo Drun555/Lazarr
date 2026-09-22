@@ -18,6 +18,7 @@ async def test_solver_retries_binary_with_clearance_and_browser_agent():
         return challenge()
 
     def solver(request):
+        assert str(request.url) == "http://solver:8191/v1"
         assert request.extensions["timeout"]["read"] == 190
         assert request.extensions["timeout"]["write"] == 190
         assert request.extensions["timeout"]["connect"] == 190
@@ -45,7 +46,7 @@ async def test_solver_retries_binary_with_clearance_and_browser_agent():
         )
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(site)) as client:
-        ctx = ProviderContext({"flaresolverr_url": "http://solver:8191"}, {}, client)
+        ctx = ProviderContext({"trawl_url": "http://solver:8191"}, {}, client)
         ctx.solver_transport = httpx.MockTransport(solver)
         assert (await ctx.request("GET", "https://tracker.test/dl.php")).content == b"d4:infodee"
         assert ctx.state["browser_user_agent"] == "Browser/1"
@@ -55,7 +56,7 @@ async def test_solver_retries_binary_with_clearance_and_browser_agent():
 
 async def test_rendered_html_fallback_never_substitutes_torrent_bytes():
     async with httpx.AsyncClient(transport=httpx.MockTransport(lambda r: challenge())) as client:
-        ctx = ProviderContext({"flaresolverr_url": "http://solver:8191"}, {}, client)
+        ctx = ProviderContext({"trawl_url": "http://solver:8191"}, {}, client)
         ctx.solver_transport = httpx.MockTransport(
             lambda r: httpx.Response(
                 200,
@@ -77,7 +78,7 @@ async def test_rendered_html_fallback_never_substitutes_torrent_bytes():
 
 async def test_solver_error_is_sanitized_and_backs_off():
     async with httpx.AsyncClient(transport=httpx.MockTransport(lambda r: challenge())) as client:
-        ctx = ProviderContext({"flaresolverr_url": "http://solver:8191"}, {}, client)
+        ctx = ProviderContext({"trawl_url": "http://solver:8191"}, {}, client)
         ctx.solver_transport = httpx.MockTransport(
             lambda r: httpx.Response(200, json={"status": "error", "message": "secret POST data"})
         )
@@ -110,7 +111,7 @@ async def test_browser_post_preserves_query_and_cyrillic_form():
         )
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(lambda r: challenge())) as client:
-        ctx = ProviderContext({"flaresolverr_url": "http://solver:8191"}, {}, client)
+        ctx = ProviderContext({"trawl_url": "http://solver:8191"}, {}, client)
         ctx.solver_transport = httpx.MockTransport(solver)
         await ctx.request(
             "POST",

@@ -1,4 +1,4 @@
-"""Optional browser challenge transport. FlareSolverr remains a separate service."""
+"""Optional browser challenge transport using Trawl's compatible /v1 API."""
 
 import os
 from urllib.parse import urlparse, parse_qsl, urlencode, quote
@@ -18,11 +18,14 @@ def challenged(response):
 async def solve(context, method, url, kwargs, *, html, form_encoding="utf-8"):
     from lazarr.sdk import ProviderError
 
-    endpoint = context.config.get("flaresolverr_url") or os.getenv("LAZARR_FLARESOLVERR_URL", "")
+    endpoint = (
+        context.config.get("trawl_url")
+        or os.getenv("LAZARR_TRAWL_URL")
+        or context.config.get("flaresolverr_url")
+        or os.getenv("LAZARR_FLARESOLVERR_URL", "")
+    )
     if not endpoint:
-        raise ProviderError(
-            "unavailable", "Cloudflare блокирует доступ. Настройте FlareSolverr у провайдера.", 300
-        )
+        raise ProviderError("unavailable", "Cloudflare блокирует доступ. Настройте Trawl у провайдера.", 300)
     parsed = urlparse(endpoint)
     if (
         parsed.scheme not in {"http", "https"}
@@ -31,7 +34,7 @@ async def solve(context, method, url, kwargs, *, html, form_encoding="utf-8"):
         or parsed.query
         or parsed.fragment
     ):
-        raise ProviderError("configuration", "Некорректный URL FlareSolverr")
+        raise ProviderError("configuration", "Некорректный URL Trawl")
     endpoint = endpoint.rstrip("/")
     if not endpoint.endswith("/v1"):
         endpoint += "/v1"
@@ -89,7 +92,7 @@ async def solve(context, method, url, kwargs, *, html, form_encoding="utf-8"):
         except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
             raise ProviderError(
                 "unavailable",
-                "FlareSolverr не смог открыть страницу. Проверьте сервис и доступность провайдера.",
+                "Trawl не смог открыть страницу. Проверьте сервис и доступность провайдера.",
                 300,
             ) from exc
 
@@ -105,6 +108,4 @@ async def solve(context, method, url, kwargs, *, html, form_encoding="utf-8"):
     if html and method.upper() == "POST":
         return await browser("request.post")
     # A rendered DOM cannot represent a torrent file or a CAPTCHA image.
-    raise ProviderError(
-        "unavailable", "Cloudflare продолжает блокировать скачивание файла после FlareSolverr", 300
-    )
+    raise ProviderError("unavailable", "Cloudflare продолжает блокировать скачивание файла после Trawl", 300)

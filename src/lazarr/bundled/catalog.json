@@ -4,10 +4,10 @@
     {
       "id": "tmdb",
       "kind": "metadata",
-      "version": "1.0.5",
+      "version": "1.0.6",
       "sdk": ">=1.4,<2",
       "url": "https://example.invalid/lazarr/providers/tmdb.py",
-      "sha256": "38357004b4a88d4ecbe7d52d96e1ef00d050423fe64dbcd36477db25cf3a355b"
+      "sha256": "eaacd163b06635113c8941c8565688fc35250860bb59747bcebcfe9c86846a72"
     },
     {
       "id": "nyaa",
@@ -20,18 +20,18 @@
     {
       "id": "rutracker",
       "kind": "content",
-      "version": "1.0.3",
+      "version": "1.0.4",
       "sdk": ">=1.3,<2",
       "url": "https://example.invalid/lazarr/providers/rutracker.py",
-      "sha256": "913f49af78807b53ccdeab6d4c17091e053bb5e81806d368e84e38e4d142a548"
+      "sha256": "54c033238de7ff2381f50849be253ee40952d9ae15d8ff6b40d27624ed57cbd1"
     },
     {
       "id": "kinozal",
       "kind": "content",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "sdk": ">=1.3,<2",
       "url": "https://example.invalid/lazarr/providers/kinozal.py",
-      "sha256": "2f6d7b3c76855c16c33facd050b4abedecc357f2a4e3b5367f63e5e13a86fe03"
+      "sha256": "8b3bc1106aa7be24ce2366e04ac7632d69bd88f6deab73d5e9364365e6bc0e5f"
     }
   ]
 }

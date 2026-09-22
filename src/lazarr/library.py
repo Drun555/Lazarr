@@ -1,6 +1,7 @@
 """Read model of shared Media, independent of task owners and download folders."""
 
 import asyncio
+from pathlib import Path
 from sqlalchemy import select
 from lazarr.models import (
     Media,
@@ -18,6 +19,7 @@ from lazarr.models import (
 from lazarr.calendar import released
 from lazarr.matcher import classify_external_subtitles
 from lazarr.sdk import language
+from lazarr.subtitle_language import detect_subtitle_language
 
 LIBRARIES = [("series", "Сериалы"), ("movies", "Кино"), ("anime", "Аниме")]
 
@@ -44,7 +46,9 @@ class LibraryService:
                 pending = [
                     (m.id, m.provider, m.kind, m.external_id)
                     for m in db.scalars(select(Media))
-                    if not m.metadata_json.get("taxonomy_known") or "backdrop" not in m.metadata_json
+                    if not m.metadata_json.get("taxonomy_known")
+                    or "backdrop" not in m.metadata_json
+                    or "people" not in m.metadata_json
                 ]
             for identity, provider_id, kind, external_id in pending:
                 if provider_id not in self.plugins.available("metadata"):
@@ -55,7 +59,17 @@ class LibraryService:
                     with self.db.session() as db:
                         row = db.get(Media, identity)
                         if row:
-                            fields = ["backdrop"]
+                            fields = [
+                                "backdrop",
+                                "people",
+                                "studios",
+                                "community_rating",
+                                "official_rating",
+                                "status",
+                                "tags",
+                                "remote_trailers",
+                                "collection",
+                            ]
                             if item.taxonomy_known:
                                 fields.extend(
                                     [
@@ -186,6 +200,10 @@ class LibraryService:
                 .join(Release, Release.id == Download.release_id)
                 .where(LibraryAsset.media_id == identity)
             ):
+                from lazarr.jellyfin_resources import is_extra
+
+                if is_extra(link.part_key):
+                    continue
                 stored_versions.setdefault(link.episode_id, []).append(
                     self._version(link, asset, download, release, current=True, pending=False)
                 )
@@ -291,10 +309,30 @@ class LibraryService:
         binding = link.preflight.get("binding") or {}
         verification = link.verification or {}
         streams = asset.probe.get("streams", [])
+
+        def subtitle_path(relative):
+            if not relative:
+                return None
+            root = Path(download.save_path).resolve()
+            path = (root / relative).resolve()
+            return path if path.is_relative_to(root) and path.is_file() else None
+
+        video_path = subtitle_path(asset.path)
+
+        def stream_language(stream):
+            tagged = language(stream.get("tags", {}).get("language"))
+            if tagged != "und" or stream.get("codec_type") != "subtitle":
+                return tagged
+            if stream.get("detected_language"):
+                return language(stream["detected_language"])
+            if video_path and stream.get("index") is not None:
+                return detect_subtitle_language(video_path, stream["index"], stream.get("codec_name"))
+            return "und"
+
         tracks = [
             {
                 "kind": stream["codec_type"],
-                "language": language(stream.get("tags", {}).get("language")),
+                "language": stream_language(stream),
                 "codec": stream.get("codec_name"),
                 "channels": stream.get("channels"),
                 "title": stream.get("tags", {}).get("title"),
@@ -310,10 +348,15 @@ class LibraryService:
         for track in binding_tracks:
             external = track.get("file_index") is not None
             if external or not streams:
+                track_language = language(track.get("language"))
+                if external and track["kind"] == "subtitle" and track_language == "und":
+                    path = subtitle_path(track.get("path"))
+                    if path:
+                        track_language = detect_subtitle_language(path)
                 tracks.append(
                     {
                         "kind": track["kind"],
-                        "language": track["language"],
+                        "language": track_language,
                         "codec": None,
                         "path": track.get("path"),
                         "title": track.get("title"),
@@ -323,10 +366,15 @@ class LibraryService:
                     }
                 )
         for track in (asset.tracks or []) if not binding else []:
+            track_language = language(track.get("language"))
+            if track.get("kind", "subtitle") == "subtitle" and track_language == "und":
+                path = subtitle_path(track.get("path"))
+                if path:
+                    track_language = detect_subtitle_language(path)
             tracks.append(
                 {
                     "kind": track.get("kind", "subtitle"),
-                    "language": language(track.get("language")),
+                    "language": track_language,
                     "codec": track.get("codec"),
                     "path": track.get("path"),
                     "external": bool(track.get("external", True)),

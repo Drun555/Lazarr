@@ -18,7 +18,7 @@ class Plugin(MetadataProvider):
         id="tmdb",
         name="TMDB",
         kind="metadata",
-        version="1.0.5",
+        version="1.0.6",
         sdk=">=1.4,<2",
         config_fields=[
             ConfigField(name="api_key", label="API key или Read Access Token", secret=True, required=True),
@@ -54,6 +54,16 @@ class Plugin(MetadataProvider):
         title = data.get("title") if kind == "movie" else data.get("name")
         original = data.get("original_title") if kind == "movie" else data.get("original_name")
         date = data.get("release_date") if kind == "movie" else data.get("first_air_date")
+        locale = self.ctx.config.get("language", "ru-RU").split("-")[-1].upper()
+        ratings = data.get("release_dates" if kind == "movie" else "content_ratings", {}).get("results", [])
+        country = next((r for code in (locale, "US") for r in ratings if r.get("iso_3166_1") == code), {})
+        official_rating = (
+            next(
+                (r["certification"] for r in country.get("release_dates", []) if r.get("certification")), None
+            )
+            if kind == "movie"
+            else country.get("rating")
+        )
         alternatives = data.get("alternative_titles", {})
         names = alternatives.get("titles", alternatives.get("results", []))
         ids = {"tmdb": str(data["id"])}
@@ -79,6 +89,29 @@ class Plugin(MetadataProvider):
             taxonomy_known="genres" in data or "genre_ids" in data,
             overview=data.get("overview", ""),
             release_date=date or None,
+            community_rating=data.get("vote_average") or None,
+            official_rating=official_rating or None,
+            collection=(data.get("belongs_to_collection") or {}).get("name"),
+            status={"Returning Series": "Continuing", "Ended": "Ended", "Canceled": "Ended"}.get(
+                data.get("status")
+            ),
+            studios=[s["name"] for s in data.get("production_companies", [])],
+            people=[
+                {"Name": p["name"], "Type": "Actor", "Role": p.get("character", "")}
+                for p in data.get("credits", {}).get("cast", [])
+            ]
+            + [
+                {"Name": p["name"], "Type": p["job"]}
+                for p in data.get("credits", {}).get("crew", [])
+                if p.get("job") in {"Director", "Writer", "Producer"}
+            ],
+            remote_trailers=[
+                {"Name": v.get("name", "Trailer"), "Url": "https://www.youtube.com/watch?v=" + v["key"]}
+                for v in data.get("videos", {}).get("results", [])
+                if v.get("site") == "YouTube"
+                and v.get("type") == "Trailer"
+                and re.fullmatch(r"[\w-]+", v.get("key", ""))
+            ],
             poster=f"https://image.tmdb.org/t/p/w342{data['poster_path']}"
             if data.get("poster_path")
             else None,
@@ -106,9 +139,9 @@ class Plugin(MetadataProvider):
             raise ProviderError("configuration", "Invalid TMDB identity")
         data = await self.get(
             f"/{kind}/{media_id}",
-            append_to_response="external_ids,alternative_titles,episode_groups"
+            append_to_response="external_ids,alternative_titles,episode_groups,credits,videos,content_ratings"
             if kind == "tv"
-            else "external_ids,alternative_titles",
+            else "external_ids,alternative_titles,credits,videos,release_dates",
         )
         item = self.item(data, kind)
         groups = [

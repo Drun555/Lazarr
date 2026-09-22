@@ -11,18 +11,24 @@ async function loadLibraries(silent=false){
   const generation=++libraryGeneration;
   if(!silent)$('#library-items').textContent='Загрузка библиотек…';
   const libraries=await api('/libraries');if(generation!==libraryGeneration)return;
-  state.libraries=libraries;renderLibraries();
+  state.libraries=libraries;renderLibraries(silent);
 }
-function renderLibraries(){
+function renderLibraries(silent=false){
   const libraries=state.libraries||[];
   $('#library-nav').innerHTML=libraries.map(l=>`<button class="ghost ${l.id===librarySelection?'active':''}" data-library="${esc(l.id)}" aria-pressed="${l.id===librarySelection}">${esc(l.name)} · ${l.items.length}</button>`).join('');
   const selected=libraries.find(l=>l.id===librarySelection);
-  $('#library-items').innerHTML=selected?.items.length?selected.items.map(m=>{
+  const tiles=selected?.items.length?selected.items.map(m=>{
     const download=m.download;
     const initial=esc((m.title||'?').trim().charAt(0).toUpperCase()||'?');
     const poster=`<span class="library-poster-frame"><span class="library-poster-empty" aria-hidden="true"><b>${initial}</b><small>Нет обложки</small></span>${m.poster?`<img src="${esc(posterUrl(m.poster))}" alt="" loading="lazy">`:''}</span>`;
     return `<button class="library-tile" data-library-media="${m.id}">${poster}<strong>${esc(m.title)}</strong><span class="fine">${m.year||'Год неизвестен'}${m.taxonomy_known?'':' · Классификация уточняется'}</span>${download?`<div class="library-tile-status"><div class="library-tile-download"><span>${(progressPercent(download.progress)).toFixed(1)}%</span><span>${bytes(download.download_rate)}/с</span></div>${progressBar(download.progress,`Загрузка ${m.title}`)}</div>`:''}</button>`;
   }).join(''):'<p class="muted">В этой библиотеке пока нет произведений.</p>';
+  const container=$('#library-items');
+  if(silent){
+    const next=document.createElement('div');next.className=container.className;next.innerHTML=tiles;
+    if(container.childNodes.length===next.childNodes.length){updateLibraryNodes(container,next);return;}
+  }
+  container.innerHTML=tiles;
 }
 function downloadDetails(download){
   if(!download)return '';
@@ -84,6 +90,21 @@ function renderEpisodeGroups(item){
   }
   return [...groups.entries()].sort(([left],[right])=>(left??-1)-(right??-1)).map(([season,episodes])=>renderSeason(item,season,episodes,seasonInfo.get(season))).join('');
 }
+function updateLibraryNodes(current, next){
+  if(current.nodeType!==next.nodeType||current.nodeName!==next.nodeName){current.replaceWith(next.cloneNode(true));return;}
+  if(current.nodeType===Node.TEXT_NODE){if(current.textContent!==next.textContent)current.textContent=next.textContent;return;}
+  if(current.nodeType!==Node.ELEMENT_NODE)return;
+  if(current.id&&!next.id)next.id=current.id;
+  for(const name of current.getAttributeNames())if(!next.hasAttribute(name)&&name!=='open')current.removeAttribute(name);
+  for(const name of next.getAttributeNames())if(name!=='open'&&current.getAttribute(name)!==next.getAttribute(name))current.setAttribute(name,next.getAttribute(name));
+  const oldChildren=[...current.childNodes],newChildren=[...next.childNodes];
+  if(oldChildren.length!==newChildren.length){
+    // Replace only the changed section; other episode images stay mounted.
+    current.replaceChildren(...newChildren.map(node=>node.cloneNode(true)));
+    return;
+  }
+  for(let i=0;i<oldChildren.length;i++)updateLibraryNodes(oldChildren[i],newChildren[i]);
+}
 async function openLibraryMedia(identity,silent=false){
   const taskOpen=$('#media-task')?.open??true;
   const logOpen=$('.task-search-log')?.open??false;
@@ -97,9 +118,13 @@ async function openLibraryMedia(identity,silent=false){
   if(item.task){state.tasks=state.tasks.filter(t=>t.media_id!==identity);state.tasks.push(item.task);}
   const meta=item.metadata;
   const calendar=[...item.episodes].sort((a,b)=>(a.air_date||'9999').localeCompare(b.air_date||'9999'));
-  $('#library-detail-body').innerHTML=`<div class="library-heading">${item.poster?`<img src="${esc(posterUrl(item.poster))}" alt="">`:''}<div><h2>${esc(item.title)}</h2><p class="fine">${esc(meta.original_title||'')} · ${item.year||'—'}</p><p>${esc(meta.overview||'Описание отсутствует.')}</p><p class="fine">${esc((meta.genres||[]).join(', '))}</p><p>Последний поиск: ${searchDate(item.last_search_at)}</p><p class="fine">Источник: ${esc(meta.provider||'tmdb')} · ID: ${esc(meta.id)}</p></div></div><details class="library-calendar"><summary>Календарь выхода · ${calendar.length}</summary><ol>${calendar.map(e=>`<li><time>${libraryDate(e.air_date)}</time> — ${e.episode==null?'Фильм':`S${e.season} · E${e.episode}`} · ${esc(e.title)}${e.air_date&&!e.released?' · Ожидается':''}</li>`).join('')}</ol></details><div class="library-episodes">${renderEpisodeGroups(item)||'<p>Сведения об эпизодах ещё не получены.</p>'}</div>`;
+  const next=document.createElement('div');
+  next.innerHTML=`<div class="library-heading">${item.poster?`<img src="${esc(posterUrl(item.poster))}" alt="">`:''}<div><h2>${esc(item.title)}</h2><p class="fine">${esc(meta.original_title||'')} · ${item.year||'—'}</p><p>${esc(meta.overview||'Описание отсутствует.')}</p><p class="fine">${esc((meta.genres||[]).join(', '))}</p><p>Последний поиск: ${searchDate(item.last_search_at)}</p><p class="fine">Источник: ${esc(meta.provider||'tmdb')} · ID: ${esc(meta.id)}</p></div></div><details class="library-calendar"><summary>Календарь выхода · ${calendar.length}</summary><ol>${calendar.map(e=>`<li><time>${libraryDate(e.air_date)}</time> — ${e.episode==null?'Фильм':`S${e.season} · E${e.episode}`} · ${esc(e.title)}${e.air_date&&!e.released?' · Ожидается':''}</li>`).join('')}</ol></details><div class="library-episodes">${renderEpisodeGroups(item)||'<p>Сведения об эпизодах ещё не получены.</p>'}</div>`;
+  next.querySelector('.library-episodes').insertAdjacentHTML('beforebegin',renderMediaTask(item,identity));
+  const body=$('#library-detail-body');
+  if(silent&&body.children.length===next.children.length)updateLibraryNodes(body,next);
+  else body.replaceChildren(...next.childNodes);
   const seasons=$$('.library-season');
-  $('.library-episodes').insertAdjacentHTML('beforebegin',renderMediaTask(item,identity));
   $('#media-task').open=taskOpen;
   if($('.task-search-log'))$('.task-search-log').open=logOpen;
   for(const node of seasons)if(openedSeasons.has(node.dataset.season))node.open=true;

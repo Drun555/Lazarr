@@ -43,6 +43,22 @@ def test_auth_csrf_accounts_and_ui(core):
         assert client.get("/api/v1/tasks").status_code == 401
 
 
+def test_theme_color_setting_persists_and_rejects_unknown_presets(core):
+    config, _, _, _ = core
+    with TestClient(create_app(config)) as client:
+        login(client)
+        settings = client.get("/api/v1/settings").json()
+        assert settings["theme_color"] == "purple"
+        settings["theme_color"] = "green"
+        assert client.put("/api/v1/settings", json=settings).status_code == 200
+        assert client.get("/api/v1/settings").json()["theme_color"] == "green"
+        assert '<html lang="ru" data-accent="green">' in client.get("/").text
+        assert '<html lang="ru" data-accent="green">' in client.get("/login").text
+        settings["theme_color"] = "invalid"
+        assert client.put("/api/v1/settings", json=settings).status_code == 422
+        assert client.get("/api/v1/settings").json()["theme_color"] == "green"
+
+
 def test_create_task_and_provider_secret_via_api(core, media, season, monkeypatch):
     config, db, _, _ = core
     with TestClient(create_app(config)) as client:
@@ -75,6 +91,17 @@ def test_create_task_and_provider_secret_via_api(core, media, season, monkeypatc
             == 200
         )
         assert "secret-value" not in client.get("/api/v1/providers").text
+        reveal = client.post("/api/v1/providers/tmdb/secrets/api_key/reveal")
+        assert reveal.status_code == 200
+        assert reveal.json() == {"value": "secret-value"}
+        assert reveal.headers["cache-control"] == "no-store"
+        assert client.post("/api/v1/providers/tmdb/secrets/base_url/reveal").status_code == 404
+        assert (
+            client.post(
+                "/api/v1/providers/tmdb/secrets/api_key/reveal", headers={"x-csrf-token": "bad"}
+            ).status_code
+            == 403
+        )
         assert client.get("/openapi.json").status_code == 200
 
 

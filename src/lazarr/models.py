@@ -1,6 +1,6 @@
 import time
 from typing import Any
-from sqlalchemy import Boolean, Float, ForeignKey, JSON, String, Text, UniqueConstraint, Index
+from sqlalchemy import BigInteger, Boolean, Float, ForeignKey, JSON, String, Text, UniqueConstraint, Index
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -30,6 +30,26 @@ class ConfigEntry(Base):
     __tablename__ = "settings"
     key: Mapped[str] = mapped_column(primary_key=True)
     value: Mapped[dict] = mapped_column(JSON)
+
+
+class TelegramUser(Base):
+    __tablename__ = "telegram_users"
+    __table_args__ = (UniqueConstraint("bot_id", "user_id"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    bot_id: Mapped[int] = mapped_column(BigInteger)
+    user_id: Mapped[int] = mapped_column(BigInteger)
+    chat_id: Mapped[int] = mapped_column(BigInteger)
+    name: Mapped[str] = mapped_column(default="")
+    username: Mapped[str] = mapped_column(default="")
+    status: Mapped[str] = mapped_column(default="pending")
+    requested_at: Mapped[float] = mapped_column(default=time.time)
+    reply: Mapped[str] = mapped_column(Text, default="")
+    reply_version: Mapped[int] = mapped_column(default=0)
+    retry_at: Mapped[float] = mapped_column(default=0)
+    delivery_error: Mapped[str] = mapped_column(default="")
+    approved_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    dialog: Mapped[dict] = mapped_column(JSON, default=dict)
+    inbox: Mapped[list] = mapped_column(JSON, default=list)
 
 
 class ProviderConfig(Base):
@@ -220,5 +240,39 @@ class PlaybackProgress(Base):
     position_ticks: Mapped[int] = mapped_column(default=0)
     played: Mapped[bool] = mapped_column(Boolean, default=False)
     play_count: Mapped[int] = mapped_column(default=0)
+    is_favorite: Mapped[bool] = mapped_column(Boolean, default=False)
+    likes: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    rating: Mapped[float | None] = mapped_column(Float, nullable=True)
     last_played_at: Mapped[float | None] = mapped_column(Float, nullable=True)
     updated_at: Mapped[float] = mapped_column(default=time.time)
+
+
+class PlaybackSession(Base):
+    """Durable playback history; session keys are scoped to an account and item."""
+
+    __tablename__ = "playback_sessions"
+    __table_args__ = (UniqueConstraint("user_id", "item_id", "session_key"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    item_id: Mapped[str] = mapped_column(String(36), index=True)
+    session_key: Mapped[str] = mapped_column(String(128))
+    source_id: Mapped[str] = mapped_column(String(36))
+    part_key: Mapped[str] = mapped_column(String(80), default="")
+    position_ticks: Mapped[int] = mapped_column(default=0)
+    completed: Mapped[bool] = mapped_column(Boolean, default=False)
+    failed: Mapped[bool] = mapped_column(Boolean, default=False)
+    started_at: Mapped[float] = mapped_column(default=time.time)
+    updated_at: Mapped[float] = mapped_column(default=time.time)
+    stopped_at: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+
+class VideoPlaylist(Base):
+    __tablename__ = "video_playlists"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    owner_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    name: Mapped[str] = mapped_column(String(256))
+    is_public: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Stable entry IDs preserve duplicate videos and survive reorder operations.
+    entries: Mapped[list] = mapped_column(JSON, default=list)
+    shares: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[float] = mapped_column(default=time.time)

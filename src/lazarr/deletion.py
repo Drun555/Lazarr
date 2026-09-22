@@ -21,6 +21,8 @@ from lazarr.models import (
     Season,
     Episode,
     PlaybackProgress,
+    PlaybackSession,
+    VideoPlaylist,
 )
 from lazarr.security import audit
 
@@ -371,7 +373,27 @@ async def delete_media(worker, identity, user_id, delete_files=False):
             playback_ids = {object_id("media", identity)} | {
                 object_id("episode", episode_id) for episode_id in episode_ids
             }
+            playback_ids.update(object_id("asset", asset_id) for asset_id in asset_ids)
+            # Public season numbers may differ from provider numbers (anime numbering).
+            season_prefix = object_id("season", identity)[:-8]
+            playback_ids.update(
+                db.scalars(
+                    select(PlaybackProgress.item_id).where(PlaybackProgress.item_id.startswith(season_prefix))
+                )
+            )
+            playback_ids.update(
+                object_id("season", identity, season.number)
+                for season in db.scalars(select(Season).where(Season.media_id == identity))
+            )
+            playback_ids.update(
+                db.scalars(select(PlaybackSession.source_id).where(PlaybackSession.item_id.in_(playback_ids)))
+            )
             db.execute(delete(PlaybackProgress).where(PlaybackProgress.item_id.in_(playback_ids)))
+            db.execute(delete(PlaybackSession).where(PlaybackSession.item_id.in_(playback_ids)))
+            for playlist in db.scalars(select(VideoPlaylist)):
+                playlist.entries = [
+                    entry for entry in playlist.entries if entry["item_id"] not in playback_ids
+                ]
             if season_ids:
                 db.execute(delete(Episode).where(Episode.season_id.in_(season_ids)))
                 db.execute(delete(Season).where(Season.id.in_(season_ids)))

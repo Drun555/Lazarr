@@ -33,14 +33,14 @@ class Plugin(ContentProvider):
         id="rutracker",
         name="Rutracker",
         kind="content",
-        version="1.0.3",
+        version="1.0.4",
         sdk=">=1.3,<2",
         config_fields=[
             ConfigField(name="base_url", label="URL форума", default="https://rutracker.org/forum"),
             ConfigField(name="username", label="Логин", secret=True),
             ConfigField(name="password", label="Пароль", secret=True),
             ConfigField(name="session_cookie", label="bb_session (необязательно)", secret=True),
-            ConfigField(name="flaresolverr_url", label="FlareSolverr URL (необязательно)"),
+            ConfigField(name="trawl_url", label="Trawl URL (необязательно)"),
         ],
         auth_methods=["password", "cookie", "captcha"],
         capabilities=["search", "torrent", "authentication"],
@@ -117,7 +117,7 @@ class Plugin(ContentProvider):
         if not self.ctx.state.get("authenticated"):
             result = await self.authenticate({})
             if result.status != "authenticated":
-                raise ProviderError("auth_required", "Авторизуйтесь в настройках Rutracker")
+                raise ProviderError("auth_required", result.message or "Проверьте учётные данные Rutracker")
 
     def require_page(self, response):
         text = page_text(response)

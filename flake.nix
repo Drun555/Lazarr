@@ -15,7 +15,7 @@
           python = pkgs.python3.withPackages (p: with p; [
             fastapi uvicorn sqlalchemy alembic httpx jinja2 pydantic python-multipart
             cryptography argon2-cffi beautifulsoup4 packaging pytest pytest-asyncio
-            libtorrent-rasterbar setuptools websockets
+            libtorrent-rasterbar setuptools websockets pillow langdetect
           ]);
         in {
           default = pkgs.mkShell {

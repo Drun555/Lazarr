@@ -315,3 +315,55 @@ def test_multiple_external_languages_remain_ambiguous(media):
     )
     result = Matcher().evaluate(c, [request(media)], files("Show.S01E01.mkv", "Show.S01E01.mka"))
     assert next(c for c in result.evaluations[0].criteria if c.field == "audio").result == MatchResult.UNKNOWN
+
+
+def test_labelled_episode_numbers():
+    for label in ("Ep01", "ep 01", "Episode 01", "E01", "Эпизод 01", "Серия 01", "Ep01v2"):
+        path = f"[ANE] Ore no Imouto - {label} [BDRip 1080p x264 FLAC].mkv"
+        assert episode_numbers(path) == (None, {1}, True)
+        assert episode_numbers(path, season_hint=2) == (2, {1}, False)
+    assert episode_numbers("Season 2/Show Ep03.mkv", season_hint=1) == (2, {3}, False)
+    assert episode_numbers("Show 2nd Season - Ep03.mkv") == (2, {3}, False)
+    assert episode_numbers("Show - Ep12 - True Route.mkv", season_hint=1) == (1, {12}, False)
+    for name in ("Tape01", "Ep01extra", "Ep10000", "Ep01 Ep02"):
+        assert episode_numbers(f"Show - {name}.mkv") == (None, set(), False)
+    assert episode_numbers("Season 2/Show Season 3 Ep01.mkv") == (None, set(), False)
+
+
+def test_oreimo_labelled_layout(media):
+    root = "Ore no Imouto [BD] [1080p] [Hi10P]"
+    title = "[ANE] Ore no Imouto ga Konna ni Kawaii Wake ga Nai"
+
+    def path(label, extension="mkv", folder=""):
+        return f"{root}/{folder}{title} - {label} [BDRip 1080p x264 FLAC].{extension}"
+
+    paths = files(
+        path("Ep01"),
+        path("Ep02"),
+        path("Ep12"),
+        path("Ep12 - True Route"),
+        path("Creditless Opening 01", folder="NC/"),
+        path("Ep15 Creditless Ending", folder="NC/"),
+        path("Full Length Opening", folder="NC/"),
+        path("Stardust Witch Meruru Opening", folder="NC/"),
+        path("Ep01", "flac", "RUS Sound [Eladiel]/"),
+        path("Ep02", "flac", "RUS Sound [Eladiel]/"),
+        path("Ep01", "ass", "RUS Subs [Dreamers Team & Hioxsov]/"),
+        path("Ep02", "ass", "RUS Subs [Dreamers Team & Hioxsov]/"),
+    )
+    item = candidate(title="Example Show TV-1 (2020) 1080p")
+    requests = [request(media, n, n) for n in (1, 2, 12, 15)]
+    report = Matcher().evaluate(item, requests, paths)
+    assert [r.binding.video_index if r.binding else None for r in report.evaluations] == [0, 1, None, None]
+    assert [t.file_index for t in report.evaluations[0].binding.tracks] == [8, 10]
+    assert [t.file_index for t in report.evaluations[1].binding.tracks] == [9, 11]
+    assert [b.subtask_id for b in report.plan.bindings] == [1, 2]
+    assert report.evaluations[2].result == MatchResult.UNKNOWN
+    assert report.evaluations[3].result == MatchResult.MISMATCH
+
+    # Unspecified seasons require an explicit absolute mapping, never an
+    # assumption that the release belongs to the requested season.
+    item.title = "Example Show (2020) 1080p"
+    assert Matcher().evaluate(item, requests[:1], paths).plan is None
+    requests[0].absolute_number = 1
+    assert Matcher().evaluate(item, requests[:1], paths).plan.bindings[0].video_index == 0

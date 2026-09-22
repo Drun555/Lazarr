@@ -40,6 +40,8 @@ class SearchProgress:
             "message": "Поиск ещё не запускался",
             "groups_total": 0,
             "groups_done": 0,
+            "pages_checked": 0,
+            "group_pages_checked": 0,
             "candidates_found": 0,
             "candidates_checked": 0,
             "candidates_filtered": 0,
@@ -88,6 +90,7 @@ class SearchProgress:
 
     def start_group(self, identities):
         self.active_tasks = identities
+        self.value["group_pages_checked"] = 0
         self.baseline = {key: self.value[key] for key in self.counters}
         for identity in identities:
             self.tasks[identity].update(running=True, state="running")
@@ -100,6 +103,7 @@ class SearchProgress:
         "candidates_failed",
         "errors",
         "search_requests",
+        "pages_checked",
     )
 
     def sync_tasks(self):

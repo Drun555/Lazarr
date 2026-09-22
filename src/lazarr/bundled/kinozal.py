@@ -66,14 +66,14 @@ class Plugin(ContentProvider):
         id="kinozal",
         name="Kinozal",
         kind="content",
-        version="1.0.0",
+        version="1.0.1",
         sdk=">=1.3,<2",
         config_fields=[
             ConfigField(name="base_url", label="URL зеркала Kinozal", default="https://kinozal.me"),
             ConfigField(name="username", label="Логин", secret=True),
             ConfigField(name="password", label="Пароль", secret=True),
             ConfigField(name="session_cookie", label="Cookies uid и pass (необязательно)", secret=True),
-            ConfigField(name="flaresolverr_url", label="FlareSolverr URL (необязательно)"),
+            ConfigField(name="trawl_url", label="Trawl URL (необязательно)"),
         ],
         auth_methods=["password", "cookie"],
         capabilities=["search", "torrent", "magnet", "authentication"],
@@ -105,7 +105,7 @@ class Plugin(ContentProvider):
             re.I,
         ):
             self.ctx.state["authenticated"] = False
-            raise ProviderError("auth_required", "Для доступа к Kinozal войдите в настройках провайдера")
+            raise ProviderError("auth_required", "Для доступа к Kinozal проверьте учётные данные провайдера")
         if re.search(r"раздача (?:не найдена|удалена)|нет раздачи|не существует", soup.get_text(" "), re.I):
             # Only tracker error panels, never arbitrary release descriptions/comments.
             if not soup.select_one("h1 a[href*='details.php'], td.nam"):

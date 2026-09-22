@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import json
 from pathlib import Path
@@ -196,6 +197,85 @@ async def test_grouped_subtasks_share_one_download(core, media, season, worker_s
         assert all(s.status == "done" for s in session.scalars(select(Subtask)))
         assert all(link.current for link in session.scalars(select(SubtaskAsset)))
         assert session.scalar(select(func.count()).select_from(LibraryAsset)) == 2
+
+
+async def test_search_uses_requested_season_year_and_stops_on_match(
+    core, media, season, worker_setup, monkeypatch
+):
+    _, _, _, service = core
+    worker, _, demo = worker_setup
+    for episode in season.episodes:
+        episode.air_date = "2022-01-01"
+    service.create_from_metadata(
+        CreateTask(media_id="42", kind="tv", season=1, episodes=[1]), media, season, 1
+    )
+    queries = []
+
+    async def search(self, query, cursor=None):
+        queries.append(query.text)
+        return SearchPage(
+            items=[candidate(provider="demo", id="season-year", title="Example Show (2022) 1080p")]
+        )
+
+    monkeypatch.setattr(demo, "search", search)
+    await worker.run_due()
+    assert queries == ["Example Show 2022"]
+
+
+async def test_search_falls_back_without_year_when_no_release_matches(
+    core, media, season, worker_setup, monkeypatch
+):
+    _, _, _, service = core
+    worker, _, demo = worker_setup
+    service.create_from_metadata(
+        CreateTask(media_id="42", kind="tv", season=1, episodes=[1]), media, season, 1
+    )
+    queries = []
+
+    async def search(self, query, cursor=None):
+        queries.append(query.text)
+        items = (
+            []
+            if query.text.endswith("2020")
+            else [candidate(provider="demo", id="fallback", title="Example Show (2020) 1080p")]
+        )
+        return SearchPage(items=items)
+
+    monkeypatch.setattr(demo, "search", search)
+    await worker.run_due()
+    assert queries == ["Example Show 2020", "Example Show"]
+
+
+async def test_movie_search_uses_movie_year_then_falls_back(core, media, worker_setup, monkeypatch):
+    _, _, _, service = core
+    worker, _, demo = worker_setup
+    movie = media.model_copy(update={"kind": "movie", "year": 1999})
+    service.create_from_metadata(CreateTask(media_id="42", kind="movie"), movie, None, 1)
+    queries = []
+
+    async def search(self, query, cursor=None):
+        queries.append(query.text)
+        return SearchPage(items=[])
+
+    monkeypatch.setattr(demo, "search", search)
+    await worker.run_due()
+    assert queries == ["Example Show 1999", "Example Show"]
+
+
+async def test_search_without_known_year_uses_plain_title_once(core, media, worker_setup, monkeypatch):
+    _, _, _, service = core
+    worker, _, demo = worker_setup
+    movie = media.model_copy(update={"kind": "movie", "year": None})
+    service.create_from_metadata(CreateTask(media_id="42", kind="movie"), movie, None, 1)
+    queries = []
+
+    async def search(self, query, cursor=None):
+        queries.append(query.text)
+        return SearchPage(items=[])
+
+    monkeypatch.setattr(demo, "search", search)
+    await worker.run_due()
+    assert queries == ["Example Show"]
 
 
 async def test_shared_download_survives_one_task_pause_and_stops_at_ratio(core, media, season, worker_setup):
@@ -441,6 +521,40 @@ async def test_reselecting_current_candidate_is_idempotent(core, media, season, 
         link = session.scalar(select(SubtaskAsset))
         assert link.current and not link.pending
         assert session.get(Subtask, 1).status == "done"
+
+
+async def test_manual_choice_interrupts_active_provider_search(
+    core, media, season, worker_setup, monkeypatch
+):
+    _, db, _, service = core
+    worker, engine, demo = worker_setup
+    task_id = service.create_from_metadata(
+        CreateTask(media_id="42", kind="tv", season=1, episodes=[1]), media, season, 1
+    )
+    torrent = json.dumps(["Show.S01E01.1080p.mkv"]).encode()
+    metadata = engine.inspect(DownloadSource(torrent=torrent))
+    item = candidate(provider="demo", id="manual-interrupt", evidence=[])
+    with db.session() as session:
+        sub = session.scalar(select(Subtask).where(Subtask.task_id == task_id))
+        request = service.request_for(session, sub)
+    report = worker.matcher.evaluate(item, [request], metadata.files, metadata.infohash)
+    worker._record(item, metadata, report)
+    choice = service.task_candidates(task_id)[0]["id"]
+    entered = asyncio.Event()
+    hold = asyncio.Event()
+
+    async def slow_search(self, *args, **kwargs):
+        entered.set()
+        await hold.wait()
+
+    monkeypatch.setattr(demo, "search", slow_search)
+    running = asyncio.create_task(worker.run_due(force=True))
+    await asyncio.wait_for(entered.wait(), 2)
+    await asyncio.wait_for(worker.choose(choice, 1), 2)
+    await asyncio.wait_for(running, 2)
+    assert not hold.is_set()
+    with db.session() as session:
+        assert session.scalar(select(SubtaskAsset).where(SubtaskAsset.subtask_id == sub.id)).pending
 
 
 async def test_manual_choice_can_apply_one_release_to_all_matching_episodes(
@@ -733,3 +847,46 @@ async def test_description_language_does_not_replace_unknown_probe(core, media, 
         link = session.get(SubtaskAsset, link.id)
         assert not link.current
         assert next(c for c in link.verification["criteria"] if c["field"] == "audio")["result"] == "UNKNOWN"
+
+
+async def test_unknown_external_subtitle_language_is_detected_and_saved(core, media, season, worker_setup):
+    _, db, _, service = core
+    worker, _, _ = worker_setup
+    service.create_from_metadata(
+        CreateTask(
+            media_id="42",
+            kind="tv",
+            season=1,
+            episodes=[1],
+            requirements=Requirements(subtitle_languages=["ru"]),
+        ),
+        media,
+        season,
+        1,
+    )
+    await worker.run_due()
+    with db.session() as session:
+        link = session.scalar(select(SubtaskAsset))
+        asset = session.get(MediaAsset, link.asset_id)
+        download = session.get(Download, asset.download_id)
+        subtitle = Path(download.save_path) / "episode.srt"
+        text = (
+            "Мы вместе идём на станцию. Поезд прибудет через несколько минут. "
+            "Пожалуйста, возьми билет и подожди рядом со входом. Наши друзья уже идут сюда. "
+            "Они нашли свободные места для всех и скоро мы отправимся в путешествие. "
+        ) * 3
+        subtitle.write_text("1\n00:00:01,000 --> 00:00:10,000\n" + text + "\n", encoding="utf-8")
+        link.preflight = {
+            **link.preflight,
+            "binding": {
+                **link.preflight["binding"],
+                "tracks": [{"kind": "subtitle", "language": "und", "file_index": 1, "path": subtitle.name}],
+            },
+        }
+        ids = link.id, asset.id, link.subtask_id
+    await worker._verify(*ids, download.save_path, {"complete": True})
+    with db.session() as session:
+        link = session.get(SubtaskAsset, ids[0])
+        assert link.preflight["binding"]["tracks"][0]["language"] == "ru"
+        assert link.preflight["binding"]["tracks"][0]["language_source"] == "content"
+        assert session.get(Subtask, ids[2]).missing_subtitle_languages == []

@@ -67,10 +67,15 @@ def episode_numbers(path, aliases=(), season_hint=None):
     if match:
         return int(match[1]), {int(match[2])}, False
     parent = re.search(r"\b(?:season|сезон|tv|тв|s)[ ._-]*(\d{1,3})\b", str(PurePosixPath(path).parent), re.I)
-    number = re.search(r"(?:episode|эпизод|серия|ep|e)[ ._-]*(\d{1,4})(?!\d)", name, re.I)
-    if parent and number:
-        return int(parent[1]), {int(number[1])}, False
     cleaned = re.sub(r"\[[^]]*\]|\([^)]*\)", " ", name)
+    # Explicit episode labels are also used without Sxx: "Ep01 [BDRip ...]"
+    # and "Ep12 - True Route". Require token boundaries (not "Tape01") and
+    # retain ambiguity when more than one episode label is present.
+    labelled = re.findall(
+        r"(?<!\w)(?:episode|эпизод|серия|ep|e)[ ._-]*(\d{1,4})(?:v\d+)?(?!\w)",
+        cleaned,
+        re.I,
+    )
     short = re.search(r"\b(?:s|tv|тв)[ ._-]*(\d{1,3})[ ._-]+(\d{1,4})\s*$", cleaned, re.I)
     if short:
         return int(short[1]), {int(short[2])}, False
@@ -84,6 +89,14 @@ def episode_numbers(path, aliases=(), season_hint=None):
             re.I,
         )
     }
+    if labelled:
+        if parent:
+            seasons.add(int(parent[1]))
+        numbers = {int(value) for value in labelled}
+        if len(seasons) > 1 or len(labelled) > 1:
+            return None, set(), False
+        season = next(iter(seasons)) if seasons else season_hint
+        return season, numbers, season is None
     trailing = re.search(r"(?:^|[ ._-])(\d{1,4})\s*$", cleaned)
     without_labels = re.sub(r"\b(?:part|часть)[ ._-]*\d+\b", " ", cleaned, flags=re.I)
     without_labels = re.sub(
@@ -116,7 +129,7 @@ def episode_numbers(path, aliases=(), season_hint=None):
 def file_language(path):
     # Directory names such as Audio/RUS are useful; codec and unrelated two-letter words are not.
     known = {"ru", "en", "ja", "uk", "de", "fr", "es", "it", "zh", "ko", "pt", "pl", "ar", "hi", "tr", "nl"}
-    values = {language(token) for token in re.findall(r"[a-zа-яё]+", path.lower())}
+    values = {language(token) for token in re.findall(r"[a-zа-яё0-9]+", path.lower())}
     values &= known
     return next(iter(values)) if len(values) == 1 else "und"
 

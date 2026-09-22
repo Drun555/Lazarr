@@ -181,6 +181,12 @@ def test_content_order_persists_and_validates_enabled_providers(core):
     restarted.configure("rutracker", {}, False)
     assert restarted.available("content") == ["nyaa"]
     restarted.set_content_order(["nyaa"])
+    restarted.set_content_order(["kinozal", "nyaa", "rutracker"])
+    assert [p["id"] for p in restarted.describe() if p.get("kind") == "content"] == [
+        "kinozal",
+        "nyaa",
+        "rutracker",
+    ]
     restarted.configure("rutracker", {}, True)
     assert restarted.available("content") == ["nyaa", "rutracker"]
 
