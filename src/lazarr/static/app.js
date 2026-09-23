@@ -25,6 +25,45 @@ async function api(path, method='GET', payload) {
 }
 async function submitForm(form, callback) { const button=$('button[type="submit"]',form); const error=$('.form-error',form); if(error)error.textContent=''; if(button)button.disabled=true; try { await callback(); } catch(exc) { if(error)error.textContent=exc.message; else toast(exc.message,true); } finally { if(button)button.disabled=false; } }
 function openModal(title, content) { $('#modal-title').textContent=title; $('#modal-body').innerHTML=content; if(!$('#modal').open)$('#modal').showModal(); }
+
+const backgroundTaskNames={'next-up':'NextUp · следующий эпизод','library-detail':'Подготовка карточки','trickplay':'Trickplay · превью перемотки','chapter':'Thumbnail · кадр главы','image':'Обработка изображения','subtitle':'Извлечение субтитров','subtitle-interval':'Подготовка субтитров','attachment':'Извлечение вложения','probe':'Анализ медиа'};
+Object.assign(backgroundTaskNames,{'catalog':'Каталог','latest':'Последние добавления','item-detail':'Карточка Jellyfin','subtitle-analysis':'Определение языка субтитров','metadata-refresh':'Обновление метаданных'});
+let backgroundTasksTimer,backgroundTasksGeneration=0;
+function renderBackgroundTasks(items,downloads=[]){
+  $('#background-downloads-count').textContent=downloads.length;
+  $('#background-downloads-list').innerHTML=downloads.length?downloads.map(download=>{
+    const rate=Math.max(0,Number(download.download_rate)||0),remaining=Number(download.eta);
+    const timing=download.state==='downloading'&&Number.isFinite(remaining)&&remaining>0?` · осталось ${eta(remaining)}`:'';
+    return `<article class="background-task-row"><div><strong>${esc(download.title)}</strong><p class="fine">${progressPercent(download.progress).toFixed(1)}% · ${bytes(rate)}/с${timing}</p>${progressBar(download.progress,'Прогресс загрузки')}</div>${statusPill(download.state)}</article>`;
+  }).join(''):'<p class="fine background-task-empty">Нет текущих загрузок</p>';
+  const running=items.filter(item=>item.state==='running'),queued=items.filter(item=>item.state==='queued');
+  $('#background-tasks-summary').textContent=`Выполняется: ${running.length} · В очереди: ${queued.length}`;
+  const groups=[['Выполняется',running],['В очереди',queued],['Недавние',items.filter(item=>['completed','failed'].includes(item.state))]];
+  $('#background-tasks-list').innerHTML=groups.map(([name,rows])=>`<section class="background-task-group"><h3>${name} <span class="count">${rows.length}</span></h3>${rows.length?rows.map(item=>{
+    const labels={running:'Выполняется',queued:'Ожидает',completed:'Завершено',failed:'Ошибка'};
+    const elapsed=item.started_at?Math.max(0,Math.round((item.finished_at||Date.now()/1000)-item.started_at)):0;
+    return `<div class="background-task-row"><span class="background-task-dot ${esc(item.state)}" aria-hidden="true"></span><div><strong>${esc(backgroundTaskNames[item.kind]||item.kind)}</strong><p class="fine">${esc(item.id.slice(0,8))} · ${item.lane==='catalog'?'Каталог':item.lane==='metadata'?'Метаданные':'Медиа'}${item.started_at?` · ${elapsed} с`:''}</p></div><span class="pill">${labels[item.state]}</span></div>`;
+  }).join(''):'<p class="fine background-task-empty">Нет задач</p>'}</section>`).join('');
+}
+async function pollBackgroundTasks(generation){
+  const dialog=$('#background-tasks-dialog');
+  if(!dialog?.open||generation!==backgroundTasksGeneration)return;
+  try{
+    if(!document.hidden){const data=await api('/background-tasks');if(dialog.open&&generation===backgroundTasksGeneration)renderBackgroundTasks(data.items||[],data.downloads||[]);}
+  }catch(error){if(dialog.open&&generation===backgroundTasksGeneration)$('#background-tasks-summary').textContent=`Не удалось обновить: ${error.message}`;}
+  if(dialog.open&&generation===backgroundTasksGeneration)backgroundTasksTimer=setTimeout(()=>pollBackgroundTasks(generation),1500);
+}
+$('#background-tasks-open')?.addEventListener('click',()=>{
+  const dialog=$('#background-tasks-dialog');if(dialog.open)return;
+  clearTimeout(backgroundTasksTimer);dialog.showModal();$('#background-tasks-summary').textContent='Загрузка…';pollBackgroundTasks(++backgroundTasksGeneration);
+});
+$('#background-tasks-close')?.addEventListener('click',()=>$('#background-tasks-dialog').close());
+$('#background-tasks-dialog')?.addEventListener('close',()=>{++backgroundTasksGeneration;clearTimeout(backgroundTasksTimer);});
+$('#background-tasks-dialog')?.addEventListener('click',event=>{
+  if(event.target!==event.currentTarget)return;
+  const rect=event.currentTarget.getBoundingClientRect();
+  if(event.clientX<rect.left||event.clientX>rect.right||event.clientY<rect.top||event.clientY>rect.bottom)event.currentTarget.close();
+});
 function requirementFields(values, prefix='') {
   const resolutions=[480,576,720,1080,1440,2160,4320];
   const options=selected=>resolutions.map(r=>`<option value="${r}" ${r===selected?'selected':''}>${r}p</option>`).join('');
@@ -366,7 +405,24 @@ document.addEventListener('submit', event=>{const form=event.target;if(!(form in
 document.addEventListener('htmx:configRequest',event=>{event.detail.headers['X-CSRF-Token']=csrf();});
 document.addEventListener('htmx:responseError',event=>{if(event.detail.xhr.status===401)location.assign('/login');else toast('Не удалось выполнить поиск',true);});
 document.addEventListener('keydown',event=>{if(event.key==='/'&&!['INPUT','TEXTAREA','SELECT'].includes(document.activeElement.tagName)&&$('#media-search')){event.preventDefault();$('[data-tab="search"]').click();$('#media-search').focus();}});
-if($('#task-list')){Promise.all([loadSettings(),refreshTasks(),refreshDownloads()]).catch(exc=>toast(exc.message,true));setInterval(()=>{if(document.hidden||$('#modal').open)return;refreshTasks().catch(()=>{});},10000);setInterval(async()=>{if(document.hidden)return;try{if($('#modal').open){await refreshCandidateSearchLog();return;}if(state.tab!=='library')return;await refreshDownloads();if(libraryMedia)await openLibraryMedia(libraryMedia,true);else await loadLibraries(true);}catch{}},3000);}
+function schedulePoll(work,interval){
+  let delay=interval;
+  const tick=async()=>{try{await work();delay=interval;}catch{delay=Math.min(delay*2,30000);}setTimeout(tick,delay);};
+  setTimeout(tick,interval);
+}
+if($('#task-list')){
+  const initial=Promise.all([loadSettings(),refreshTasks(),refreshDownloads()]).catch(exc=>toast(exc.message,true));
+  schedulePoll(async()=>{await initial;if(document.hidden||$('#modal').open||$('#background-tasks-dialog').open||state.tab!=='search')return;await refreshTasks();},10000);
+  schedulePoll(async()=>{
+    await initial;
+    if(document.hidden||$('#background-tasks-dialog').open||libraryRequests)return;
+    if($('#modal').open){await refreshCandidateSearchLog();return;}
+    if(state.tab!=='library')return;
+    await refreshDownloads();
+    if(libraryMedia){if(Date.now()-libraryDetailUpdated>=30000||!refreshLibraryProgress(state.downloads))await openLibraryMedia(libraryMedia,true);}
+    else await loadLibraries(true);
+  },3000);
+}
 
 document.addEventListener('error',event=>{if(event.target instanceof HTMLImageElement){event.target.classList.add('failed');event.target.alt='Обложка недоступна';}},true);
 if(location.hash==='#settings'&&$('[data-tab="settings"]'))$('[data-tab="settings"]').click();

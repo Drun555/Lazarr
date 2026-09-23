@@ -19,12 +19,15 @@ def main():
     serve = sub.add_parser("serve")
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", default=8000, type=int)
+    serve.add_argument("--log", choices=["standard", "performance"], default=None)
     args = parser.parse_args()
     if args.data_dir:
         os.environ["LAZARR_DATA_DIR"] = str(Path(args.data_dir).absolute())
     if args.command == "serve":
         import uvicorn
 
+        if args.log is not None:
+            os.environ["LAZARR_LOG"] = args.log
         uvicorn.run("lazarr.app:create_app", factory=True, host=args.host, port=args.port, workers=1)
         return
     config = RuntimeConfig(args.data_dir)

@@ -98,7 +98,10 @@ class Settings(BaseModel):
 
 
 class RuntimeConfig:
-    def __init__(self, data_dir: str | Path | None = None, background: bool = True):
+    def __init__(self, data_dir: str | Path | None = None, background: bool = True, log: str | None = None):
+        self.log = log if log is not None else os.getenv("LAZARR_LOG", "standard")
+        if self.log not in {"standard", "performance"}:
+            raise ValueError("LAZARR_LOG must be standard or performance")
         self.data_dir = Path(data_dir or os.getenv("LAZARR_DATA_DIR", "data")).absolute()
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.data_dir.chmod(0o700)

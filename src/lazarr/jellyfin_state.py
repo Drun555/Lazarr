@@ -390,7 +390,9 @@ def record_playback(ctx, user, item_id, payload, event, fallback_key):
 
 
 def next_up(ctx, user, params, batch=None):
-    from lazarr.jellyfin import episode_dto, library_ids, object_id
+    from lazarr.jellyfin import episode_dto, library_ids, object_id, parse_object_id, item_dto, query_result
+    from lazarr.jellyfin_catalog import project
+    from lazarr.models import Episode, Season
     from lazarr.library import library_kind
 
     parent = parameter(params, "parentId")
@@ -399,7 +401,28 @@ def next_up(ctx, user, params, batch=None):
 
     config = user_configuration(ctx, user, batch)
     with ctx.db.session() as db:
-        series = list(db.scalars(select(Media).where(Media.kind == "tv")))
+        query = select(Media).where(Media.kind == "tv")
+        if not series_id:
+            watched_ids = []
+            for row in db.scalars(
+                select(PlaybackProgress).where(
+                    PlaybackProgress.user_id == user.id, PlaybackProgress.last_played_at > 0
+                )
+            ):
+                try:
+                    kind, identity, _ = parse_object_id(row.item_id)
+                except HTTPException:
+                    continue
+                if kind == "episode":
+                    watched_ids.append(identity)
+            query = query.where(
+                Media.id.in_(
+                    select(Season.media_id)
+                    .join(Episode, Episode.season_id == Season.id)
+                    .where(Episode.id.in_(watched_ids))
+                )
+            )
+        series = list(db.scalars(query))
     candidates = []
     cutoff = parameter(params, "nextUpDateCutoff")
     if cutoff:
@@ -420,9 +443,13 @@ def next_up(ctx, user, params, batch=None):
             continue
         episodes = [
             item
-            for e in (batch.detail(media.id) if batch else ctx.library.detail(media.id))["episodes"]
+            for e in (
+                batch.detail(media.id, include_versions=False)
+                if batch
+                else ctx.library.detail(media.id, include_versions=False)
+            )["episodes"]
             if e["season"] and e["season"] > 0
-            for item in [episode_dto(ctx, media, e, user, batch=batch)]
+            for item in [episode_dto(ctx, media, e, user, batch=batch, lightweight=True)]
             if item and item.get("PlayAccess") == "Full"
         ]
         episodes.sort(key=lambda i: (i["ParentIndexNumber"], i["IndexNumber"], i["Id"]))
@@ -455,4 +482,12 @@ def next_up(ctx, user, params, batch=None):
             ):
                 candidates.append((latest, following))
     candidates.sort(key=lambda pair: (pair[0], pair[1]["Id"]), reverse=True)
-    return page([item for _, item in candidates], params)
+    result = query_result(
+        [item for _, item in candidates],
+        number_parameter(params, "startIndex", 0),
+        number_parameter(params, "limit"),
+    )
+    result["Items"] = [project(item_dto(ctx, item["Id"], user, batch), params) for item in result["Items"]]
+    if not bool_parameter(params, "enableTotalRecordCount", True):
+        result["TotalRecordCount"] = 0
+    return result

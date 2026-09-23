@@ -36,6 +36,26 @@ WORKERS = threading.BoundedSemaphore(2)
 EXTRA_KINDS = {"trailer", "extra", "special", "behindthescenes", "deleted", "featurette", "intro", "theme"}
 
 
+async def cached_async(ctx, paths, signature, extension, generate):
+    def lookup():
+        target = cache_target(ctx, paths, signature, extension)
+        return target, target.is_file()
+
+    # Warm subtitles/images must not wait behind a long trickplay render.
+    target, hit = await asyncio.to_thread(lookup)
+    if hit:
+        return target
+    return await ctx.background_tasks.run(
+        str(signature[0]), cached, ctx, paths, signature, extension, generate, key=target.name
+    )
+
+
+async def probe_async(ctx, path):
+    from lazarr.torrent import probe_file
+
+    return await ctx.background_tasks.run("probe", probe_file, path, ctx.config.ffprobe, key=str(path))
+
+
 def is_extra(part_key):
     return part_key.split(":")[0] in EXTRA_KINDS
 
@@ -43,7 +63,6 @@ def is_extra(part_key):
 async def discover_extras(ctx, media_id):
     """Index only explicitly named extras already downloaded in known torrents."""
     from lazarr.jellyfin import playable_path
-    from lazarr.torrent import probe_file
 
     names = {
         "trailers": "trailer",
@@ -98,7 +117,7 @@ async def discover_extras(ctx, media_id):
             path = playable_path(download, relative)
             if not path or path.stat().st_size != size:
                 continue
-            probe = await asyncio.to_thread(probe_file, path, ctx.config.ffprobe)
+            probe = await probe_async(ctx, path)
             video = next((s for s in probe.get("streams", []) if s.get("codec_type") == "video"), None)
             if not probe.get("ok") or not video:
                 continue
@@ -146,14 +165,19 @@ def ffmpeg(args, *, timeout=120):
         raise HTTPException(422, "Unable to extract this media resource")
 
 
-def cached(ctx, paths, signature, extension, generate):
-    """Bound concurrency, serialize identical work, publish only complete files."""
+def cache_target(ctx, paths, signature, extension):
     stamps = [(str(p.resolve()), p.stat().st_size, p.stat().st_mtime_ns) for p in paths]
     digest = hashlib.sha256(json.dumps([stamps, signature, 2]).encode()).hexdigest()
     root = ctx.config.data_dir / "cache" / "jellyfin-resources"
+    return root / (digest + "." + extension)
+
+
+def cached(ctx, paths, signature, extension, generate):
+    """Bound concurrency, serialize identical work, publish only complete files."""
+    target = cache_target(ctx, paths, signature, extension)
+    root = target.parent
     root.mkdir(parents=True, exist_ok=True)
-    target = root / (digest + "." + extension)
-    with LOCKS[int(digest[:8], 16) % len(LOCKS)]:
+    with LOCKS[int(target.stem[:8], 16) % len(LOCKS)]:
         if target.is_file():
             return target
         with WORKERS, tempfile.TemporaryDirectory(prefix="work-", dir=root) as work:
@@ -181,14 +205,12 @@ def cached(ctx, paths, signature, extension, generate):
 
 async def ensure_probe(ctx, playable):
     """Backfill chapters/attachments on access for assets probed by older versions."""
-    from lazarr.torrent import probe_file
-
     from lazarr.jellyfin import playable_path
 
     asset = playable["asset"]
     updated = dict(asset.probe)
     if "chapters" not in updated:
-        probe = await asyncio.to_thread(probe_file, playable["path"], ctx.config.ffprobe)
+        probe = await probe_async(ctx, playable["path"])
         if probe.get("ok"):
             updated = {**updated, **probe, "chapters": probe.get("chapters", [])}
     external = {}
@@ -212,7 +234,7 @@ async def ensure_probe(ctx, playable):
         if previous.get("stamp") == stamp:
             external[str(path)] = previous
             continue
-        probe = await asyncio.to_thread(probe_file, path, ctx.config.ffprobe)
+        probe = await probe_async(ctx, path)
         raw = next((s for s in probe.get("streams", []) if s.get("codec_type") == "audio"), None)
         if raw:
             external[str(path)] = {
@@ -410,9 +432,7 @@ async def chapter_image(ctx, playable, index):
             timeout=30,
         )
 
-    return await asyncio.to_thread(
-        cached, ctx, [playable["path"]], ["chapter", index, entries[index]], "jpg", generate
-    )
+    return await cached_async(ctx, [playable["path"]], ["chapter", index, entries[index]], "jpg", generate)
 
 
 async def resize_image(ctx, path, params):
@@ -450,7 +470,7 @@ async def resize_image(ctx, path, params):
         except (OSError, UnidentifiedImageError) as exc:
             raise HTTPException(422, "Invalid source image") from exc
 
-    return await asyncio.to_thread(cached, ctx, [path], ["image", sizes, fmt, quality], fmt, generate)
+    return await cached_async(ctx, [path], ["image", sizes, fmt, quality], fmt, generate)
 
 
 def auth_query(request, **extra):
@@ -572,7 +592,7 @@ async def subtitle(ctx, playable, item_id, source_id, index, fmt, request, start
         ]
         ffmpeg(args)
 
-    base = await asyncio.to_thread(cached, ctx, [path], ["subtitle", raw_index, fmt], fmt, generate)
+    base = await cached_async(ctx, [path], ["subtitle", raw_index, fmt], fmt, generate)
 
     def transform(output):
         output.write_bytes(base.read_bytes())
@@ -591,8 +611,8 @@ async def subtitle(ctx, playable, item_id, source_id, index, fmt, request, start
 
     output = base
     if start or end is not None or time_map:
-        output = await asyncio.to_thread(
-            cached, ctx, [base], ["subtitle-interval", start, end, copy, time_map], fmt, transform
+        output = await cached_async(
+            ctx, [base], ["subtitle-interval", start, end, copy, time_map], fmt, transform
         )
     return FileResponse(
         output,
@@ -667,9 +687,7 @@ def install(app, context, authenticated, check_user, authorize, playback):
                 ]
             )
 
-        output = await asyncio.to_thread(
-            cached, ctx, [playable["path"]], ["attachment", index], "bin", generate
-        )
+        output = await cached_async(ctx, [playable["path"]], ["attachment", index], "bin", generate)
         return FileResponse(
             output,
             media_type="application/octet-stream",
@@ -772,8 +790,8 @@ def install(app, context, authenticated, check_user, authorize, playback):
                     sheet.paste(image, (offset % 5 * 320, offset // 5 * info["Height"]))
             sheet.save(output, "JPEG", quality=80)
 
-        output = await asyncio.to_thread(
-            cached, context(request), [playable["path"]], ["trickplay", index, info], "jpg", generate
+        output = await cached_async(
+            context(request), [playable["path"]], ["trickplay", index, info], "jpg", generate
         )
         return FileResponse(output, media_type="image/jpeg")
 

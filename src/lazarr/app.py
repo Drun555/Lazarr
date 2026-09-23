@@ -45,6 +45,8 @@ from lazarr.torrent import LibtorrentEngine
 from lazarr.worker import Worker
 from lazarr.scheduler import Scheduler
 from lazarr.library import LibraryService
+from lazarr.background import BackgroundTasks
+from lazarr.preparation import MediaPreparation
 from lazarr.posters import poster_url, fetch_poster
 from lazarr.telegram import TelegramService, TelegramError
 
@@ -65,6 +67,8 @@ class Context:
         self.service = TaskService(self.db, self.plugins)
         self.service.settings()
         self.library = LibraryService(self.db, self.plugins, self.service)
+        self.background_tasks = BackgroundTasks()
+        self.preparation = MediaPreparation(self)
         self.engine_error = None
         try:
             self.engine = LibtorrentEngine(config.data_dir, config.listen_interfaces)
@@ -80,11 +84,13 @@ class Context:
         self.telegram.menu = TelegramMenu(self, self.telegram)
 
     async def close(self):
+        await self.preparation.close()
         await self.telegram.stop()
         if self.config.background:
             await self.scheduler.stop()
         elif self.engine:
             await asyncio.to_thread(self.engine.close)
+        await self.background_tasks.close()
         self.db.engine.dispose()
         fcntl.flock(self.lock_file.fileno(), fcntl.LOCK_UN)
         self.lock_file.close()
@@ -203,6 +209,7 @@ def create_app(config: RuntimeConfig | None = None):
         if config.background:
             await ctx.scheduler.start()
             await ctx.telegram.start()
+            ctx.preparation.start()
         try:
             yield
         finally:
@@ -231,6 +238,11 @@ def create_app(config: RuntimeConfig | None = None):
         if not request.url.path.startswith("/static/"):
             response.headers["Cache-Control"] = "no-store"
         return response
+
+    if config.log == "performance":
+        from lazarr.performance import PerformanceMiddleware
+
+        app.add_middleware(PerformanceMiddleware)
 
     @app.exception_handler(ValueError)
     async def invalid(request, exc):
@@ -262,6 +274,12 @@ def create_app(config: RuntimeConfig | None = None):
             "background": config.background,
             "search": ctx.scheduler.snapshot(),
         }
+
+    @app.get("/api/v1/background-tasks")
+    async def background_tasks(request: Request, user=Depends(authenticated)):
+        ctx = context(request)
+        downloads = await asyncio.to_thread(ctx.service.download_activity)
+        return {**ctx.background_tasks.snapshot(user.id), "downloads": downloads}
 
     @app.get("/login", response_class=HTMLResponse)
     async def login_page(request: Request):
@@ -800,18 +818,18 @@ def create_app(config: RuntimeConfig | None = None):
     @app.get("/api/v1/libraries")
     async def libraries(request: Request, user=Depends(permission("library"))):
         ctx = context(request)
-        await ctx.library.enrich()
         return await asyncio.to_thread(ctx.library.list)
 
     @app.get("/api/v1/libraries/media/{identity}")
     async def library_media(identity: int, request: Request, user=Depends(permission("library"))):
         ctx = context(request)
-        await ctx.library.enrich_media(identity)
-        result = await asyncio.to_thread(ctx.library.detail, identity)
+        result = await ctx.background_tasks.run(
+            "library-detail", ctx.library.detail, identity, lane="catalog"
+        )
         if result is None:
             raise HTTPException(404, "Произведение не найдено")
         task = next(
-            (t for t in await asyncio.to_thread(ctx.service.list_tasks) if t["media_id"] == identity),
+            iter(await asyncio.to_thread(ctx.service.list_tasks, identity)),
             None,
         )
         result["task"] = task

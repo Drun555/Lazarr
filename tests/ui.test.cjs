@@ -11,6 +11,52 @@ env.globals.update(language_labels=LABELS,language_aliases=ALIASES)
 print(env.get_template('index.html').render(csrf='test',user={'username':'test'}))
 `],{encoding:'utf8',env:{...process.env,PYTHONPATH:'src'}});
 const settle=()=>new Promise(resolve=>setImmediate(resolve));
+test('polling schedules the next request only after completion and backs off on errors',async()=>{
+  const {dom,w}=await setup();
+  try{
+    const pending=[];w.setTimeout=(callback,delay)=>{pending.push({callback,delay});return 1;};
+    let resolve,calls=0;
+    w.testSchedulePoll(()=>{calls++;return new Promise(done=>{resolve=done;});},10);
+    assert.equal(pending.length,1);
+    const running=pending.shift().callback();
+    assert.equal(calls,1);assert.equal(pending.length,0);
+    await settle();assert.equal(pending.length,0);
+    resolve();await running;assert.equal(pending.length,1);assert.equal(pending[0].delay,10);
+    pending.length=0;
+    w.testSchedulePoll(async()=>{throw new Error('offline');},10);
+    await pending.shift().callback();assert.equal(pending[0].delay,20);
+  }finally{dom.window.close();}
+});
+test('Tasks popup shows running and queued jobs without switching tabs',async()=>{
+  const {dom,w,document,errors}=await setup();
+  try{
+    const original=w.fetch;
+    w.fetch=async(url,options)=>url==='/api/v1/background-tasks'?{ok:true,status:200,json:async()=>({items:[
+      {id:'11111111',kind:'trickplay',lane:'media',state:'running',started_at:Date.now()/1000-5},
+      {id:'22222222',kind:'chapter',lane:'media',state:'queued',started_at:null},
+      {id:'33333333',kind:'<script>bad</script>',lane:'media',state:'failed',started_at:1,finished_at:2}
+    ],downloads:[
+      {id:1,title:'<img src=x onerror=alert(1)> Release',state:'downloading',progress:.42,download_rate:2048,eta:120},
+      {id:2,title:'Paused release',state:'paused',progress:.1,download_rate:0,eta:null}
+    ]})}:original(url,options);
+    document.querySelector('#background-tasks-open').click();await settle();await settle();
+    assert.equal(document.querySelector('#background-tasks-dialog').open,true);
+    assert.equal(document.querySelector('#tab-search').hidden,false);
+    assert.match(document.querySelector('#background-tasks-summary').textContent,/Выполняется: 1 · В очереди: 1/);
+    assert.match(document.querySelector('#background-tasks-list').textContent,/Trickplay/);
+    assert.match(document.querySelector('#background-tasks-list').textContent,/Thumbnail/);
+    assert.equal(document.querySelector('#background-tasks-list script'),null);
+    assert.equal(document.querySelector('#background-downloads-count').textContent,'2');
+    assert.match(document.querySelector('#background-downloads-list').textContent,/42\.0% · 2 КиБ\/с/);
+    assert.match(document.querySelector('#background-downloads-list').textContent,/На паузе/);
+    assert.equal(document.querySelector('#background-downloads-list [role=progressbar]').getAttribute('aria-valuenow'),'42.0');
+    assert.equal(document.querySelector('#background-downloads-list img'),null);
+    assert.doesNotMatch(document.querySelector('#background-tasks-list').textContent,/Paused release/);
+    document.querySelector('#background-tasks-close').click();
+    assert.equal(document.querySelector('#background-tasks-dialog').open,false);
+    assert.deepEqual(errors,[]);
+  }finally{dom.window.close();}
+});
 async function setup(){
   const dom=new JSDOM(html,{url:'http://localhost/',runScripts:'outside-only',pretendToBeVisual:true});
   const w=dom.window,errors=[],calls=[];
@@ -75,7 +121,7 @@ async function setup(){
     return {ok:true,status:200,json:async()=>result};
   };
   // A single realm matches ordered classic defer scripts in the real document.
-  w.eval(fs.readFileSync('src/lazarr/static/language-picker.js','utf8')+'\n'+fs.readFileSync('src/lazarr/static/library.js','utf8')+'\n'+fs.readFileSync('src/lazarr/static/app.js','utf8')+'\nwindow.testOpenLibraryMedia=openLibraryMedia;window.testRenderLibraries=renderLibraries;');
+  w.eval(fs.readFileSync('src/lazarr/static/language-picker.js','utf8')+'\n'+fs.readFileSync('src/lazarr/static/library.js','utf8')+'\n'+fs.readFileSync('src/lazarr/static/app.js','utf8')+'\nwindow.testOpenLibraryMedia=openLibraryMedia;window.testRenderLibraries=renderLibraries;window.testSchedulePoll=schedulePoll;window.testRefreshLibraryProgress=refreshLibraryProgress;');
   await settle();await settle();
   return {dom,w,document:w.document,errors,calls,setChoice:(files,selection,bindings={})=>{choiceFiles=files;choiceSelection=selection;choiceBindings=bindings},setMetadata:value=>metadata=value,setActivity:value=>activity=value,setProviders:value=>providers=value,setTasks:value=>{tasks.splice(0,tasks.length,...value)},setTaskChoices:value=>taskChoices=value,setLibrary:(groups,detail)=>{libraries=groups;libraryDetail=detail},updateLibraryDetail:update=>update(libraryDetail)};
 }
@@ -651,13 +697,18 @@ test('libraries switch categories, show details and delete media',async()=>{
     assert.equal(d.querySelector('.library-tile .progress').getAttribute('aria-valuenow'),'42.0');
     d.querySelector('[data-library-media="2"]').click();await settle();await settle();
     assert.equal(d.querySelector('#library-overview').hidden,true);
+    const detailRequests=calls.filter(call=>call.url==='/api/v1/libraries/media/2').length;
+    assert.equal(w.testRefreshLibraryProgress([{id:5,state:'downloading',stats:{progress:.77,download_rate:4096},ratio:.2,seed_ratio:1}]),true);
+    assert.equal(d.querySelector('[data-episode="14"] .progress').getAttribute('aria-valuenow'),'77.0');
+    assert.equal(calls.filter(call=>call.url==='/api/v1/libraries/media/2').length,detailRequests);
+    assert.equal(w.testRefreshLibraryProgress([{id:5,state:'seeding',stats:{progress:1}}]),false);
     const detail=d.querySelector('#library-detail-body').textContent;
     assert.match(detail,/Описание серии/);assert.match(detail,/Календарь выхода/);assert.match(detail,/14\. Пари/);
     assert.equal(d.querySelectorAll('.library-season').length,2);assert.match(d.querySelector('.library-season').textContent,/Сезон 1/);
     assert.equal(d.querySelector('[data-season="2"]').open,true);assert.ok(d.querySelector('[data-season="1"]').classList.contains('is-unrequested'));assert.ok(d.querySelector('.episode-still-empty'));
     assert.match(detail,/1080p/);assert.match(detail,/Японский/);assert.match(detail,/Selected release/);assert.match(detail,/Предварительные сведения/);
     assert.equal(d.querySelector('.episode-still').getAttribute('src'),'/api/v1/posters/tmdb/still.jpg');
-    assert.equal(d.querySelector('.episode-download .progress').getAttribute('aria-valuenow'),'42.0');
+    assert.equal(d.querySelector('.episode-download .progress').getAttribute('aria-valuenow'),'77.0');
     const still=d.querySelector('.episode-still');
     updateLibraryDetail(item=>{item.episodes[1].download.progress=.55;item.episodes[1].files[0].download.progress=.55;});
     await w.testOpenLibraryMedia(2,true);

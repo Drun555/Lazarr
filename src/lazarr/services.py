@@ -337,17 +337,80 @@ class TaskService:
             requirements=Requirements.model_validate(task.requirements),
         )
 
-    def list_tasks(self):
+    def download_activity(self):
+        """Compact live download summary for Tasks; no torrent plans or paths."""
         with self.db.session() as db:
-            result = []
-            for task in db.scalars(select(Task).order_by(Task.created_at.desc())):
-                media = db.get(Media, task.media_id)
-                memberships = list(
-                    db.scalars(
-                        select(TaskSeason).where(TaskSeason.task_id == task.id).order_by(TaskSeason.id)
+            rows = db.execute(
+                select(Download, Release.data)
+                .join(Release, Release.id == Download.release_id)
+                .where(Download.state.in_({"starting", "downloading", "paused", "error"}))
+                .order_by(Download.created_at, Download.id)
+            )
+            return [
+                {
+                    "id": download.id,
+                    "title": release.get("title") or f"Загрузка #{download.id}",
+                    "state": download.state,
+                    "progress": download.stats.get("progress", 0),
+                    "download_rate": download.stats.get("download_rate", 0),
+                    "eta": download.stats.get("eta"),
+                }
+                for download, release in rows
+                if not download.stats.get("complete")
+            ]
+
+    def list_tasks(self, media_id=None):
+        with self.db.session() as db:
+            query = select(Task).order_by(Task.created_at.desc())
+            if media_id is not None:
+                query = query.where(Task.media_id == media_id)
+            tasks = list(db.scalars(query))
+            if not tasks:
+                return []
+            task_ids = [task.id for task in tasks]
+            media_rows = {
+                m.id: m for m in db.scalars(select(Media).where(Media.id.in_({t.media_id for t in tasks})))
+            }
+            memberships_by_task = {}
+            memberships_all = list(
+                db.scalars(select(TaskSeason).where(TaskSeason.task_id.in_(task_ids)).order_by(TaskSeason.id))
+            )
+            for membership in memberships_all:
+                memberships_by_task.setdefault(membership.task_id, []).append(membership)
+            seasons_all = {
+                s.id: s
+                for s in db.scalars(
+                    select(Season).where(Season.id.in_({m.season_id for m in memberships_all}))
+                )
+            }
+            subs_query = select(Subtask).where(Subtask.task_id.in_(task_ids)).order_by(Subtask.id)
+            subs_by_task = {}
+            for sub in db.scalars(subs_query):
+                subs_by_task.setdefault(sub.task_id, []).append(sub)
+            sub_ids = select(Subtask.id).where(Subtask.task_id.in_(task_ids))
+            episodes = {
+                e.id: e
+                for e in db.scalars(
+                    select(Episode).where(
+                        Episode.id.in_(select(Subtask.episode_id).where(Subtask.task_id.in_(task_ids)))
                     )
                 )
-                seasons = {m.season_id: db.get(Season, m.season_id) for m in memberships}
+            }
+            assets = {}
+            for sub_id, asset in db.execute(
+                select(SubtaskAsset.subtask_id, MediaAsset)
+                .join(MediaAsset, MediaAsset.id == SubtaskAsset.asset_id)
+                .where(SubtaskAsset.subtask_id.in_(sub_ids), SubtaskAsset.current.is_(True))
+                .order_by(SubtaskAsset.id)
+            ):
+                assets.setdefault(sub_id, asset)
+            result = []
+            for task in tasks:
+                media = media_rows[task.media_id]
+                memberships = memberships_by_task.get(task.id, [])
+                seasons = {
+                    membership.season_id: seasons_all[membership.season_id] for membership in memberships
+                }
                 season_rows = sorted(
                     [
                         {
@@ -361,8 +424,8 @@ class TaskService:
                     key=lambda row: row["season"],
                 )
                 parts = []
-                for sub in db.scalars(select(Subtask).where(Subtask.task_id == task.id).order_by(Subtask.id)):
-                    episode = db.get(Episode, sub.episode_id) if sub.episode_id else None
+                for sub in subs_by_task.get(task.id, []):
+                    episode = episodes.get(sub.episode_id)
                     season = seasons.get(episode.season_id) if episode else None
                     membership = next(
                         (
@@ -375,11 +438,7 @@ class TaskService:
                         None,
                     )
                     numbering = membership.numbering if membership else {}
-                    current = db.scalar(
-                        select(MediaAsset)
-                        .join(SubtaskAsset, SubtaskAsset.asset_id == MediaAsset.id)
-                        .where(SubtaskAsset.subtask_id == sub.id, SubtaskAsset.current.is_(True))
-                    )
+                    current = assets.get(sub.id)
                     parts.append(
                         {
                             "id": sub.id,

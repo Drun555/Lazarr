@@ -1,4 +1,5 @@
-let librarySelection='series',libraryMedia=null,libraryItem=null,libraryGeneration=0;
+let librarySelection='series',libraryMedia=null,libraryItem=null,libraryGeneration=0,libraryDetailUpdated=0,libraryRequests=0;
+async function readLibrary(path){libraryRequests++;try{return await api(path);}finally{libraryRequests--;}}
 const loadedLibrarySeasons=new Set(),loadingLibrarySeasons=new Set();
 const libraryDate=value=>value?new Date(value.length===10?value+'T12:00:00':value).toLocaleDateString('ru-RU'):'Дата неизвестна';
 const searchDate=value=>value?new Date(value*1000).toLocaleString('ru-RU'):'Не записана';
@@ -10,7 +11,7 @@ function progressBar(value,label='Прогресс'){
 async function loadLibraries(silent=false){
   const generation=++libraryGeneration;
   if(!silent)$('#library-items').textContent='Загрузка библиотек…';
-  const libraries=await api('/libraries');if(generation!==libraryGeneration)return;
+  const libraries=await readLibrary('/libraries');if(generation!==libraryGeneration)return;
   state.libraries=libraries;renderLibraries(silent);
 }
 function renderLibraries(silent=false){
@@ -115,7 +116,8 @@ async function openLibraryMedia(identity,silent=false){
   $('#library-detail').hidden=false;$('#library-overview').hidden=true;
   $('#all-tasks-control').hidden=true;
   if(!silent)$('#library-detail-body').textContent='Загрузка…';
-  const item=await api(`/libraries/media/${identity}`);if(generation!==libraryGeneration)return;libraryItem=item;
+  const item=await readLibrary(`/libraries/media/${identity}`);if(generation!==libraryGeneration)return;libraryItem=item;
+  libraryDetailUpdated=Date.now();
   if(item.task){state.tasks=state.tasks.filter(t=>t.media_id!==identity);state.tasks.push(item.task);}
   const meta=item.metadata;
   const calendar=[...item.episodes].sort((a,b)=>(a.air_date||'9999').localeCompare(b.air_date||'9999'));
@@ -135,6 +137,24 @@ async function openLibraryMedia(identity,silent=false){
 async function refreshLibraryView(){
   if(state.tab!=='library')return;
   if(libraryMedia)await openLibraryMedia(libraryMedia,true);else await loadLibraries(true);
+}
+function refreshLibraryProgress(downloads){
+  if(!libraryItem)return false;
+  const byId=new Map(downloads.map(download=>[download.id,download]));
+  for(const episode of libraryItem.episodes){
+    for(const file of episode.files||[]){
+      if(!file.download)continue;
+      const current=byId.get(file.download.id);
+      if(!current||current.state!==file.download.state)return false;
+      const stats=current.stats||{},part=(stats.bindings||{})[String(file.download.subtask_id)]||{};
+      Object.assign(file.download,{progress:part.progress??stats.progress??0,eta:part.eta??stats.eta,download_rate:stats.download_rate||0,upload_rate:stats.upload_rate||0,seeds:stats.seeds||0,peers:stats.peers||0,error:stats.error,ratio:current.ratio,seed_ratio:current.seed_ratio});
+    }
+    const active=(episode.files||[]).map(file=>file.download).filter(Boolean);
+    episode.download=active.find(item=>['starting','downloading','paused'].includes(item.state))||active[0]||null;
+    const node=$$('.library-episode').find(node=>node.dataset.episode===String(episode.id));
+    if(node){const open=node.open,shell=document.createElement('div');shell.innerHTML=renderEpisode(episode);updateLibraryNodes(node,shell.firstElementChild);node.open=open;}
+  }
+  return true;
 }
 document.addEventListener('toggle',async event=>{
   const node=event.target;

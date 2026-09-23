@@ -1,6 +1,8 @@
 """Conservative language detection for untagged text subtitle streams."""
 
 import re
+import hashlib
+import json
 import subprocess
 from functools import lru_cache
 from pathlib import Path
@@ -13,6 +15,23 @@ from lazarr.languages import LABELS, language
 DetectorFactory.seed = 0
 TEXT_CODECS = {"subrip", "srt", "ass", "ssa", "webvtt", "mov_text", "text", "microdvd"}
 TEXT_SUFFIXES = {".srt", ".ass", ".ssa", ".vtt", ".sub"}
+
+
+def analysis_key(path, stream_index=None, codec=None):
+    try:
+        path = Path(path)
+        stat = path.stat()
+    except OSError:
+        return None
+    return hashlib.sha256(
+        json.dumps([str(path), stat.st_size, stat.st_mtime_ns, stream_index, codec, 1]).encode()
+    ).hexdigest()
+
+
+def stored_subtitle_language(asset, path, stream_index=None, codec=None):
+    """Read-only lookup: catalog requests must never launch ffmpeg."""
+    key = analysis_key(path, stream_index, codec)
+    return (asset.probe.get("subtitle_analysis") or {}).get(key, "und")
 
 
 def _subtitle_text(data):

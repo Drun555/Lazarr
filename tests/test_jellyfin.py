@@ -37,6 +37,16 @@ def test_jellyfin_detects_untagged_external_subtitles(core, media, season):
             "MediaStreams"
         ]
         external = next(stream for stream in streams if stream["Type"] == "Subtitle" and stream["IsExternal"])
+        assert external["Language"] == "und"
+        from lazarr.preparation import prepare_subtitles
+
+        with db.session() as session:
+            asset_id = session.scalar(select(MediaAsset.id))
+        prepare_subtitles(client.app.state.ctx, asset_id)
+        streams = client.post(f"/Items/{episode['Id']}/PlaybackInfo", json={}).json()["MediaSources"][0][
+            "MediaStreams"
+        ]
+        external = next(stream for stream in streams if stream["Type"] == "Subtitle" and stream["IsExternal"])
         assert external["Language"] == "eng"
     detail = LibraryService(db, core[2], core[3]).detail(1)
     file = next(episode for episode in detail["episodes"] if episode["files"])["files"][0]

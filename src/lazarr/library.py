@@ -1,6 +1,7 @@
 """Read model of shared Media, independent of task owners and download folders."""
 
 import asyncio
+import time
 from pathlib import Path
 from sqlalchemy import select
 from lazarr.models import (
@@ -15,11 +16,12 @@ from lazarr.models import (
     Download,
     Release,
     CandidateDecision,
+    ConfigEntry,
 )
 from lazarr.calendar import released
 from lazarr.matcher import classify_external_subtitles
 from lazarr.sdk import language
-from lazarr.subtitle_language import detect_subtitle_language
+from lazarr.subtitle_language import stored_subtitle_language
 
 LIBRARIES = [("series", "Сериалы"), ("movies", "Кино"), ("anime", "Аниме")]
 
@@ -38,7 +40,20 @@ class LibraryService:
         self.db, self.plugins, self.service = db, plugins, service
         self.refresh_lock = asyncio.Lock()
 
-    async def enrich(self):
+    def _reserve_refresh(self, kind, identity):
+        key = f"preparation.metadata.{kind}.{identity}"
+        now = time.time()
+        with self.db.session() as db:
+            row = db.get(ConfigEntry, key)
+            if row and row.value.get("retry_at", 0) > now:
+                return False
+            if row:
+                row.value = {"retry_at": now + 300}
+            else:
+                db.add(ConfigEntry(key=key, value={"retry_at": now + 300}))
+        return True
+
+    async def enrich(self, *, background=False):
         # Upgrade metadata saved before taxonomy was part of the SDK. Never infer
         # anime solely from a Japanese title (which could be live-action).
         async with self.refresh_lock:
@@ -52,6 +67,8 @@ class LibraryService:
                 ]
             for identity, provider_id, kind, external_id in pending:
                 if provider_id not in self.plugins.available("metadata"):
+                    continue
+                if background and not self._reserve_refresh("media", identity):
                     continue
                 try:
                     async with self.plugins.open(provider_id) as provider:
@@ -88,7 +105,7 @@ class LibraryService:
                     # Existing local library remains usable when metadata is offline.
                     continue
 
-    async def enrich_media(self, identity):
+    async def enrich_media(self, identity, *, background=False):
         """Refresh old episode rows once after the episode-metadata migration."""
         async with self.refresh_lock:
             with self.db.session() as db:
@@ -103,6 +120,8 @@ class LibraryService:
             if not media or provider_id not in self.plugins.available("metadata"):
                 return
             for season_id, number in pending:
+                if background and not self._reserve_refresh("season", season_id):
+                    continue
                 try:
                     async with self.plugins.open(provider_id) as provider:
                         info = await provider.get_season(external_id, number)
@@ -183,15 +202,21 @@ class LibraryService:
             "download": download,
         }
 
-    def detail(self, identity):
+    def detail(self, identity, episode_id=None, *, include_versions=True):
         with self.db.session() as db:
             media = db.get(Media, identity)
             if not media:
                 return None
             seasons = {s.id: s for s in db.scalars(select(Season).where(Season.media_id == identity))}
-            episodes = list(db.scalars(select(Episode).where(Episode.season_id.in_(seasons))))
+            episode_query = select(Episode).where(Episode.season_id.in_(seasons))
+            if episode_id is not None:
+                episode_query = episode_query.where(Episode.id == episode_id)
+            episodes = list(db.scalars(episode_query))
             tasks = {t.id: t for t in db.scalars(select(Task).where(Task.media_id == identity))}
-            subs = list(db.scalars(select(Subtask).where(Subtask.task_id.in_(tasks))))
+            sub_query = select(Subtask).where(Subtask.task_id.in_(tasks))
+            if episode_id is not None:
+                sub_query = sub_query.where(Subtask.episode_id == episode_id)
+            subs = list(db.scalars(sub_query))
             stored_versions = {}
             for link, asset, download, release in db.execute(
                 select(LibraryAsset, MediaAsset, Download, Release)
@@ -199,6 +224,8 @@ class LibraryService:
                 .join(Download, Download.id == MediaAsset.download_id)
                 .join(Release, Release.id == Download.release_id)
                 .where(LibraryAsset.media_id == identity)
+                .where(include_versions)
+                .where(LibraryAsset.episode_id == episode_id if episode_id is not None else True)
             ):
                 from lazarr.jellyfin_resources import is_extra
 
@@ -209,7 +236,15 @@ class LibraryService:
                 )
             task_versions = {}
             selected_candidates = {}
-            if subs:
+            if subs and include_versions:
+                decisions = {
+                    (row.subtask_id, row.release_id): row.id
+                    for row in db.scalars(
+                        select(CandidateDecision).where(
+                            CandidateDecision.subtask_id.in_([s.id for s in subs])
+                        )
+                    )
+                }
                 for link, asset, download, release in db.execute(
                     select(SubtaskAsset, MediaAsset, Download, Release)
                     .join(MediaAsset, MediaAsset.id == SubtaskAsset.asset_id)
@@ -217,12 +252,7 @@ class LibraryService:
                     .join(Release, Release.id == Download.release_id)
                     .where(SubtaskAsset.subtask_id.in_([s.id for s in subs]))
                 ):
-                    selected_candidates[link.subtask_id] = db.scalar(
-                        select(CandidateDecision.id).where(
-                            CandidateDecision.subtask_id == link.subtask_id,
-                            CandidateDecision.release_id == release.id,
-                        )
-                    )
+                    selected_candidates[link.subtask_id] = decisions.get((link.subtask_id, release.id))
                     task_versions.setdefault(link.subtask_id, []).append(
                         self._version(
                             link,
@@ -326,7 +356,7 @@ class LibraryService:
             if stream.get("detected_language"):
                 return language(stream["detected_language"])
             if video_path and stream.get("index") is not None:
-                return detect_subtitle_language(video_path, stream["index"], stream.get("codec_name"))
+                return stored_subtitle_language(asset, video_path, stream["index"], stream.get("codec_name"))
             return "und"
 
         tracks = [
@@ -352,7 +382,7 @@ class LibraryService:
                 if external and track["kind"] == "subtitle" and track_language == "und":
                     path = subtitle_path(track.get("path"))
                     if path:
-                        track_language = detect_subtitle_language(path)
+                        track_language = stored_subtitle_language(asset, path)
                 tracks.append(
                     {
                         "kind": track["kind"],
@@ -370,7 +400,7 @@ class LibraryService:
             if track.get("kind", "subtitle") == "subtitle" and track_language == "und":
                 path = subtitle_path(track.get("path"))
                 if path:
-                    track_language = detect_subtitle_language(path)
+                    track_language = stored_subtitle_language(asset, path)
             tracks.append(
                 {
                     "kind": track.get("kind", "subtitle"),
@@ -418,6 +448,7 @@ class LibraryService:
         downloaded = download.downloaded or 0
         return {
             "id": download.id,
+            "subtask_id": subtask_id,
             "state": download.state,
             "progress": min(1.0, max(0.0, float(part.get("progress", stats.get("progress", 0)) or 0))),
             "eta": part.get("eta", stats.get("eta")),

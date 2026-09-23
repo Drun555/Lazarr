@@ -5,6 +5,7 @@
     <button class="nav-tab active" data-tab="search">Поиск</button>
     <button class="nav-tab" data-tab="library">Библиотеки</button>
     <button class="nav-tab" data-tab="settings">Настройки</button>
+    <button class="nav-tab" id="background-tasks-open" aria-haspopup="dialog" aria-controls="background-tasks-dialog">Tasks</button>
   </nav>
   <div class="account"><span>{{ user.username }}</span><button class="icon-button" id="logout" title="Выйти" aria-label="Выйти">Выйти</button></div>
 </header>
@@ -88,4 +89,11 @@
   </section>
 </main>
 <dialog id="modal"><div class="modal-heading"><h2 id="modal-title"></h2><button class="icon-button" id="close-modal" aria-label="Закрыть">×</button></div><div id="modal-body"></div></dialog>
+<dialog id="background-tasks-dialog" aria-labelledby="background-tasks-title">
+  <div class="modal-heading"><div><p class="eyebrow">Фоновые процессы</p><h2 id="background-tasks-title">Tasks</h2></div><button type="button" class="icon-button" id="background-tasks-close" aria-label="Закрыть Tasks">×</button></div>
+  <p class="muted small">Текущие загрузки и фоновые вычисления. Обновляется автоматически.</p>
+  <p id="background-tasks-summary" class="fine" role="status" aria-live="polite"></p>
+  <section class="background-task-group" aria-labelledby="background-downloads-title"><h3 id="background-downloads-title">Загрузки <span class="count" id="background-downloads-count">0</span></h3><div id="background-downloads-list"></div></section>
+  <div id="background-tasks-list"></div>
+</dialog>
 {% endblock %}
