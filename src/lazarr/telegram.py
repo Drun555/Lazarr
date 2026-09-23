@@ -20,7 +20,12 @@ REPLIES = {
 
 
 class TelegramError(Exception):
-    def __init__(self, code=0, retry_after=30, message=None):
+    def __init__(self, code=0, retry_after=30, message=None, *, description=""):
+        self.not_modified = "message is not modified" in description.lower()
+        self.message_missing = any(
+            part in description.lower()
+            for part in ("message to edit not found", "message can't be edited", "message can not be edited")
+        )
         self.retry_after = max(1, retry_after)
         self.code = code
         self.message = message or {
@@ -81,7 +86,11 @@ class TelegramService:
                     message=f"Telegram вернул неожиданный ответ (HTTP {response.status_code})."
                 ) from None
             if not data.get("ok"):
-                raise TelegramError(data.get("error_code"), data.get("parameters", {}).get("retry_after", 30))
+                raise TelegramError(
+                    data.get("error_code"),
+                    data.get("parameters", {}).get("retry_after", 30),
+                    description=data.get("description", ""),
+                )
             return data["result"]
         except httpx.TimeoutException:
             raise TelegramError(
@@ -307,7 +316,7 @@ class TelegramService:
                 break
 
     async def deliver_notifications_once(self, token, bot_id):
-        from lazarr.notifications import PREFIX
+        from lazarr.notifications import PREFIX, DIGEST_PREFIX, COALESCE_SECONDS, digest_id, digest_text
 
         with self.db.session() as db:
             entries = list(
@@ -319,20 +328,79 @@ class TelegramService:
                     )
                 )
             )
+        groups = {}
         for entry in entries:
-            for identity, retry_at in entry.value["recipients"].items():
-                if retry_at > time.time():
-                    continue
-                with self.db.session() as db:
-                    user = db.get(TelegramUser, int(identity))
-                    allowed = user and user.bot_id == bot_id and user.status == "approved"
-                error = None
-                if allowed:
-                    try:
-                        await self.call(token, "sendMessage", chat_id=user.chat_id, text=entry.value["text"])
-                    except TelegramError as exc:
-                        error = exc
-                with self.db.session() as db:
+            for identity in entry.value["recipients"]:
+                groups.setdefault((digest_id(entry), identity), []).append(entry)
+        for (digest, identity), batch in groups.items():
+            now = time.time()
+            if any(e.value["recipients"][identity] > now for e in batch):
+                continue
+            if min(e.value.get("queued_at", 0) for e in batch) + COALESCE_SECONDS > now:
+                continue
+            key = DIGEST_PREFIX + digest
+            with self.db.session() as db:
+                user = db.get(TelegramUser, int(identity))
+                allowed = user and user.bot_id == bot_id and user.status == "approved"
+                saved = db.get(ConfigEntry, key)
+                state = dict(saved.value) if saved else {"bot_id": bot_id, "users": {}}
+                delivery = dict(state["users"].get(identity, {}))
+            items = dict(delivery.get("items", {}))
+            for entry in sorted(batch, key=lambda e: e.value.get("queued_at", 0)):
+                items[str(entry.value.get("subtask_id", entry.key))] = {
+                    k: v for k, v in entry.value.items() if k not in {"recipients", "pending"}
+                }
+            latest = batch[-1].value
+            text = digest_text(items)
+            if not any(row.get("event") for row in items.values()):
+                text = "\n\n".join(row["text"] for row in items.values())[:4000]
+            buttons = []
+            if latest.get("task_id"):
+                label = (
+                    "Выбрать раздачу"
+                    if any(row.get("event") == "selection" for row in items.values())
+                    else "Проверить серии"
+                )
+                buttons = [[{"text": label, "callback_data": f"notice:{digest}"}]]
+            error = None
+            message_id = delivery.get("message_id")
+            if allowed:
+                try:
+                    payload = dict(chat_id=user.chat_id, text=text, reply_markup={"inline_keyboard": buttons})
+                    if message_id and delivery.get("text") == text:
+                        result = None
+                    elif message_id:
+                        try:
+                            result = await self.call(
+                                token, "editMessageText", message_id=message_id, **payload
+                            )
+                        except TelegramError as exc:
+                            if exc.code == 400 and exc.not_modified:
+                                result = None
+                            elif exc.code == 400 and exc.message_missing:
+                                result = await self.call(token, "sendMessage", **payload)
+                            else:
+                                raise
+                    else:
+                        result = await self.call(token, "sendMessage", **payload)
+                    if isinstance(result, dict):
+                        message_id = result.get("message_id", message_id)
+                except TelegramError as exc:
+                    error = exc
+            with self.db.session() as db:
+                if allowed and not error:
+                    saved = db.get(ConfigEntry, key)
+                    state = dict(saved.value) if saved else {"bot_id": bot_id, "users": {}}
+                    state["users"] = {
+                        **state["users"],
+                        identity: {"items": items, "text": text, "message_id": message_id},
+                    }
+                    state.update(task_id=latest.get("task_id"), task_created_at=latest.get("task_created_at"))
+                    if saved:
+                        saved.value = state
+                    else:
+                        db.add(ConfigEntry(key=key, value=state))
+                for entry in batch:
                     current = db.get(ConfigEntry, entry.key)
                     if not current:
                         continue
@@ -342,8 +410,8 @@ class TelegramService:
                     else:
                         recipients.pop(identity, None)
                     current.value = {**current.value, "recipients": recipients, "pending": bool(recipients)}
-                if error and error.code == 429:
-                    return
+            if error and error.code == 429:
+                return
 
     async def deliver(self, token, bot_id):
         while True:

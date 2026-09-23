@@ -7,6 +7,63 @@ from fastapi import HTTPException
 from lazarr.background import BackgroundTasks
 
 
+@pytest.mark.parametrize("fail", [False, True])
+async def test_metadata_jobs_describe_real_work_and_skip_empty_checks(core, media, season, monkeypatch, fail):
+    from contextlib import asynccontextmanager
+    from types import SimpleNamespace
+    from lazarr.library import LibraryService
+    from lazarr.models import Media, Season
+
+    _, database, plugins, service = core
+    library = LibraryService(database, plugins, service)
+    queue = BackgroundTasks()
+    calls = []
+
+    async def get_media(*args):
+        active = queue.snapshot(1)["items"][0]
+        assert active["state"] == "running"
+        assert "Example Show" in active["detail"] and "Карточка" in active["detail"]
+        calls.append("media")
+        if fail:
+            raise ValueError("private provider error")
+        return media.model_copy(update={"taxonomy_known": True})
+
+    async def get_season(*args):
+        active = queue.snapshot(1)["items"][0]
+        assert active["state"] == "running"
+        assert active["detail"] == "Example Show · Сезон 1: данные эпизодов"
+        calls.append("season")
+        if fail:
+            raise ValueError("private provider error")
+        return season
+
+    @asynccontextmanager
+    async def provider(*args):
+        yield SimpleNamespace(get_media=get_media, get_season=get_season)
+
+    monkeypatch.setattr(plugins, "available", lambda kind: ["demo"])
+    monkeypatch.setattr(plugins, "open", provider)
+    try:
+        await library.enrich(background=True, observe=queue.observe)
+        assert queue.snapshot(1)["items"] == []
+        with database.session() as db:
+            row = Media(provider="demo", external_id="42", kind="tv", title="Example Show", metadata_json={})
+            db.add(row)
+            db.flush()
+            identity = row.id
+            db.add(Season(media_id=identity, number=1, title="Season 1", refreshed_at=0))
+        for _ in range(2):
+            await library.enrich(background=True, observe=queue.observe)
+            await library.enrich_media(identity, background=True, observe=queue.observe)
+        rows = queue.snapshot(1)["items"]
+        assert calls == ["media", "season"]
+        assert len(rows) == 2
+        assert all(row["state"] == ("failed" if fail else "completed") for row in rows)
+        assert "private" not in str(rows)
+    finally:
+        await queue.close()
+
+
 def test_download_activity_in_tasks_is_compact_and_excludes_finished(core):
     from fastapi.testclient import TestClient
     from lazarr.app import create_app

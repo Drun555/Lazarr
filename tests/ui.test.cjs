@@ -34,13 +34,21 @@ test('Tasks popup shows running and queued jobs without switching tabs',async()=
     w.fetch=async(url,options)=>url==='/api/v1/background-tasks'?{ok:true,status:200,json:async()=>({items:[
       {id:'11111111',kind:'trickplay',lane:'media',state:'running',started_at:Date.now()/1000-5},
       {id:'22222222',kind:'chapter',lane:'media',state:'queued',started_at:null},
-      {id:'33333333',kind:'<script>bad</script>',lane:'media',state:'failed',started_at:1,finished_at:2}
+      {id:'33333333',kind:'<script>bad</script>',lane:'media',state:'failed',started_at:1,finished_at:2},
+      {id:'44444444',kind:'metadata-refresh',lane:'metadata',state:'completed',started_at:1,finished_at:2,detail:'<img src=x> Сериал · Сезон 2: данные эпизодов'}
     ],downloads:[
       {id:1,title:'<img src=x onerror=alert(1)> Release',state:'downloading',progress:.42,download_rate:2048,eta:120},
       {id:2,title:'Paused release',state:'paused',progress:.1,download_rate:0,eta:null}
     ]})}:original(url,options);
     document.querySelector('#background-tasks-open').click();await settle();await settle();
     assert.equal(document.querySelector('#background-tasks-dialog').open,true);
+    assert.equal(document.querySelector('#background-tasks-open').textContent,'Процессы');
+    assert.equal(document.querySelector('#background-tasks-dialog').getAttribute('aria-label'),'Процессы');
+    assert.equal(document.querySelector('#background-tasks-title'),null);
+    assert.equal(document.querySelector('#background-tasks-summary').parentElement,document.querySelector('#background-tasks-close').parentElement);
+    assert.doesNotMatch(document.querySelector('#background-tasks-dialog').textContent,/Обновляется автоматически|Фоновые процессы/);
+    assert.match(document.querySelector('.background-task-detail').textContent,/Сериал · Сезон 2: данные эпизодов/);
+    assert.equal(document.querySelector('.background-task-detail img'),null);
     assert.equal(document.querySelector('#tab-search').hidden,false);
     assert.match(document.querySelector('#background-tasks-summary').textContent,/Выполняется: 1 · В очереди: 1/);
     assert.match(document.querySelector('#background-tasks-list').textContent,/Trickplay/);
@@ -727,6 +735,12 @@ test('libraries switch categories, show details and delete media',async()=>{
     assert.equal(d.querySelector('[data-library-media="2"]'),null);
     assert.deepEqual(errors,[]);
   }finally{dom.window.close();}
+});
+
+test('library theme uses flexible columns and retains the mobile two-column layout',()=>{
+  const css=fs.readFileSync('src/lazarr/static/material.css','utf8');
+  assert.match(css,/\.library-grid\s*\{\s*grid-template-columns:\s*repeat\(auto-fill,\s*minmax\(180px,\s*1fr\)\)/);
+  assert.match(css,/@media\s*\(max-width:\s*700px\)\s*\{[\s\S]*?\.library-grid\s*\{\s*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/);
 });
 
 test('silent library refresh keeps the tile grid class',async()=>{

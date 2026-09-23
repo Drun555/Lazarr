@@ -1,6 +1,7 @@
 """Read model of shared Media, independent of task owners and download folders."""
 
 import asyncio
+from contextlib import nullcontext
 import time
 from pathlib import Path
 from sqlalchemy import select
@@ -53,59 +54,67 @@ class LibraryService:
                 db.add(ConfigEntry(key=key, value={"retry_at": now + 300}))
         return True
 
-    async def enrich(self, *, background=False):
+    async def enrich(self, *, background=False, observe=None):
         # Upgrade metadata saved before taxonomy was part of the SDK. Never infer
         # anime solely from a Japanese title (which could be live-action).
         async with self.refresh_lock:
             with self.db.session() as db:
                 pending = [
-                    (m.id, m.provider, m.kind, m.external_id)
+                    (m.id, m.provider, m.kind, m.external_id, m.title)
                     for m in db.scalars(select(Media))
                     if not m.metadata_json.get("taxonomy_known")
                     or "backdrop" not in m.metadata_json
                     or "people" not in m.metadata_json
                 ]
-            for identity, provider_id, kind, external_id in pending:
+            for identity, provider_id, kind, external_id, title in pending:
                 if provider_id not in self.plugins.available("metadata"):
                     continue
                 if background and not self._reserve_refresh("media", identity):
                     continue
                 try:
-                    async with self.plugins.open(provider_id) as provider:
-                        item = await provider.get_media(kind, external_id)
-                    with self.db.session() as db:
-                        row = db.get(Media, identity)
-                        if row:
-                            fields = [
-                                "backdrop",
-                                "people",
-                                "studios",
-                                "community_rating",
-                                "official_rating",
-                                "status",
-                                "tags",
-                                "remote_trailers",
-                                "collection",
-                            ]
-                            if item.taxonomy_known:
-                                fields.extend(
-                                    [
-                                        "genre_ids",
-                                        "genres",
-                                        "origin_countries",
-                                        "original_language",
-                                        "taxonomy_known",
-                                    ]
-                                )
-                            row.metadata_json = {
-                                **row.metadata_json,
-                                **{field: getattr(item, field) for field in fields},
-                            }
+                    with (
+                        observe(
+                            "metadata-refresh",
+                            detail=f"{title} · Карточка: фон, участники, рейтинги и классификация",
+                        )
+                        if observe
+                        else nullcontext()
+                    ):
+                        async with self.plugins.open(provider_id) as provider:
+                            item = await provider.get_media(kind, external_id)
+                        with self.db.session() as db:
+                            row = db.get(Media, identity)
+                            if row:
+                                fields = [
+                                    "backdrop",
+                                    "people",
+                                    "studios",
+                                    "community_rating",
+                                    "official_rating",
+                                    "status",
+                                    "tags",
+                                    "remote_trailers",
+                                    "collection",
+                                ]
+                                if item.taxonomy_known:
+                                    fields.extend(
+                                        [
+                                            "genre_ids",
+                                            "genres",
+                                            "origin_countries",
+                                            "original_language",
+                                            "taxonomy_known",
+                                        ]
+                                    )
+                                row.metadata_json = {
+                                    **row.metadata_json,
+                                    **{field: getattr(item, field) for field in fields},
+                                }
                 except Exception:
                     # Existing local library remains usable when metadata is offline.
                     continue
 
-    async def enrich_media(self, identity, *, background=False):
+    async def enrich_media(self, identity, *, background=False, observe=None):
         """Refresh old episode rows once after the episode-metadata migration."""
         async with self.refresh_lock:
             with self.db.session() as db:
@@ -123,12 +132,17 @@ class LibraryService:
                 if background and not self._reserve_refresh("season", season_id):
                     continue
                 try:
-                    async with self.plugins.open(provider_id) as provider:
-                        info = await provider.get_season(external_id, number)
-                    with self.db.session() as db:
-                        current = db.get(Season, season_id)
-                        if current:
-                            self.service._upsert_season(db, identity, info)
+                    with (
+                        observe("metadata-refresh", detail=f"{media.title} · Сезон {number}: данные эпизодов")
+                        if observe
+                        else nullcontext()
+                    ):
+                        async with self.plugins.open(provider_id) as provider:
+                            info = await provider.get_season(external_id, number)
+                        with self.db.session() as db:
+                            current = db.get(Season, season_id)
+                            if current:
+                                self.service._upsert_season(db, identity, info)
                 except Exception:
                     # A metadata outage must not hide the local library.
                     continue

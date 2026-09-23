@@ -241,6 +241,11 @@ class TelegramMenu:
                 await self.bot.call(token, "answerCallbackQuery", callback_query_id=callback["id"])
             except TelegramError:
                 pass
+            if callback.get("data", "").startswith("notice:"):
+                from lazarr.telegram_selection import NotificationSelection
+
+                await NotificationSelection(self).open(identity, callback)
+                return
             raw = callback.get("data", "").split(":", 1)
             if (
                 len(raw) != 2
@@ -288,6 +293,11 @@ class TelegramMenu:
             else:
                 action = "search"
         stage = dialog.get("stage")
+        if action.startswith("notice-"):
+            from lazarr.telegram_selection import NotificationSelection
+
+            await NotificationSelection(self).handle(identity, dialog, action)
+            return
         if action == "search":
             self.save(identity, {"stage": "query"}, "Введите наименование кино или сериала")
         elif action.startswith("page:") and stage == "results":

@@ -588,6 +588,54 @@ async def test_manual_choice_interrupts_active_provider_search(
         assert session.scalar(select(SubtaskAsset).where(SubtaskAsset.subtask_id == sub.id)).pending
 
 
+@pytest.mark.parametrize(
+    "second_status,rejected,matched",
+    [
+        ("needs_selection", False, [1, 2]),
+        ("starting", False, [1]),
+        ("done", False, [1]),
+        ("needs_selection", True, [1]),
+    ],
+)
+async def test_notification_choice_expands_only_to_unselected_matching_episodes(
+    core, media, season, worker_setup, second_status, rejected, matched
+):
+    _, db, _, service = core
+    worker, engine, _ = worker_setup
+    task_id = service.create_from_metadata(CreateTask(media_id="42", kind="tv", season=1), media, season, 1)
+    metadata = engine.inspect(
+        DownloadSource(torrent=json.dumps(["Show.S01E01.1080p.mkv", "Show.S01E02.1080p.mkv"]).encode())
+    )
+    item = candidate(provider="demo", id="notice-batch", evidence=[])
+    with db.session() as session:
+        subs = list(session.scalars(select(Subtask).order_by(Subtask.id)))
+        for sub in subs:
+            sub.status = "needs_selection"
+        subs[1].status = second_status
+        requests = [service.request_for(session, sub) for sub in subs]
+    worker._record(item, metadata, worker.matcher.evaluate(item, requests, metadata.files, metadata.infohash))
+    with db.session() as session:
+        decision = session.scalar(select(CandidateDecision).where(CandidateDecision.subtask_id == 1))
+        identity = decision.id
+        if rejected:
+            session.scalar(
+                select(CandidateDecision).where(CandidateDecision.subtask_id == 2)
+            ).action = "rejected"
+    args = dict(task_id=task_id, pending_only=True, expected_subtask=1)
+    coverage = await worker.choose_all(identity, 1, preview=True, **args)
+    assert coverage["subtask_ids"] == matched
+    assert engine.plans == {}
+    result = await worker.choose_all(identity, 1, allowed_subtasks=coverage["subtask_ids"], **args)
+    assert result["selected"] == len(matched)
+    assert [b.subtask_id for b in engine.plans[metadata.infohash].bindings] == matched
+    with db.session() as session:
+        assert session.get(Subtask, 3).status == "needs_selection"
+        if 2 not in matched:
+            assert session.get(Subtask, 2).status == second_status
+    with pytest.raises(ValueError, match="Выбор устарел"):
+        await worker.choose_all(identity, 1, allowed_subtasks=matched, **args)
+
+
 async def test_manual_choice_can_apply_one_release_to_all_matching_episodes(
     core, media, season, worker_setup
 ):

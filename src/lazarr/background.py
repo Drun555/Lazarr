@@ -82,7 +82,7 @@ class BackgroundTasks:
         return {"items": rows, "capacity": self.capacity}
 
     @contextmanager
-    def observe(self, kind):
+    def observe(self, kind, *, detail=None):
         """Track an async, IO-bound maintenance phase without moving its event loop."""
         with self.lock:
             if self.closed or len(self.active) >= self.capacity:
@@ -96,6 +96,7 @@ class BackgroundTasks:
                 "started_at": time.time(),
                 "finished_at": None,
                 "owner_id": None,
+                "detail": detail,
             }
             self.active[job["id"]] = job
         state = "failed"

@@ -11,7 +11,8 @@ from test_worker import worker_setup  # noqa: F401
 
 
 @pytest.fixture
-def notifications(core):
+def notifications(core, monkeypatch):
+    monkeypatch.setattr("lazarr.notifications.COALESCE_SECONDS", 0)
     config, db, _, _ = core
     with db.session() as session:
         session.add(ConfigEntry(key="telegram", value={"enabled": True, "bot_id": 123}))
@@ -101,6 +102,7 @@ async def test_durable_delivery_retry_and_authorization(core, media, season, not
 
     async def send(token, method, **payload):
         sent.append(payload)
+        return {"message_id": 200}
 
     restarted.call = send
     await restarted.deliver_notifications_once("fake", 456)
@@ -119,6 +121,47 @@ async def test_durable_delivery_retry_and_authorization(core, media, season, not
     assert all(not r.value["pending"] for r in events(db))
 
 
+async def test_episode_burst_is_one_durable_edited_digest(core, media, season, notifications, monkeypatch):
+    from lazarr.notifications import DIGEST_PREFIX
+
+    _, db, _, service = core
+    service.create_from_metadata(CreateTask(media_id="42", kind="tv", season=1), media, season, 1)
+    calls = []
+
+    async def call(token, method, **payload):
+        calls.append((method, payload))
+        return {"message_id": 201}
+
+    notifications.call = call
+    with db.session() as session:
+        for sub in session.scalars(select(Subtask)):
+            queue_episode_notification(session, sub, "found", "Release")
+    monkeypatch.setattr("lazarr.notifications.COALESCE_SECONDS", 8)
+    await notifications.deliver_notifications_once("fake", 123)
+    assert calls == []
+    monkeypatch.setattr("lazarr.notifications.COALESCE_SECONDS", 0)
+    await notifications.deliver_notifications_once("fake", 123)
+    assert len(calls) == 1
+    assert "Раздача найдена: 3" in calls[0][1]["text"]
+    assert "S01E01" in calls[0][1]["text"] and "S01E03" in calls[0][1]["text"]
+    assert len(calls[0][1]["reply_markup"]["inline_keyboard"][0][0]["callback_data"].encode()) <= 64
+    with db.session() as session:
+        for sub in session.scalars(select(Subtask)):
+            queue_episode_notification(session, sub, "selection")
+    restarted = TelegramService(db, notifications.secrets, False)
+    restarted.call = call
+    await restarted.deliver_notifications_once("fake", 123)
+    assert len(calls) == 2 and calls[1][0] == "editMessageText"
+    assert calls[1][1]["message_id"] == 201
+    assert "Требуется выбор раздачи: 3" in calls[1][1]["text"]
+    assert "Раздача найдена" not in calls[1][1]["text"]
+    with db.session() as session:
+        assert (
+            len(list(session.scalars(select(ConfigEntry).where(ConfigEntry.key.startswith(DIGEST_PREFIX)))))
+            == 1
+        )
+
+
 def test_disabled_and_rolled_back_events_are_not_queued(core, media, season, notifications):
     _, db, _, service = core
     service.create_from_metadata(
@@ -134,3 +177,57 @@ def test_disabled_and_rolled_back_events_are_not_queued(core, media, season, not
         cfg.value = {**cfg.value, "enabled": False}
         queue_episode_notification(session, session.get(Subtask, 1), "found")
     assert events(db) == []
+
+
+@pytest.mark.parametrize(
+    "description,expected",
+    [
+        ("Bad Request: message is not modified", ["editMessageText"]),
+        ("Bad Request: message to edit not found", ["editMessageText", "sendMessage"]),
+        ("Bad Request: invalid keyboard", ["editMessageText"]),
+    ],
+)
+async def test_digest_edit_errors_do_not_spam_new_messages(
+    core, media, season, notifications, description, expected
+):
+    _, db, _, service = core
+    service.create_from_metadata(CreateTask(media_id="42", kind="tv", season=1), media, season, 1)
+
+    async def sent(*args, **kwargs):
+        return {"message_id": 300}
+
+    notifications.call = sent
+    with db.session() as session:
+        queue_episode_notification(session, session.get(Subtask, 1), "found")
+    await notifications.deliver_notifications_once("fake", 123)
+    with db.session() as session:
+        queue_episode_notification(session, session.get(Subtask, 1), "selection")
+    calls = []
+
+    async def edit(token, method, **kwargs):
+        calls.append(method)
+        if method == "editMessageText":
+            raise TelegramError(400, description=description)
+        return {"message_id": 301}
+
+    notifications.call = edit
+    await notifications.deliver_notifications_once("fake", 123)
+    assert calls == expected
+    assert any(row.value["pending"] for row in events(db)) == ("invalid keyboard" in description)
+
+
+async def test_episode_selection_guard_rejects_stale_and_foreign_decisions(core, media, season, worker_setup):
+    from lazarr.models import CandidateDecision
+
+    _, db, _, service = core
+    worker, _, _ = worker_setup
+    service.create_from_metadata(CreateTask(media_id="42", kind="tv", season=1), media, season, 1)
+    await worker.run_due()
+    with db.session() as session:
+        decision = session.scalar(select(CandidateDecision))
+        decision_id, sub_id = decision.id, decision.subtask_id
+        session.get(Subtask, sub_id).status = "starting"
+    with pytest.raises(ValueError, match="Выбор устарел"):
+        await worker.choose(decision_id, 1, expected_subtask=sub_id)
+    with pytest.raises(ValueError, match="Выбор устарел"):
+        await worker.choose(decision_id, 1, expected_subtask=sub_id + 100)

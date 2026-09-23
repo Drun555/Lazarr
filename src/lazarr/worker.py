@@ -731,12 +731,31 @@ class Worker:
                     allowed.add(evaluation.subtask_id)
             return release.id, allowed
 
-    async def choose(self, decision_id, user_id, reject=False, video_index=None, track_indices=None):
+    async def choose(
+        self,
+        decision_id,
+        user_id,
+        reject=False,
+        video_index=None,
+        track_indices=None,
+        *,
+        expected_subtask=None,
+    ):
         async with self.selection_lock:
             with self.db.session() as db:
                 decision = db.get(CandidateDecision, decision_id)
                 if not decision:
                     raise ValueError("Кандидат не найден")
+                if expected_subtask is not None:
+                    current = db.get(Subtask, decision.subtask_id)
+                    if (
+                        decision.subtask_id != expected_subtask
+                        or not current
+                        or current.status != "needs_selection"
+                        or decision.action in {"rejected", "selected"}
+                        or db.get(Task, current.task_id).paused
+                    ):
+                        raise ValueError("Выбор устарел: раздача уже выбрана или задача изменена.")
                 if reject:
                     decision.action = "rejected"
                     audit(db, user_id, "candidate.reject", str(decision_id))
@@ -815,7 +834,18 @@ class Worker:
                 db.get(CandidateDecision, decision_id).report = evaluation.model_dump(mode="json")
                 audit(db, user_id, "candidate.select", str(decision_id), {"override": True})
 
-    async def choose_all(self, decision_id, user_id, season_number=None, task_id=None):
+    async def choose_all(
+        self,
+        decision_id,
+        user_id,
+        season_number=None,
+        task_id=None,
+        *,
+        pending_only=False,
+        expected_subtask=None,
+        preview=False,
+        allowed_subtasks=None,
+    ):
         """Apply one release to matching episodes in the task or one season."""
         async with self.selection_lock:
             with self.db.session() as db:
@@ -826,10 +856,31 @@ class Worker:
                 task = db.get(Task, source_subtask.task_id)
                 if task_id is not None and task.id != task_id:
                     raise ValueError("Кандидат не относится к указанной задаче")
+                if pending_only and (
+                    task.paused
+                    or source_subtask.id != expected_subtask
+                    or source_subtask.status != "needs_selection"
+                    or decision.action in {"rejected", "selected"}
+                ):
+                    raise ValueError("Выбор устарел: раздача уже выбрана или задача изменена.")
                 release = db.get(Release, decision.release_id)
                 release_id, infohash = release.id, release.revision
                 candidate = Candidate.model_validate(release.data)
                 subtasks_query = select(Subtask).where(Subtask.task_id == task.id)
+                if pending_only:
+                    occupied = select(SubtaskAsset.subtask_id).where(
+                        SubtaskAsset.current | SubtaskAsset.pending
+                    )
+                    rejected = select(CandidateDecision.subtask_id).where(
+                        CandidateDecision.release_id == release_id, CandidateDecision.action == "rejected"
+                    )
+                    subtasks_query = subtasks_query.where(
+                        Subtask.status == "needs_selection",
+                        Subtask.id.not_in(occupied),
+                        Subtask.id.not_in(rejected),
+                    )
+                    if allowed_subtasks is not None:
+                        subtasks_query = subtasks_query.where(Subtask.id.in_(allowed_subtasks))
                 if season_number is not None:
                     subtasks_query = (
                         subtasks_query.join(Episode, Subtask.episode_id == Episode.id)
@@ -837,6 +888,8 @@ class Worker:
                         .where(Season.number == season_number)
                     )
                 subtasks = list(db.scalars(subtasks_query.order_by(Subtask.id)))
+                if pending_only and expected_subtask not in {sub.id for sub in subtasks}:
+                    raise ValueError("Выбор устарел: серия уже обрабатывается.")
                 if not subtasks:
                     raise ValueError("В сезоне нет серий этой задачи")
                 current_ids = set(
@@ -865,8 +918,58 @@ class Worker:
             eligible = [
                 evaluation
                 for evaluation in report.evaluations
-                if evaluation.binding is not None and evaluation.result != MatchResult.MISMATCH
+                if evaluation.binding is not None
+                and (
+                    evaluation.result != MatchResult.MISMATCH
+                    or (pending_only and evaluation.subtask_id == expected_subtask)
+                )
             ]
+            if pending_only:
+                with self.db.session() as db:
+                    occupied = set(
+                        db.scalars(
+                            select(SubtaskAsset.subtask_id).where(SubtaskAsset.current | SubtaskAsset.pending)
+                        )
+                    )
+                    waiting = set(
+                        db.scalars(
+                            select(Subtask.id).where(
+                                Subtask.task_id == task.id, Subtask.status == "needs_selection"
+                            )
+                        )
+                    )
+                    rejected = set(
+                        db.scalars(
+                            select(CandidateDecision.subtask_id).where(
+                                CandidateDecision.release_id == release_id,
+                                CandidateDecision.action == "rejected",
+                            )
+                        )
+                    )
+                    if db.get(Task, task.id).paused:
+                        raise ValueError("Задача на паузе")
+                    eligible = [e for e in eligible if e.subtask_id in waiting - occupied - rejected]
+                    if expected_subtask not in {e.subtask_id for e in eligible}:
+                        raise ValueError("Выбор устарел: серия уже обрабатывается.")
+            if preview:
+                with self.db.session() as db:
+                    labels = [
+                        f"S{s:02d}E{e:02d}"
+                        for s, e in db.execute(
+                            select(Season.number, Episode.number)
+                            .select_from(Subtask)
+                            .join(Episode, Episode.id == Subtask.episode_id)
+                            .join(Season, Season.id == Episode.season_id)
+                            .where(Subtask.id.in_([e.subtask_id for e in eligible]))
+                            .order_by(Season.number, Episode.number)
+                        )
+                    ]
+                return {
+                    "subtask_ids": [e.subtask_id for e in eligible],
+                    "episodes": labels,
+                    "selected": len(eligible),
+                    "total": len(subtasks),
+                }
             if not eligible:
                 raise ValueError("Раздачу не удалось сопоставить ни с одной серией задачи")
             bindings = [evaluation.binding for evaluation in eligible]

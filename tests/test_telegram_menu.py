@@ -114,6 +114,89 @@ async def test_wizard_collage_pagination_languages_task_and_automatic_result(men
     assert any(method == "editMessageText" for method, _ in calls)
 
 
+async def test_notification_opens_paginated_episode_choice_with_confirmation(
+    menu, media, season, monkeypatch
+):
+    from lazarr.notifications import queue_episode_notification
+    from lazarr.services import CreateTask
+
+    wizard, bot, event, progress, calls = menu
+    monkeypatch.setattr("lazarr.notifications.COALESCE_SECONDS", 0)
+    task_id = wizard.ctx.service.create_from_metadata(
+        CreateTask(media_id="42", kind="tv", season=1), media, season, 1
+    )
+    with wizard.ctx.db.session() as db:
+        cfg = db.get(ConfigEntry, "telegram")
+        cfg.value = {**cfg.value, "enabled": True}
+        for sub in db.scalars(select(Subtask).where(Subtask.task_id == task_id)):
+            sub.status = "needs_selection"
+            queue_episode_notification(db, sub, "selection")
+    await bot.deliver_notifications_once("token", 123)
+    payload = calls[-1][1]
+    notice = {
+        "callback_query": {
+            "id": "notice",
+            "from": {"id": 1001},
+            "message": {"message_id": len(calls) + 100, "chat": {"id": 1001, "type": "private"}},
+            "data": payload["reply_markup"]["inline_keyboard"][0][0]["callback_data"],
+        }
+    }
+    await event(raw=notice)
+    assert wizard.user(1).dialog["stage"] == "notice_episodes"
+    selected = []
+    choices = [
+        {
+            "id": i,
+            "candidate": {"title": f"Release {i}", "size": 1024**3, "seeds": 10},
+            "action": "",
+            "report": {"binding": {"video_index": 0}, "criteria": []},
+        }
+        for i in range(1, 9)
+    ]
+    monkeypatch.setattr(wizard.ctx.service, "candidates", lambda sub: choices)
+
+    async def choose(
+        decision, actor, *, expected_subtask, task_id, pending_only, preview=False, allowed_subtasks=None
+    ):
+        assert pending_only and task_id
+        if preview:
+            return {"subtask_ids": [1, 2], "episodes": ["S01E01", "S01E02"], "selected": 2, "total": 3}
+        assert allowed_subtasks == [1, 2]
+        selected.append((decision, actor, expected_subtask))
+        with wizard.ctx.db.session() as db:
+            for sub_id in allowed_subtasks:
+                db.get(Subtask, sub_id).status = "starting"
+        return {"selected": 2, "total": 2, "skipped": 0}
+
+    wizard.ctx.worker = SimpleNamespace(choose_all=choose)
+    await event(action="notice-episode:1")
+    assert wizard.user(1).dialog["stage"] == "notice_candidates"
+    await event(action="notice-cpage:1")
+    assert wizard.user(1).dialog["choice_page"] == 1
+    await event(action="notice-choice:7")
+    assert not selected
+    assert wizard.user(1).dialog["stage"] == "notice_confirm"
+    assert any("2 из 3" in p.get("text", "") and "S01E02" in p.get("text", "") for _, p in calls)
+    old = await event(action="notice-confirm:7")
+    assert selected == [(7, 1, 1)]
+    await event(raw=old)
+    assert len(selected) == 1
+    await event(action="notice-back")
+    buttons = wizard.user(1).dialog["view"]["buttons"]
+    assert not any(action == "notice-episode:1" for row in buttons for _, action in row)
+    assert not any(action == "notice-episode:2" for row in buttons for _, action in row)
+    assert any(action == "notice-episode:3" for row in buttons for _, action in row)
+    before = wizard.user(1).dialog
+    forged = {
+        "callback_query": {
+            **notice["callback_query"],
+            "message": {"message_id": 9999, "chat": {"id": 1001, "type": "private"}},
+        }
+    }
+    await event(raw=forged)
+    assert wizard.user(1).dialog == before
+
+
 async def test_candidates_are_scoped_and_only_offered_choices_can_be_selected(menu, monkeypatch):
     wizard, bot, event, progress, calls = menu
     await event("/search")

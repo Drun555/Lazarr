@@ -1,10 +1,39 @@
 """Durable episode notifications, queued in the worker's transaction."""
 
+import hashlib
+import time
 from sqlalchemy import select
 
 from lazarr.models import ConfigEntry, Episode, Media, Season, Task, TelegramUser
 
 PREFIX = "telegram.notification."
+DIGEST_PREFIX = "telegram.digest."
+COALESCE_SECONDS = 8
+
+
+def digest_id(entry):
+    return hashlib.sha256(entry.key.rsplit(".", 2)[0].encode()).hexdigest()[:24]
+
+
+def digest_text(items):
+    """Bounded summary; each episode appears once, with its latest event."""
+    rows = list(items.values())
+    title = rows[0].get("media_title", "Обновления Lazarr")[:200]
+    lines = [title]
+    for event, label in [("selection", "Требуется выбор раздачи"), ("found", "Раздача найдена")]:
+        group = [row for row in rows if row.get("event") == event]
+        if not group:
+            continue
+        lines.append(f"\n{label}: {len(group)}")
+        for row in group[:12]:
+            lines.append(row.get("episode_label", row.get("text", ""))[:110])
+        if len(group) > 12:
+            lines.append(f"…и ещё {len(group) - 12}")
+        if event == "found":
+            releases = list(dict.fromkeys(row["release_title"] for row in group if row.get("release_title")))
+            for title in releases[:3]:
+                lines.append(f"Раздача: {title[:180]}")
+    return "\n".join(lines)[:4000]
 
 
 def queue_episode_notification(db, sub, event, release_title=None):
@@ -39,6 +68,14 @@ def queue_episode_notification(db, sub, event, release_title=None):
             key=key,
             value={
                 "bot_id": bot_id,
+                "task_id": task.id,
+                "task_created_at": task.created_at,
+                "subtask_id": sub.id,
+                "episode_label": f"S{season.number:02d}E{episode.number:02d} — {episode.title or ''}",
+                "media_title": media.title,
+                "release_title": release_title,
+                "event": event,
+                "queued_at": time.time(),
                 "text": text[:4096],
                 "recipients": {str(identity): 0 for identity in recipients},
                 "pending": True,

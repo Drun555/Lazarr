@@ -104,15 +104,15 @@ class MediaPreparation:
     async def _metadata_loop(self):
         while True:
             try:
-                with self.ctx.background_tasks.observe("metadata-refresh"):
-                    await self.ctx.library.enrich(background=True)
+                await self.ctx.library.enrich(background=True, observe=self.ctx.background_tasks.observe)
                 with self.ctx.db.session() as db:
                     media_ids = list(
                         db.scalars(select(Season.media_id).where(Season.refreshed_at == 0).distinct())
                     )
                 for identity in media_ids:
-                    with self.ctx.background_tasks.observe("metadata-refresh"):
-                        await self.ctx.library.enrich_media(identity, background=True)
+                    await self.ctx.library.enrich_media(
+                        identity, background=True, observe=self.ctx.background_tasks.observe
+                    )
             except asyncio.CancelledError:
                 raise
             except Exception:

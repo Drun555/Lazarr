@@ -375,12 +375,14 @@ input[role="switch"]{appearance:none;width:36px;height:21px;border-radius:12px;p
 #telegram-panel{margin-top:24px}#telegram-panel h3{margin-top:24px}
 @media(max-width:600px){.telegram-user{align-items:flex-start;flex-direction:column}#telegram-panel>.section-heading{align-items:flex-start;flex-direction:column;gap:12px}}
 :root #background-tasks-dialog{width:min(620px,calc(100vw - 32px));max-height:85dvh;overflow:auto}
+.background-tasks-heading>p{margin:0}
 .background-task-group{margin-top:24px}
 .background-task-group h3{display:flex;align-items:center;gap:8px;font-size:14px}
 .background-task-row{display:flex;align-items:center;gap:12px;padding:14px 0;border-bottom:1px solid var(--line)}
 .background-task-row>div{flex:1;min-width:0}
 .background-task-row strong{font-size:14px;overflow-wrap:anywhere}
 .background-task-row p{margin:5px 0 0}
+.background-task-detail{font-size:13px;overflow-wrap:anywhere}
 .background-task-row .pill{flex-shrink:0;font-size:11px}
 .background-task-dot{width:8px;height:8px;flex-shrink:0;border-radius:50%;background:var(--muted)}
 .background-task-dot.running{background:var(--accent);box-shadow:0 0 0 4px color-mix(in srgb,var(--accent) 15%,transparent)}

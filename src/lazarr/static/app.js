@@ -42,7 +42,7 @@ function renderBackgroundTasks(items,downloads=[]){
   $('#background-tasks-list').innerHTML=groups.map(([name,rows])=>`<section class="background-task-group"><h3>${name} <span class="count">${rows.length}</span></h3>${rows.length?rows.map(item=>{
     const labels={running:'Выполняется',queued:'Ожидает',completed:'Завершено',failed:'Ошибка'};
     const elapsed=item.started_at?Math.max(0,Math.round((item.finished_at||Date.now()/1000)-item.started_at)):0;
-    return `<div class="background-task-row"><span class="background-task-dot ${esc(item.state)}" aria-hidden="true"></span><div><strong>${esc(backgroundTaskNames[item.kind]||item.kind)}</strong><p class="fine">${esc(item.id.slice(0,8))} · ${item.lane==='catalog'?'Каталог':item.lane==='metadata'?'Метаданные':'Медиа'}${item.started_at?` · ${elapsed} с`:''}</p></div><span class="pill">${labels[item.state]}</span></div>`;
+    return `<div class="background-task-row"><span class="background-task-dot ${esc(item.state)}" aria-hidden="true"></span><div><strong>${esc(backgroundTaskNames[item.kind]||item.kind)}</strong>${item.detail?`<p class="background-task-detail">${esc(item.detail)}</p>`:''}<p class="fine">${esc(item.id.slice(0,8))} · ${item.lane==='catalog'?'Каталог':item.lane==='metadata'?'Метаданные':'Медиа'}${item.started_at?` · ${elapsed} с`:''}</p></div><span class="pill">${labels[item.state]}</span></div>`;
   }).join(''):'<p class="fine background-task-empty">Нет задач</p>'}</section>`).join('');
 }
 async function pollBackgroundTasks(generation){
