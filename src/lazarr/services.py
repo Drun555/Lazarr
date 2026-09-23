@@ -337,6 +337,30 @@ class TaskService:
             requirements=Requirements.model_validate(task.requirements),
         )
 
+    def selection_activity(self):
+        """One cheap query; never inspect torrents while polling the top bar."""
+        with self.db.session() as db:
+            return [
+                {
+                    "id": sub.id,
+                    "task_id": task.id,
+                    "title": media.title,
+                    "season": season.number,
+                    "episode": episode.number,
+                    "episode_title": episode.title,
+                    "paused": task.paused,
+                }
+                for sub, task, media, episode, season in db.execute(
+                    select(Subtask, Task, Media, Episode, Season)
+                    .join(Task, Task.id == Subtask.task_id)
+                    .join(Media, Media.id == Task.media_id)
+                    .join(Episode, Episode.id == Subtask.episode_id)
+                    .join(Season, Season.id == Episode.season_id)
+                    .where(Subtask.status == "needs_selection")
+                    .order_by(Media.title, Season.number, Episode.number, Subtask.id)
+                )
+            ]
+
     def download_activity(self):
         """Compact live download summary for Tasks; no torrent plans or paths."""
         with self.db.session() as db:

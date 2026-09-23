@@ -42,7 +42,10 @@ test('Tasks popup shows running and queued jobs without switching tabs',async()=
     ]})}:original(url,options);
     document.querySelector('#background-tasks-open').click();await settle();await settle();
     assert.equal(document.querySelector('#background-tasks-dialog').open,true);
-    assert.equal(document.querySelector('#background-tasks-open').textContent,'Процессы');
+    assert.match(document.querySelector('#background-tasks-open').textContent,/^Процессы/);
+    assert.equal(document.querySelector('#process-pill').hidden,false);
+    assert.match(document.querySelector('#process-tooltip').textContent,/Идёт загрузка: 1/);
+    assert.match(document.querySelector('#process-tooltip').textContent,/Trickplay/);
     assert.equal(document.querySelector('#background-tasks-dialog').getAttribute('aria-label'),'Процессы');
     assert.equal(document.querySelector('#background-tasks-title'),null);
     assert.equal(document.querySelector('#background-tasks-summary').parentElement,document.querySelector('#background-tasks-close').parentElement);
@@ -65,6 +68,38 @@ test('Tasks popup shows running and queued jobs without switching tabs',async()=
     assert.deepEqual(errors,[]);
   }finally{dom.window.close();}
 });
+test('process indicator updates while closed and waiting selection applies to matching episodes',async()=>{
+  const {dom,w,document:d,errors}=await setup();
+  try{
+    const original=w.fetch,requests=[];let waiting=[{id:11,task_id:2,title:'<img src=x> Show',season:1,episode:1,episode_title:'First',paused:false}];
+    w.fetch=async(url,options={})=>{
+      let result;
+      if(url==='/api/v1/background-tasks')result={items:[],downloads:[],selection:waiting};
+      else if(url==='/api/v1/subtasks/11/candidates')result=[{id:55,candidate:{title:'Season pack',url:'https://example.com',size:123,seeds:10},action:'',report:{binding:{video_index:0},criteria:[]}}];
+      else if(url==='/api/v1/subtasks/11/candidates/55/choice-pending'){
+        const payload=JSON.parse(options.body);requests.push(payload);
+        result={selected:2,total:3,episodes:['S01E01','S01E02'],subtask_ids:[11,12]};
+        if(!payload.preview)waiting=[];
+      }else return original(url,options);
+      return {ok:true,status:200,json:async()=>result};
+    };
+    await w.pollBackgroundTasks();
+    assert.equal(d.querySelector('#background-tasks-dialog').open,false);
+    assert.equal(d.querySelector('#process-pill').textContent,'! 1');
+    assert.match(d.querySelector('#process-tooltip').textContent,/Требуют выбора: 1/);
+    d.querySelector('#background-tasks-open').click();await settle();await settle();
+    assert.equal(d.querySelector('#background-selection-list img'),null);
+    d.querySelector('[data-process-select="11"]').click();await settle();await settle();
+    assert.equal(d.querySelector('#background-tasks-dialog').open,false);
+    d.querySelector('[data-choose="55"]').click();await settle();await settle();
+    assert.match(d.querySelector('#modal-body').textContent,/S01E01, S01E02/);
+    d.querySelector('[data-process-confirm]').click();await settle();await settle();
+    assert.deepEqual(requests,[{preview:true},{subtask_ids:[11,12]}]);
+    assert.equal(d.querySelector('#process-pill').hidden,true);
+    assert.deepEqual(errors,[]);
+  }finally{dom.window.close();}
+});
+
 async function setup(){
   const dom=new JSDOM(html,{url:'http://localhost/',runScripts:'outside-only',pretendToBeVisual:true});
   const w=dom.window,errors=[],calls=[];
@@ -129,7 +164,7 @@ async function setup(){
     return {ok:true,status:200,json:async()=>result};
   };
   // A single realm matches ordered classic defer scripts in the real document.
-  w.eval(fs.readFileSync('src/lazarr/static/language-picker.js','utf8')+'\n'+fs.readFileSync('src/lazarr/static/library.js','utf8')+'\n'+fs.readFileSync('src/lazarr/static/app.js','utf8')+'\nwindow.testOpenLibraryMedia=openLibraryMedia;window.testRenderLibraries=renderLibraries;window.testSchedulePoll=schedulePoll;window.testRefreshLibraryProgress=refreshLibraryProgress;');
+  w.eval(fs.readFileSync('src/lazarr/static/language-picker.js','utf8')+'\n'+fs.readFileSync('src/lazarr/static/library.js','utf8')+'\n'+fs.readFileSync('src/lazarr/static/app.js','utf8')+'\nwindow.pollBackgroundTasks=pollBackgroundTasks;window.testOpenLibraryMedia=openLibraryMedia;window.testRenderLibraries=renderLibraries;window.testSchedulePoll=schedulePoll;window.testRefreshLibraryProgress=refreshLibraryProgress;');
   await settle();await settle();
   return {dom,w,document:w.document,errors,calls,setChoice:(files,selection,bindings={})=>{choiceFiles=files;choiceSelection=selection;choiceBindings=bindings},setMetadata:value=>metadata=value,setActivity:value=>activity=value,setProviders:value=>providers=value,setTasks:value=>{tasks.splice(0,tasks.length,...value)},setTaskChoices:value=>taskChoices=value,setLibrary:(groups,detail)=>{libraries=groups;libraryDetail=detail},updateLibraryDetail:update=>update(libraryDetail)};
 }

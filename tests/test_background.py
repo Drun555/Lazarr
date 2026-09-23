@@ -64,6 +64,51 @@ async def test_metadata_jobs_describe_real_work_and_skip_empty_checks(core, medi
         await queue.close()
 
 
+def test_processes_show_waiting_episodes_and_use_scoped_batch_choice(core, media, season, monkeypatch):
+    from fastapi.testclient import TestClient
+    from lazarr.app import create_app
+    from lazarr.models import Subtask
+    from lazarr.services import CreateTask
+    from test_api import login
+
+    config, database, _, service = core
+    service.create_from_metadata(CreateTask(media_id="42", kind="tv", season=1), media, season, 1)
+    with database.session() as db:
+        db.get(Subtask, 1).status = "needs_selection"
+        db.get(Subtask, 2).status = "done"
+    calls = []
+
+    async def choose(identity, actor, **kwargs):
+        calls.append((identity, actor, kwargs))
+        return {"selected": 1, "total": 1, "episodes": ["S01E01"], "subtask_ids": [1]}
+
+    with TestClient(create_app(config)) as client:
+        assert (
+            client.post("/api/v1/subtasks/1/candidates/7/choice-pending", json={"preview": True}).status_code
+            == 401
+        )
+        headers = login(client)
+        rows = client.get("/api/v1/background-tasks").json()["selection"]
+        assert len(rows) == 1 and rows[0]["id"] == 1 and rows[0]["title"] == media.title
+        monkeypatch.setattr(client.app.state.ctx.worker, "choose_all", choose)
+        client.app.state.ctx.engine = object()
+        result = client.post(
+            "/api/v1/subtasks/1/candidates/7/choice-pending", json={"preview": True}, headers=headers
+        )
+        assert result.status_code == 200
+        assert calls[-1][2] == dict(
+            pending_only=True, expected_subtask=1, preview=True, allowed_subtasks=None
+        )
+        assert (
+            client.post(
+                "/api/v1/subtasks/1/candidates/7/choice-pending", json={"subtask_ids": [1]}, headers=headers
+            ).status_code
+            == 200
+        )
+        assert calls[-1][2]["allowed_subtasks"] == [1]
+        client.app.state.ctx.engine = None
+
+
 def test_download_activity_in_tasks_is_compact_and_excludes_finished(core):
     from fastapi.testclient import TestClient
     from lazarr.app import create_app

@@ -279,7 +279,8 @@ def create_app(config: RuntimeConfig | None = None):
     async def background_tasks(request: Request, user=Depends(authenticated)):
         ctx = context(request)
         downloads = await asyncio.to_thread(ctx.service.download_activity)
-        return {**ctx.background_tasks.snapshot(user.id), "downloads": downloads}
+        selection = await asyncio.to_thread(ctx.service.selection_activity)
+        return {**ctx.background_tasks.snapshot(user.id), "downloads": downloads, "selection": selection}
 
     @app.get("/login", response_class=HTMLResponse)
     async def login_page(request: Request):
@@ -732,6 +733,33 @@ def create_app(config: RuntimeConfig | None = None):
             raise HTTPException(503, ctx.engine_error)
         result = await ctx.worker.choose_all(identity, user.id)
         ctx.scheduler.discard_satisfied()
+        return result
+
+    class PendingChoiceInput(BaseModel):
+        preview: bool = False
+        subtask_ids: list[int] = Field(default_factory=list, max_length=10000)
+
+    @app.post("/api/v1/subtasks/{subtask_id}/candidates/{identity}/choice-pending")
+    async def choose_pending_candidate(
+        subtask_id: int,
+        identity: int,
+        payload: PendingChoiceInput,
+        request: Request,
+        user=Depends(permission("tasks")),
+    ):
+        ctx = context(request)
+        if ctx.engine is None:
+            raise HTTPException(503, ctx.engine_error)
+        result = await ctx.worker.choose_all(
+            identity,
+            user.id,
+            pending_only=True,
+            expected_subtask=subtask_id,
+            preview=payload.preview,
+            allowed_subtasks=None if payload.preview else payload.subtask_ids,
+        )
+        if not payload.preview:
+            ctx.scheduler.discard_satisfied()
         return result
 
     @app.post("/api/v1/tasks/{task_id}/seasons/{season}/candidates/{identity}/choice")

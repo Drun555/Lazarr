@@ -376,6 +376,12 @@ input[role="switch"]{appearance:none;width:36px;height:21px;border-radius:12px;p
 @media(max-width:600px){.telegram-user{align-items:flex-start;flex-direction:column}#telegram-panel>.section-heading{align-items:flex-start;flex-direction:column;gap:12px}}
 :root #background-tasks-dialog{width:min(620px,calc(100vw - 32px));max-height:85dvh;overflow:auto}
 .background-tasks-heading>p{margin:0}
+.process-nav{position:relative;display:inline-flex;align-items:center}
+.process-pill{display:inline-flex;margin-left:5px;padding:2px 7px;border-radius:999px;font-size:11px;background:var(--primary-container);color:var(--accent)}
+.process-pill.attention{background:#594422;color:#ffe1a1}
+#process-tooltip{display:none;position:absolute;top:100%;right:0;width:290px;max-width:80vw;padding:12px;border:1px solid var(--line);border-radius:12px;background:var(--panel);color:var(--text);font-size:12px;white-space:pre-line;overflow-wrap:anywhere;z-index:20;box-shadow:0 8px 24px #0006}
+.process-nav:hover #process-tooltip,.process-nav:focus-within #process-tooltip{display:block}
+@media(max-width:700px){.process-nav{flex:1}}
 .background-task-group{margin-top:24px}
 .background-task-group h3{display:flex;align-items:center;gap:8px;font-size:14px}
 .background-task-row{display:flex;align-items:center;gap:12px;padding:14px 0;border-bottom:1px solid var(--line)}

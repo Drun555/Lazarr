@@ -5,7 +5,7 @@
     <button class="nav-tab active" data-tab="search">Поиск</button>
     <button class="nav-tab" data-tab="library">Библиотеки</button>
     <button class="nav-tab" data-tab="settings">Настройки</button>
-    <button class="nav-tab" id="background-tasks-open" aria-haspopup="dialog" aria-controls="background-tasks-dialog">Процессы</button>
+    <span class="process-nav"><button class="nav-tab" id="background-tasks-open" aria-haspopup="dialog" aria-controls="background-tasks-dialog" aria-describedby="process-tooltip">Процессы <span id="process-pill" class="process-pill" hidden></span></button><span id="process-tooltip" role="tooltip">Проверка процессов…</span></span>
   </nav>
   <div class="account"><span>{{ user.username }}</span><button class="icon-button" id="logout" title="Выйти" aria-label="Выйти">Выйти</button></div>
 </header>
@@ -92,6 +92,7 @@
 <dialog id="background-tasks-dialog" aria-label="Процессы">
   <div class="modal-heading background-tasks-heading"><p id="background-tasks-summary" class="fine" role="status" aria-live="polite"></p><button type="button" class="icon-button" id="background-tasks-close" aria-label="Закрыть процессы">×</button></div>
   <section class="background-task-group" aria-labelledby="background-downloads-title"><h3 id="background-downloads-title">Загрузки <span class="count" id="background-downloads-count">0</span></h3><div id="background-downloads-list"></div></section>
+  <section class="background-task-group"><h3>Требуют выбора <span class="count" id="background-selection-count">0</span></h3><div id="background-selection-list"></div></section>
   <div id="background-tasks-list"></div>
 </dialog>
 {% endblock %}

@@ -28,8 +28,20 @@ function openModal(title, content) { $('#modal-title').textContent=title; $('#mo
 
 const backgroundTaskNames={'next-up':'NextUp · следующий эпизод','library-detail':'Подготовка карточки','trickplay':'Trickplay · превью перемотки','chapter':'Thumbnail · кадр главы','image':'Обработка изображения','subtitle':'Извлечение субтитров','subtitle-interval':'Подготовка субтитров','attachment':'Извлечение вложения','probe':'Анализ медиа'};
 Object.assign(backgroundTaskNames,{'catalog':'Каталог','latest':'Последние добавления','item-detail':'Карточка Jellyfin','subtitle-analysis':'Определение языка субтитров','metadata-refresh':'Обновление метаданных'});
-let backgroundTasksTimer,backgroundTasksGeneration=0;
-function renderBackgroundTasks(items,downloads=[]){
+let backgroundTasksTimer,backgroundTasksRequest;
+function renderProcessIndicator(items,downloads,selection){
+  const active=items.filter(i=>['running','queued'].includes(i.state)),loading=downloads.filter(d=>['starting','downloading'].includes(d.state));
+  const pill=$('#process-pill'),lines=[`Требуют выбора: ${selection.length}`,`Идёт загрузка: ${loading.length}`,`Фоновые процессы: ${active.length}`];
+  loading.slice(0,4).forEach(d=>lines.push(`↓ ${d.title}`));
+  active.slice(0,4).forEach(i=>lines.push(`${i.state==='queued'?'В очереди: ':''}${backgroundTaskNames[i.kind]||i.kind}${i.detail?' · '+i.detail:''}`));
+  pill.hidden=!(active.length||loading.length||selection.length);
+  pill.textContent=[selection.length?`! ${selection.length}`:'',loading.length?`↓ ${loading.length}`:'',active.length?`• ${active.length}`:''].filter(Boolean).join(' ');
+  pill.classList.toggle('attention',selection.length>0);
+  $('#process-tooltip').textContent=lines.join('\n');
+}
+function renderBackgroundTasks(items,downloads=[],selection=[]){
+  $('#background-selection-count').textContent=selection.length;
+  $('#background-selection-list').innerHTML=selection.length?selection.map(s=>`<article class="background-task-row"><div><strong>${esc(s.title)}</strong><p class="fine">S${String(s.season).padStart(2,'0')}E${String(s.episode).padStart(2,'0')} · ${esc(s.episode_title)}${s.paused?' · Задача на паузе':''}</p></div><button class="ghost" data-process-select="${s.id}" ${s.paused?'disabled':''}>Выбрать раздачу</button></article>`).join(''):'<p class="fine background-task-empty">Нет серий, требующих выбора</p>';
   $('#background-downloads-count').textContent=downloads.length;
   $('#background-downloads-list').innerHTML=downloads.length?downloads.map(download=>{
     const rate=Math.max(0,Number(download.download_rate)||0),remaining=Number(download.eta);
@@ -45,20 +57,25 @@ function renderBackgroundTasks(items,downloads=[]){
     return `<div class="background-task-row"><span class="background-task-dot ${esc(item.state)}" aria-hidden="true"></span><div><strong>${esc(backgroundTaskNames[item.kind]||item.kind)}</strong>${item.detail?`<p class="background-task-detail">${esc(item.detail)}</p>`:''}<p class="fine">${esc(item.id.slice(0,8))} · ${item.lane==='catalog'?'Каталог':item.lane==='metadata'?'Метаданные':'Медиа'}${item.started_at?` · ${elapsed} с`:''}</p></div><span class="pill">${labels[item.state]}</span></div>`;
   }).join(''):'<p class="fine background-task-empty">Нет задач</p>'}</section>`).join('');
 }
-async function pollBackgroundTasks(generation){
+async function pollBackgroundTasks(){
   const dialog=$('#background-tasks-dialog');
-  if(!dialog?.open||generation!==backgroundTasksGeneration)return;
-  try{
-    if(!document.hidden){const data=await api('/background-tasks');if(dialog.open&&generation===backgroundTasksGeneration)renderBackgroundTasks(data.items||[],data.downloads||[]);}
-  }catch(error){if(dialog.open&&generation===backgroundTasksGeneration)$('#background-tasks-summary').textContent=`Не удалось обновить: ${error.message}`;}
-  if(dialog.open&&generation===backgroundTasksGeneration)backgroundTasksTimer=setTimeout(()=>pollBackgroundTasks(generation),1500);
+  if(!dialog)return;
+  if(backgroundTasksRequest)return backgroundTasksRequest;
+  clearTimeout(backgroundTasksTimer);
+  backgroundTasksRequest=(async()=>{
+    try{
+      if(!document.hidden){const data=await api('/background-tasks');renderProcessIndicator(data.items||[],data.downloads||[],data.selection||[]);if(dialog.open)renderBackgroundTasks(data.items||[],data.downloads||[],data.selection||[]);}
+    }catch(error){$('#process-tooltip').textContent='Не удалось обновить процессы';$('#process-pill').hidden=false;$('#process-pill').textContent='?';if(dialog.open)$('#background-tasks-summary').textContent=`Не удалось обновить: ${error.message}`;}
+  })();
+  try{await backgroundTasksRequest;}finally{backgroundTasksRequest=null;backgroundTasksTimer=setTimeout(pollBackgroundTasks,dialog.open?1500:5000);}
 }
 $('#background-tasks-open')?.addEventListener('click',()=>{
   const dialog=$('#background-tasks-dialog');if(dialog.open)return;
-  clearTimeout(backgroundTasksTimer);dialog.showModal();$('#background-tasks-summary').textContent='Загрузка…';pollBackgroundTasks(++backgroundTasksGeneration);
+  dialog.showModal();$('#background-tasks-summary').textContent='Загрузка…';pollBackgroundTasks();
 });
 $('#background-tasks-close')?.addEventListener('click',()=>$('#background-tasks-dialog').close());
-$('#background-tasks-dialog')?.addEventListener('close',()=>{++backgroundTasksGeneration;clearTimeout(backgroundTasksTimer);});
+if($('#background-tasks-open'))backgroundTasksTimer=setTimeout(pollBackgroundTasks,0);
+document.addEventListener('visibilitychange',()=>{if(!document.hidden)pollBackgroundTasks();});
 $('#background-tasks-dialog')?.addEventListener('click',event=>{
   if(event.target!==event.currentTarget)return;
   const rect=event.currentTarget.getBoundingClientRect();
@@ -205,11 +222,13 @@ function manualCandidateForm({subtask=null,task=null,season=null}) {
   const scope=subtask!==null?`data-subtask="${subtask}"`:season!==null?`data-task="${task}" data-season="${season}"`:`data-task="${task}"`;
   return `<form id="manual-candidate-form" ${scope} class="inline-form manual-candidate-form"><label>URL раздачи<input name="url" type="url" required maxlength="2048" placeholder="https://…"></label><button class="primary" type="submit">Добавить по URL</button><p class="form-error"></p></form>`;
 }
-async function candidateDialog(subtaskId) {
+async function candidateDialog(subtaskId, pending) {
+  pending??=$('#modal[open] [data-candidate-dialog]')?.dataset.candidateDialog===String(subtaskId)&&$('[data-candidate-dialog]')?.dataset.pendingChoice==='true';
   const logOpen=$('.candidate-search-log')?.open??false;
   const [choices,search]=await Promise.all([api(`/subtasks/${subtaskId}/candidates`),api(`/subtasks/${subtaskId}/search`)]);
   const cards=choices.length?choices.map(choice=>`<article class="candidate"><h3><a href="${esc(choice.candidate.url)}" target="_blank" rel="noopener noreferrer">${esc(choice.candidate.title)} ↗</a></h3><p class="fine">${esc(choice.candidate.provider)} · ${bytes(choice.candidate.size)} · ${choice.candidate.seeds??'—'} сидов${choice.action==='rejected'?' · Отклонено':''}</p>${choice.used_in_season?.length?`<p class="fine"><strong>Используется в других сериях этого сезона</strong> · Серии: ${esc(choice.used_in_season.join(', '))}</p>${choice.episode_missing?'<p class="fine">В этой раздаче пока нет выбранной серии (по последней проверке файлов).</p>':''}`:''}${choice.report.criteria.map(c=>`<div class="criterion"><span class="${esc(c.result)}">${c.result==='MATCH'?'✓':c.result==='MISMATCH'?'×':'?'}</span><span>${esc(c.reason)}${c.required?'':' <span class="fine">(не блокирует)</span>'}</span></div>`).join('')}<div class="candidate-footer"><button class="primary" data-choose="${choice.id}" data-has-binding="${Boolean(choice.report.binding)}">Выбрать раздачу</button><button class="ghost" data-map-files="${choice.id}">Сопоставить файлы</button><button class="ghost" data-reject="${choice.id}">Отклонить</button></div></article>`).join(''):'<div class="empty compact"><h3>Пока нет кандидатов</h3><p>Результаты появятся после поиска.</p></div>';
   openModal('Раздачи и результаты проверки',`<div data-candidate-dialog="${subtaskId}"><p class="fine">Замена удалит прежние файлы серии, если они не нужны другим сериям.</p>${manualCandidateForm({subtask:subtaskId})}<button class="ghost" data-search-alternatives="${subtaskId}">Найти другие раздачи</button>${candidateSearchLog(search,logOpen)}${cards}</div>`);
+  if(pending){const root=$('[data-candidate-dialog]');root.dataset.pendingChoice='true';root.querySelector('p.fine').textContent='Выбранная раздача подключится ко всем подходящим сериям этой задачи, ожидающим выбора. Уже выбранные серии не изменятся.';}
 }
 async function taskCandidateDialog(taskId) {
   const choices=await api(`/tasks/${taskId}/candidates`);
@@ -357,11 +376,14 @@ document.addEventListener('click', async event=>{ const button=event.target.clos
   else if(button.dataset.deleteTask){const task=state.tasks.find(t=>t.id===Number(button.dataset.deleteTask));openModal('Удаление задачи',`<form id="delete-task-form" data-task="${task.id}" class="stack"><p>${esc(task.title)}</p><label class="check"><input type="checkbox" role="switch" name="delete_media">Удалить также медиа и связанные загрузки</label><p class="fine">Общие загрузки, нужные другим задачам, сохранятся. Удаление файлов необратимо.</p><div class="form-footer"><p class="form-error"></p><button type="submit" class="primary">Удалить задачу</button></div></form>`);}
   else if(button.dataset.editTask){const task=state.tasks.find(t=>t.id===Number(button.dataset.editTask));openModal('Требования задачи',`<form id="edit-task-form" data-task="${task.id}">${requirementFields(task.requirements)}<p class="fine">Новые требования применяются к ещё не скачанным сериям. Готовые файлы сохраняются.</p><div class="form-footer"><p class="form-error"></p><button class="primary" type="submit">Сохранить</button></div></form>`);}
   else if(button.dataset.searchAlternatives){button.disabled=true;button.textContent='Поиск раздач…';try{await api(`/subtasks/${button.dataset.searchAlternatives}/candidates/search`,'POST',{});await candidateDialog(Number(button.dataset.searchAlternatives));}finally{button.disabled=false;button.textContent='Найти другие раздачи';}}
+  else if(button.dataset.processSelect){$('#background-tasks-dialog').close();await candidateDialog(Number(button.dataset.processSelect),true);}
+  else if(button.dataset.processConfirm){button.disabled=true;try{const result=await api(`/subtasks/${button.dataset.subtask}/candidates/${button.dataset.processConfirm}/choice-pending`,'POST',{subtask_ids:JSON.parse(button.dataset.selectionIds)});$('#modal').close();toast(`Раздача подключена к сериям: ${result.selected}`);await pollBackgroundTasks();await refreshLibraryView();}finally{button.disabled=false;}}
   else if(button.dataset.candidates)await candidateDialog(Number(button.dataset.candidates));
   else if(button.dataset.taskCandidates)await taskCandidateDialog(Number(button.dataset.taskCandidates));
   else if(button.dataset.seasonCandidates)await seasonCandidateDialog(Number(button.dataset.seasonCandidates),Number(button.dataset.seasonNumber));
   else if(button.dataset.chooseSeason){button.disabled=true;const task=Number(button.dataset.seasonTask),season=Number(button.dataset.seasonNumber);const result=await api(`/tasks/${task}/seasons/${season}/candidates/${button.dataset.chooseSeason}/choice`,'POST',{});$('#modal').close();toast(result.skipped?`Раздача выбрана для ${result.selected} из ${result.total} серий сезона`:`Раздача выбрана для всех ${result.total} серий сезона`);await Promise.all([refreshTasks(),refreshDownloads()]);await refreshLibraryView();}
   else if(button.dataset.chooseAll){button.disabled=true;const result=await api(`/candidates/${button.dataset.chooseAll}/choice-all`,'POST',{});$('#modal').close();toast(result.skipped?`Раздача выбрана для ${result.selected} из ${result.total} серий; остальные требуют отдельного выбора`:`Раздача выбрана для всех ${result.total} серий`);await Promise.all([refreshTasks(),refreshDownloads()]);await refreshLibraryView();}
+  else if(button.dataset.choose&&$('[data-pending-choice="true"]')){const subtask=$('[data-pending-choice="true"]').dataset.candidateDialog;if(button.dataset.hasBinding!=='true'){toast('Для этой раздачи требуется ручное сопоставление файлов',true);return;}button.disabled=true;try{const coverage=await api(`/subtasks/${subtask}/candidates/${button.dataset.choose}/choice-pending`,'POST',{preview:true});openModal('Подтверждение выбора',`<p>Раздача подходит для ${coverage.selected} из ${coverage.total} ожидающих серий.</p><p>${esc(coverage.episodes.join(', '))}</p><p class="fine">Уже выбранные и загруженные серии не изменятся.</p><button class="primary" data-process-confirm="${button.dataset.choose}" data-subtask="${subtask}" data-selection-ids="${esc(JSON.stringify(coverage.subtask_ids))}">Подтвердить загрузку</button>`);}finally{button.disabled=false;}}
   else if(button.dataset.choose){if(button.dataset.hasBinding!=='true'){await mappingDialog(button.dataset.choose);}else{await api(`/candidates/${button.dataset.choose}/choice`,'POST',{});$('#modal').close();toast('Раздача выбрана');await refreshTasks();await refreshLibraryView();}}
   else if(button.dataset.mapFiles)await mappingDialog(button.dataset.mapFiles);
   else if(button.dataset.reject){await api(`/candidates/${button.dataset.reject}/choice`,'POST',{reject:true});button.closest('.candidate').remove();toast('Кандидат отклонён');await refreshLibraryView();}
