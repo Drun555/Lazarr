@@ -2,6 +2,12 @@
 
 Lazarr предоставляет совместимые клиентские маршруты для видео. Контракты сверяются с [официальной OpenAPI Jellyfin](https://api.jellyfin.org/openapi/jellyfin-openapi-stable.json). Это не отдельный Jellyfin Server и не обещание реализации всех параметров его API. Административные операции, изменение метаданных/библиотек, музыкальный каталог и SyncPlay не входят в этот слой.
 
+`/System/Info/Public` и `/System/Info` возвращают `ProductName: Jellyfin Server` для обнаружения через Jellyfin SDK, в том числе в Wholphin. Отображаемое имя сервера (`ServerName`) остаётся `Lazarr`.
+
+Ответ входа и чтение пользователя включают обязательные поля `UserDto`, `UserConfiguration`, `UserPolicy` и `SessionInfoDto` из Jellyfin Kotlin SDK 1.7.1. Контракт проверяет `tests/test_jellyfin_login_contract.py`, включая сохранение значений по умолчанию после частичного обновления настроек. Неподдерживаемые возможности (Live TV, SyncPlay, удалённое управление) обозначены как отключённые.
+
+`tests/test_jellyfin_media_contract.py` проверяет обязательные поля каталога, медиадорожек, источников и глав в ответах каталога и PlaybackInfo. `IsInterlaced` и `IsHearingImpaired` учитывают метаданные ffprobe; `HasSegments` использует те же данные, что `/MediaSegments/{id}`.
+
 ## Каталог
 
 - `/Items`, `/Users/{userId}/Items`: родитель, рекурсия, IDs, типы, поиск, исключения, watched/favorite/resume-фильтры, многопольная сортировка и пагинация.

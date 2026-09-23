@@ -388,13 +388,18 @@ def test_jellyfin_auth_libraries_navigation_and_read_only_api(core, media, seaso
     config, _, _, _ = core
     with TestClient(create_app(config)) as client:
         public = client.get("/System/Info/Public")
-        assert public.status_code == 200 and public.json()["ProductName"] == "Lazarr"
+        assert public.status_code == 200
+        assert public.json()["ProductName"] == "Jellyfin Server"
+        assert public.json()["ServerName"] == "Lazarr"
         assert client.get("/UserViews").status_code == 401
         assert (
             client.post("/Users/AuthenticateByName", json={"Username": "alice", "Pw": "wrong"}).status_code
             == 401
         )
         auth = jellyfin_login(client)
+        info = client.get("/System/Info")
+        assert info.status_code == 200
+        assert info.json().items() >= public.json().items()
         assert client.get("/Users/Me").json()["Id"] == auth["User"]["Id"]
         assert client.get("/Branding/Configuration").json()["SplashscreenEnabled"] is False
         assert client.get("/UserViews/GroupingOptions", params={"userId": auth["User"]["Id"]}).json() == []

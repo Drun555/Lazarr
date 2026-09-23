@@ -330,6 +330,45 @@ async def remux_audio(ctx, playable, audio, request):
     return StreamingResponse(chunks(), media_type="video/x-matroska", headers={"Accept-Ranges": "none"})
 
 
+def media_segments(playable, item_id, allowed=None):
+    from lazarr.jellyfin import duration_ticks
+
+    result = []
+    labels = {
+        "intro": "Intro",
+        "opening": "Intro",
+        "op": "Intro",
+        "recap": "Recap",
+        "outro": "Outro",
+        "ending": "Outro",
+        "ed": "Outro",
+        "credits": "Outro",
+        "commercial": "Commercial",
+        "preview": "Preview",
+    }
+    duration = duration_ticks(playable["asset"])
+    for chapter in playable["asset"].probe.get("chapters", []):
+        kind = labels.get(chapter.get("tags", {}).get("title", "").strip().casefold())
+        if not kind or (allowed and kind not in allowed):
+            continue
+        try:
+            start, end = [round(float(chapter.get(k, 0)) * TICKS) for k in ("start_time", "end_time")]
+        except (ValueError, TypeError, OverflowError):
+            continue
+        if not 0 <= start < end <= duration:
+            continue
+        result.append(
+            {
+                "Id": str(uuid.uuid5(uuid.UUID(item_id), f"segment:{kind}:{start}:{end}")),
+                "ItemId": item_id,
+                "Type": kind,
+                "StartTicks": start,
+                "EndTicks": end,
+            }
+        )
+    return sorted(result, key=lambda r: r["StartTicks"])
+
+
 def chapters(playable):
     result = []
     for raw in playable["asset"].probe.get("chapters", []):
@@ -342,6 +381,9 @@ def chapters(playable):
         result.append(
             {
                 "StartPositionTicks": round(start * TICKS),
+                "ImageDateModified": datetime.fromtimestamp(
+                    playable["path"].stat().st_mtime, timezone.utc
+                ).isoformat(),
                 "Name": raw.get("tags", {}).get("title") or f"Chapter {len(result) + 1}",
                 "ImageTag": hashlib.sha256(
                     f"{playable['path'].stat().st_mtime_ns}:{start}".encode()
@@ -800,41 +842,9 @@ def install(app, context, authenticated, check_user, authorize, playback):
         check_user(request, user)
         playable = playback(context(request), item_id)
         await ensure_probe(context(request), playable)
-        result = []
-        allowed = csv_parameter(request.query_params, "includeSegmentTypes")
-        labels = {
-            "intro": "Intro",
-            "opening": "Intro",
-            "op": "Intro",
-            "recap": "Recap",
-            "outro": "Outro",
-            "ending": "Outro",
-            "ed": "Outro",
-            "credits": "Outro",
-            "commercial": "Commercial",
-            "preview": "Preview",
-        }
-        duration = duration_ticks(playable["asset"])
-        for chapter in playable["asset"].probe.get("chapters", []):
-            kind = labels.get(chapter.get("tags", {}).get("title", "").strip().casefold())
-            if not kind or (allowed and kind not in allowed):
-                continue
-            try:
-                start, end = [round(float(chapter.get(k, 0)) * TICKS) for k in ("start_time", "end_time")]
-            except (ValueError, TypeError, OverflowError):
-                continue
-            if not 0 <= start < end <= duration:
-                continue
-            result.append(
-                {
-                    "Id": str(uuid.uuid5(uuid.UUID(item_id), f"segment:{kind}:{start}:{end}")),
-                    "ItemId": item_id,
-                    "Type": kind,
-                    "StartTicks": start,
-                    "EndTicks": end,
-                }
-            )
-        return query_result(sorted(result, key=lambda r: r["StartTicks"]))
+        return query_result(
+            media_segments(playable, item_id, csv_parameter(request.query_params, "includeSegmentTypes"))
+        )
 
     @app.get("/Shows/Upcoming")
     async def upcoming(request: Request, user=Depends(authenticated)):
