@@ -107,6 +107,7 @@ class RuntimeConfig:
         self.data_dir.chmod(0o700)
         self.plugin_dir = Path(os.getenv("LAZARR_PLUGIN_DIR", str(self.data_dir / "plugins")))
         self.plugin_dir.mkdir(parents=True, exist_ok=True)
+        self.trawl_url = os.getenv("LAZARR_TRAWL_URL", "http://trawl:8191")
         self.background = background
         self.test_environment = os.getenv("LAZARR_TEST", "0") == "1"
         self.secure_cookie = os.getenv("LAZARR_SECURE_COOKIE", "0") == "1"

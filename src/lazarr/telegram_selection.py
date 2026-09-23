@@ -5,6 +5,7 @@ from sqlalchemy import select
 
 from lazarr.models import ConfigEntry, Task, Subtask, Episode, Season, Media
 from lazarr.notifications import DIGEST_PREFIX
+from lazarr.telegram_format import bold, escape, quote
 
 PAGE = 6
 
@@ -94,11 +95,11 @@ class NotificationSelection:
             rows.append(nav)
         rows.append([("Обновить", "notice-back"), ("Поиск", "search")])
         text = (
-            f"{title[:200]}\n\nВыберите серию · страница {page + 1}/{max(1, (len(episodes) + PAGE - 1) // PAGE)}"
+            f"{bold(title[:200])}\n\n{escape(f'Выберите серию · страница {page + 1}/{max(1, (len(episodes) + PAGE - 1) // PAGE)}')}"
             if episodes
-            else f"{title[:200]}\n\nНет серий, требующих выбора. Возможно, раздача уже выбрана."
+            else f"{bold(title[:200])}\n\n{escape('Нет серий, требующих выбора. Возможно, раздача уже выбрана.')}"
         )
-        self.menu.save(identity, dialog, text, rows)
+        self.menu.save(identity, dialog, text, rows, markdown=True)
 
     async def choices(self, identity, dialog, confirm=None):
         title, episodes = self.scope(identity, dialog)
@@ -142,14 +143,18 @@ class NotificationSelection:
             labels = ", ".join(coverage["episodes"][:30])
             if len(coverage["episodes"]) > 30:
                 labels += f" и ещё {len(coverage['episodes']) - 30}"
+            coverage_text = (
+                "Раздача будет подключена к подходящим сериям этой задачи: "
+                f"{coverage['selected']} из {coverage['total']}."
+            )
             text = (
-                f"{heading}\n\n{candidate.get('title', 'Раздача')[:800]}\n\n"
-                f"Раздача будет подключена к подходящим сериям этой задачи: {coverage['selected']} из {coverage['total']}.\n{labels}\n"
-                "Уже выбранные и загруженные серии не изменятся."
+                f"{bold(heading)}\n\n{quote(candidate.get('title', 'Раздача')[:800])}\n\n"
+                f"{escape(coverage_text)}\n"
+                f"{quote(labels)}\n{escape('Уже выбранные и загруженные серии не изменятся.')}"
             )
             if warnings:
-                text += "\nВнимание: " + "; ".join(str(w)[:150] for w in warnings[:6])
-            text += "\nПодтвердить выбор?"
+                text += f"\n{bold('Внимание:')} {escape('; '.join(str(w)[:150] for w in warnings[:6]))}"
+            text += f"\n{bold('Подтвердить выбор?')}"
             self.menu.save(
                 identity,
                 dialog,
@@ -158,22 +163,26 @@ class NotificationSelection:
                     [("Подтвердить загрузку", f"notice-confirm:{confirm}")],
                     [("← К раздачам", "notice-choices")],
                 ],
+                markdown=True,
             )
             return choice
         page = max(0, min(dialog.get("choice_page", 0), (len(choices) - 1) // PAGE))
         dialog.update(stage="notice_candidates", choice_page=page)
-        lines = [heading, "Выберите раздачу:"]
+        lines = [bold(heading), escape("Выберите раздачу:")]
         rows = []
         for i, choice in enumerate(choices[page * PAGE : (page + 1) * PAGE], page * PAGE + 1):
             c = choice["candidate"]
             size = f"{c['size'] / 1024**3:.1f} ГиБ" if c.get("size") else "Размер неизвестен"
             lines.append(
-                f"{i}. {c.get('title', 'Раздача')[:260]}\n{c.get('provider', '')[:40]} · Сиды: {c.get('seeds') or 0} · {size}"
+                quote(
+                    f"{i}. {c.get('title', 'Раздача')[:260]}\n"
+                    f"{c.get('provider', '')[:40]} · Сиды: {c.get('seeds') or 0} · {size}"
+                )
             )
             rows.append([(f"{i}. {c.get('title', 'Раздача')[:54]}", f"notice-choice:{choice['id']}")])
         if not choices:
             lines.append(
-                "Нет вариантов с определённым видеофайлом. Для ручного сопоставления откройте Lazarr."
+                escape("Нет вариантов с определённым видеофайлом. Для ручного сопоставления откройте Lazarr.")
             )
         nav = []
         if page:
@@ -183,7 +192,7 @@ class NotificationSelection:
         if nav:
             rows.append(nav)
         rows.append([("Обновить", "notice-choices"), ("← К сериям", "notice-back")])
-        self.menu.save(identity, dialog, "\n\n".join(lines), rows)
+        self.menu.save(identity, dialog, "\n\n".join(lines), rows, markdown=True)
 
     async def handle(self, identity, dialog, action):
         if action == "notice-back":

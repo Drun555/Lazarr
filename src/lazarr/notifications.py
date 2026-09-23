@@ -5,6 +5,7 @@ import time
 from sqlalchemy import select
 
 from lazarr.models import ConfigEntry, Episode, Media, Season, Task, TelegramUser
+from lazarr.telegram_format import bold, escape, quote
 
 PREFIX = "telegram.notification."
 DIGEST_PREFIX = "telegram.digest."
@@ -19,20 +20,20 @@ def digest_text(items):
     """Bounded summary; each episode appears once, with its latest event."""
     rows = list(items.values())
     title = rows[0].get("media_title", "Обновления Lazarr")[:200]
-    lines = [title]
+    lines = [bold(title)]
     for event, label in [("selection", "Требуется выбор раздачи"), ("found", "Раздача найдена")]:
         group = [row for row in rows if row.get("event") == event]
         if not group:
             continue
-        lines.append(f"\n{label}: {len(group)}")
+        lines.append(f"\n{bold(f'{label}: {len(group)}')}")
         for row in group[:12]:
-            lines.append(row.get("episode_label", row.get("text", ""))[:110])
+            lines.append(escape(row.get("episode_label", row.get("text", ""))[:110]))
         if len(group) > 12:
-            lines.append(f"…и ещё {len(group) - 12}")
+            lines.append(escape(f"…и ещё {len(group) - 12}"))
         if event == "found":
             releases = list(dict.fromkeys(row["release_title"] for row in group if row.get("release_title")))
             for title in releases[:3]:
-                lines.append(f"Раздача: {title[:180]}")
+                lines.append(quote(f"Раздача: {title[:180]}"))
     return "\n".join(lines)[:4000]
 
 
@@ -56,13 +57,13 @@ def queue_episode_notification(db, sub, event, release_title=None):
     season = db.get(Season, episode.season_id)
     media = db.get(Media, task.media_id)
     heading = "Найдена раздача для серии" if event == "found" else "Требуется выбор раздачи для серии"
-    text = f"{heading}\n{media.title} — S{season.number:02d}E{episode.number:02d}"
+    text = f"{bold(heading)}\n{escape(f'{media.title} — S{season.number:02d}E{episode.number:02d}')}"
     if episode.title:
-        text += f"\n{episode.title}"
+        text += f"\n{escape(episode.title)}"
     if release_title:
-        text += f"\nРаздача: {release_title}"
+        text += f"\n{quote(f'Раздача: {release_title}')}"
     if event == "selection":
-        text += "\nОткройте задачу в Lazarr и выберите раздачу."
+        text += f"\n{escape('Откройте задачу в Lazarr и выберите раздачу.')}"
     db.add(
         ConfigEntry(
             key=key,

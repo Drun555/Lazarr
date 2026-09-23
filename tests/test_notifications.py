@@ -144,7 +144,9 @@ async def test_episode_burst_is_one_durable_edited_digest(core, media, season, n
     assert len(calls) == 1
     assert "Раздача найдена: 3" in calls[0][1]["text"]
     assert "S01E01" in calls[0][1]["text"] and "S01E03" in calls[0][1]["text"]
-    assert len(calls[0][1]["reply_markup"]["inline_keyboard"][0][0]["callback_data"].encode()) <= 64
+    assert calls[0][1]["parse_mode"] == "MarkdownV2"
+    assert "> Раздача: Release" in calls[0][1]["text"]
+    assert calls[0][1]["reply_markup"]["inline_keyboard"] == []
     with db.session() as session:
         for sub in session.scalars(select(Subtask)):
             queue_episode_notification(session, sub, "selection")
@@ -155,6 +157,9 @@ async def test_episode_burst_is_one_durable_edited_digest(core, media, season, n
     assert calls[1][1]["message_id"] == 201
     assert "Требуется выбор раздачи: 3" in calls[1][1]["text"]
     assert "Раздача найдена" not in calls[1][1]["text"]
+    button = calls[1][1]["reply_markup"]["inline_keyboard"][0][0]
+    assert button["text"] == "Выбрать раздачу"
+    assert len(button["callback_data"].encode()) <= 64
     with db.session() as session:
         assert (
             len(list(session.scalars(select(ConfigEntry).where(ConfigEntry.key.startswith(DIGEST_PREFIX)))))

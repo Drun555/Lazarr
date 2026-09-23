@@ -32,6 +32,7 @@ test('Tasks popup shows running and queued jobs without switching tabs',async()=
   try{
     const original=w.fetch;
     w.fetch=async(url,options)=>url==='/api/v1/background-tasks'?{ok:true,status:200,json:async()=>({items:[
+      {id:'search-1',kind:'search',lane:'search',state:'running',started_at:Date.now()/1000-3,detail:'Проверка кандидатов'},
       {id:'11111111',kind:'trickplay',lane:'media',state:'running',started_at:Date.now()/1000-5},
       {id:'22222222',kind:'chapter',lane:'media',state:'queued',started_at:null},
       {id:'33333333',kind:'<script>bad</script>',lane:'media',state:'failed',started_at:1,finished_at:2},
@@ -45,15 +46,17 @@ test('Tasks popup shows running and queued jobs without switching tabs',async()=
     assert.match(document.querySelector('#background-tasks-open').textContent,/^Процессы/);
     assert.equal(document.querySelector('#process-pill').hidden,false);
     assert.equal(document.querySelector('.process-preview-count.download').textContent,'1');
+    assert.match(document.querySelector('#process-tooltip').textContent,/Поиск раздач/);
     assert.match(document.querySelector('#process-tooltip').textContent,/Trickplay/);
     assert.equal(document.querySelector('#background-tasks-dialog').getAttribute('aria-label'),'Процессы');
     assert.equal(document.querySelector('#background-tasks-title'),null);
     assert.equal(document.querySelector('#background-tasks-summary').parentElement,document.querySelector('#background-tasks-close').parentElement);
     assert.doesNotMatch(document.querySelector('#background-tasks-dialog').textContent,/Обновляется автоматически|Фоновые процессы/);
-    assert.match(document.querySelector('.background-task-detail').textContent,/Сериал · Сезон 2: данные эпизодов/);
+    assert.match(document.querySelector('#background-tasks-list').textContent,/Сериал · Сезон 2: данные эпизодов/);
     assert.equal(document.querySelector('.background-task-detail img'),null);
     assert.equal(document.querySelector('#tab-search').hidden,false);
-    assert.match(document.querySelector('#background-tasks-summary').textContent,/Выполняется: 1 · В очереди: 1/);
+    assert.match(document.querySelector('#background-tasks-summary').textContent,/Выполняется: 2 · В очереди: 1/);
+    assert.match(document.querySelector('#background-tasks-list').textContent,/Поиск раздач.*Проверка кандидатов/s);
     assert.match(document.querySelector('#background-tasks-list').textContent,/Trickplay/);
     assert.match(document.querySelector('#background-tasks-list').textContent,/Thumbnail/);
     assert.equal(document.querySelector('#background-tasks-list script'),null);
@@ -932,5 +935,19 @@ test('library details do not expose subtitle provider downloads',async()=>{
     assert.equal(d.querySelector('#library-subtitles'),null);
     assert.equal(d.querySelector('#subtitle-download-form'),null);
     assert.deepEqual(errors,[]);
+  }finally{dom.window.close();}
+});
+
+test('queued search shows its scheduled local time without internal ID or lane',async()=>{
+  const {dom,w,document}=await setup();
+  try{
+    const original=w.fetch;
+    const planned=new Date(2026,8,23,10,45).getTime()/1000;
+    w.fetch=async(url,options)=>url==='/api/v1/background-tasks'?{ok:true,status:200,json:async()=>({items:[{id:'search-pending',kind:'search',lane:'search',state:'queued',next_attempt_at:planned,detail:'Повтор поиска запланирован после паузы провайдера'}],downloads:[],selection:[]})}:original(url,options);
+    document.querySelector('#background-tasks-open').click();await settle();await settle();
+    const list=document.querySelector('#background-tasks-list');
+    assert.match(list.textContent,/Поиск запланирован на 10:45/);
+    assert.doesNotMatch(list.textContent,/search-p|после паузы/);
+    assert.equal(list.querySelector('.background-task-row .fine'),null);
   }finally{dom.window.close();}
 });

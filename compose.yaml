@@ -1,12 +1,22 @@
+# Windows: install and start Docker Desktop (Linux containers), then run
+# docker compose up -d
+# Open http://localhost:8000
+# Downloads: %USERPROFILE%\Downloads\Lazarr (Загрузки\Lazarr).
+name: lazarr
+
 services:
   lazarr:
     image: drun555/lazarr:latest
-    build: .
     restart: unless-stopped
+    depends_on:
+      trawl:
+        condition: service_started
     environment:
       TZ: ${TZ:-UTC}
       LAZARR_DATA_DIR: /data
       LAZARR_PLUGIN_DIR: /plugins
+      LAZARR_MOVIE_PATH: /downloads/movies
+      LAZARR_SERIES_PATH: /downloads/series
       LAZARR_SECURE_COOKIE: ${LAZARR_SECURE_COOKIE:-0}
       LAZARR_TRAWL_URL: ${LAZARR_TRAWL_URL:-http://trawl:8191}
     ports:
@@ -16,15 +26,20 @@ services:
     volumes:
       - lazarr-data:/data
       - lazarr-plugins:/plugins
-      - ${LAZARR_DOWNLOADS:-./downloads}:/downloads
+      - type: bind
+        source: ${LAZARR_DOWNLOADS:-${USERPROFILE:-${HOME:-.}}/Downloads/Lazarr}
+        target: /downloads
+        bind:
+          create_host_path: true
     stop_grace_period: 30s
+
   trawl:
     image: ghcr.io/germondai/trawl:latest
-    profiles: ["cloudflare"]
     restart: unless-stopped
     environment:
       SESSION_CACHE_DRIVER: memory
       TZ: ${TZ:-UTC}
+
 volumes:
   lazarr-data:
   lazarr-plugins:

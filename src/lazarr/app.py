@@ -18,6 +18,7 @@ from lazarr.config import RuntimeConfig, Settings, Requirements
 from lazarr.db import Database
 from lazarr.models import (
     User,
+    ConfigEntry,
     LoginSession,
     Download,
     CandidateDecision,
@@ -280,7 +281,39 @@ def create_app(config: RuntimeConfig | None = None):
         ctx = context(request)
         downloads = await asyncio.to_thread(ctx.service.download_activity)
         selection = await asyncio.to_thread(ctx.service.selection_activity)
-        return {**ctx.background_tasks.snapshot(user.id), "downloads": downloads, "selection": selection}
+        snapshot = ctx.background_tasks.snapshot(user.id)
+        search = ctx.scheduler.snapshot()
+        state = (
+            "running"
+            if search["running"]
+            else {
+                "queued": "queued",
+                "finished": "completed",
+                "blocked": "failed",
+                "error": "failed",
+            }.get(search["state"])
+        )
+        if state:
+            started_at = search.get("started_at")
+            snapshot["items"].insert(
+                0,
+                {
+                    "id": f"search-{started_at or 'pending'}",
+                    "kind": "search",
+                    "lane": "search",
+                    "state": state,
+                    "created_at": started_at or search.get("updated_at"),
+                    "started_at": started_at,
+                    "finished_at": search.get("updated_at") if state in {"completed", "failed"} else None,
+                    "detail": search.get("message"),
+                    "next_attempt_at": search.get("next_attempt_at"),
+                },
+            )
+        return {**snapshot, "downloads": downloads, "selection": selection}
+
+    from lazarr import onboarding
+
+    onboarding.install(app, templates, context, authenticated, permission)
 
     @app.get("/login", response_class=HTMLResponse)
     async def login_page(request: Request):
@@ -335,6 +368,7 @@ def create_app(config: RuntimeConfig | None = None):
             db.add(user)
             db.flush()
             token, csrf = new_session(db, user)
+            db.add(ConfigEntry(key=onboarding.key(user.id), value=onboarding.initial_state()))
             audit(db, user.id, "account.bootstrap", str(user.id))
         response = JSONResponse({"csrf": csrf}, status_code=201)
         response.set_cookie(
@@ -402,6 +436,8 @@ def create_app(config: RuntimeConfig | None = None):
             user = authenticated(request)
         except HTTPException:
             return RedirectResponse("/login", 303)
+        if onboarding.pending(context(request), user):
+            return RedirectResponse("/onboarding", 303)
         return templates.TemplateResponse(
             request=request,
             name="index.html",

@@ -27,7 +27,7 @@ async function submitForm(form, callback) { const button=$('button[type="submit"
 function openModal(title, content) { $('#modal-title').textContent=title; $('#modal-body').innerHTML=content; if(!$('#modal').open)$('#modal').showModal(); }
 
 const backgroundTaskNames={'next-up':'NextUp · следующий эпизод','library-detail':'Подготовка карточки','trickplay':'Trickplay · превью перемотки','chapter':'Thumbnail · кадр главы','image':'Обработка изображения','subtitle':'Извлечение субтитров','subtitle-interval':'Подготовка субтитров','attachment':'Извлечение вложения','probe':'Анализ медиа'};
-Object.assign(backgroundTaskNames,{'catalog':'Каталог','latest':'Последние добавления','item-detail':'Карточка Jellyfin','subtitle-analysis':'Определение языка субтитров','metadata-refresh':'Обновление метаданных'});
+Object.assign(backgroundTaskNames,{'catalog':'Каталог','latest':'Последние добавления','item-detail':'Карточка Jellyfin','search':'Поиск раздач','metadata-refresh':'Обновление метаданных'});
 let backgroundTasksTimer,backgroundTasksRequest;
 function renderProcessIndicator(items,downloads,selection){
   const active=items.filter(i=>['running','queued'].includes(i.state)),loading=downloads.filter(d=>['starting','downloading'].includes(d.state));
@@ -60,7 +60,9 @@ function renderBackgroundTasks(items,downloads=[],selection=[]){
   $('#background-tasks-list').innerHTML=groups.map(([name,rows])=>`<section class="background-task-group"><h3>${name} <span class="count">${rows.length}</span></h3>${rows.length?rows.map(item=>{
     const labels={running:'Выполняется',queued:'Ожидает',completed:'Завершено',failed:'Ошибка'};
     const elapsed=item.started_at?Math.max(0,Math.round((item.finished_at||Date.now()/1000)-item.started_at)):0;
-    return `<div class="background-task-row"><span class="background-task-dot ${esc(item.state)}" aria-hidden="true"></span><div><strong>${esc(backgroundTaskNames[item.kind]||item.kind)}</strong>${item.detail?`<p class="background-task-detail">${esc(item.detail)}</p>`:''}<p class="fine">${esc(item.id.slice(0,8))} · ${item.lane==='catalog'?'Каталог':item.lane==='metadata'?'Метаданные':'Медиа'}${item.started_at?` · ${elapsed} с`:''}</p></div><span class="pill">${labels[item.state]}</span></div>`;
+    const planned=item.kind==='search'&&item.state==='queued'&&Number(item.next_attempt_at)>0;
+    const detail=planned?'Поиск запланирован на '+new Date(item.next_attempt_at*1000).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit',hour12:false}):item.detail;
+    return `<div class="background-task-row"><span class="background-task-dot ${esc(item.state)}" aria-hidden="true"></span><div><strong>${esc(backgroundTaskNames[item.kind]||item.kind)}</strong>${detail?`<p class="background-task-detail">${esc(detail)}</p>`:''}${item.kind==='search'?'':`<p class="fine">${esc(item.id.slice(0,8))} · ${item.lane==='catalog'?'Каталог':item.lane==='metadata'?'Метаданные':item.lane==='search'?'Поиск':'Медиа'}${item.started_at?` · ${elapsed} с`:''}</p>`}</div><span class="pill">${labels[item.state]}</span></div>`;
   }).join(''):'<p class="fine background-task-empty">Нет задач</p>'}</section>`).join('');
 }
 async function pollBackgroundTasks(){
@@ -310,7 +312,17 @@ function telegramRows(status){
 async function loadTelegram(editForm=true){
   const [cfg,users]=await Promise.all([api('/telegram'),api('/telegram/users')]);telegramUsers=users;
   if(editForm){$('#telegram-form input').placeholder=cfg.token_configured?'Токен сохранён':'Токен от BotFather';}
-  $('#telegram-status').textContent=(cfg.enabled?'Бот включён':'Бот выключен')+(cfg.bot_username?' · @'+cfg.bot_username:'')+(cfg.error?' · '+cfg.error:'');
+  const status=$('#telegram-status');
+  status.textContent=cfg.enabled?'Бот включён':'Бот выключен';
+  if(cfg.bot_username){
+    const link=document.createElement('a');
+    link.href='https://t.me/'+encodeURIComponent(cfg.bot_username);
+    link.textContent='@'+cfg.bot_username;
+    link.target='_blank';link.rel='noopener noreferrer';
+    link.style.textDecoration='underline';link.style.textUnderlineOffset='3px';
+    status.append(' · ',link);
+  }
+  if(cfg.error)status.append(' · '+cfg.error);
   $('#telegram-pending').innerHTML=telegramRows('pending');$('#telegram-approved').innerHTML=telegramRows('approved');
   $('#telegram-blocked').textContent=`Заблокированные пользователи (${users.filter(u=>u.status==='blocked').length})`;
   if($('#telegram-blocked-list'))$('#telegram-blocked-list').innerHTML=telegramRows('blocked');
@@ -449,7 +461,7 @@ document.addEventListener('click', async event=>{ const button=event.target.clos
 
 document.addEventListener('submit', event=>{const form=event.target;if(!(form instanceof HTMLFormElement))return;event.preventDefault();submitForm(form,async()=>{
   const data=new FormData(form);
-  if(form.id==='setup-form'){await api('/setup','POST',Object.fromEntries(data));location.assign('/#settings');}
+  if(form.id==='setup-form'){await api('/setup','POST',Object.fromEntries(data));location.assign('/onboarding');}
   else if(form.id==='login-form'){await api('/session','POST',Object.fromEntries(data));location.assign('/');}
   else if(form.id==='task-form'){if(!state.selected)throw new Error('Выберите произведение');const payload={provider:state.selected.provider,media_id:state.selected.id,kind:state.selected.kind,requirements:readRequirements(form)};if(state.selected.kind==='tv')payload.seasons=taskSeasonSelections();await api('/tasks','POST',payload);$('#selection').hidden=true;$('#search-results').innerHTML='';$('#media-search').value='';state.selected=null;toast('Задача создана. Поиск поставлен в очередь.');await refreshTasks();await switchTab('library');}
   else if(form.id==='settings-form'){const payload={...state.settings,defaults:readRequirements(form,'default_'),jellyfin:{audio_languages:selectedLanguages(form,'jellyfin_audio_languages'),subtitle_languages:selectedLanguages(form,'jellyfin_subtitle_languages')}};for(const key of ['movie_path','series_path','search_start','plugin_repository'])payload[key]=String(data.get(key));payload.theme_color=String(data.get('theme_color')||'purple');payload.seed_ratio=String(data.get('seed_ratio')).trim()===''?null:Number(data.get('seed_ratio'));payload.prefer_full_subtitles=data.get('prefer_full_subtitles')==='on';await api('/settings','PUT',payload);state.settings=payload;toast('Настройки сохранены');}

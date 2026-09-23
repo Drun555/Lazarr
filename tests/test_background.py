@@ -191,6 +191,35 @@ def test_download_activity_in_tasks_is_compact_and_excludes_finished(core):
         assert response.json()["items"] == []
 
 
+def test_running_search_is_exposed_as_a_process(core):
+    from fastapi.testclient import TestClient
+    from lazarr.app import create_app
+    from test_api import login
+
+    with TestClient(create_app(core[0])) as client:
+        login(client)
+        progress = client.app.state.ctx.worker.progress.value
+        progress.update(
+            running=True,
+            state="running",
+            started_at=100,
+            updated_at=105,
+            message="Проверка кандидатов",
+        )
+        rows = client.get("/api/v1/background-tasks").json()["items"]
+        assert rows[0] == {
+            "id": "search-100",
+            "kind": "search",
+            "lane": "search",
+            "state": "running",
+            "created_at": 100,
+            "started_at": 100,
+            "finished_at": None,
+            "detail": "Проверка кандидатов",
+            "next_attempt_at": 0,
+        }
+
+
 async def test_cached_resources_bypass_busy_media_lane_and_invalidate(tmp_path):
     from types import SimpleNamespace
     from lazarr.jellyfin_resources import cached_async
@@ -296,12 +325,31 @@ async def test_api_response_jobs_are_hidden_but_still_run_in_bounded_queue(kind)
 async def test_api_requests_do_not_evict_real_background_history():
     queue = BackgroundTasks()
     try:
-        await queue.run("subtitle-analysis", lambda: None)
+        await queue.run("trickplay", lambda: None)
         for _ in range(35):
             await queue.run("latest", lambda: None, lane="catalog")
-        assert [row["kind"] for row in queue.snapshot(1)["items"]] == ["subtitle-analysis"]
+        assert [row["kind"] for row in queue.snapshot(1)["items"]] == ["trickplay"]
     finally:
         await queue.close()
+
+
+async def test_subtitle_language_analysis_is_hidden_from_processes():
+    queue = BackgroundTasks()
+    started, release = threading.Event(), threading.Event()
+
+    def work():
+        started.set()
+        assert release.wait(5)
+
+    pending = asyncio.create_task(queue.run("subtitle-analysis", work))
+    try:
+        assert await asyncio.to_thread(started.wait, 2)
+        assert queue.snapshot(1)["items"] == []
+    finally:
+        release.set()
+        await pending
+        await queue.close()
+    assert queue.snapshot(1)["items"] == []
 
 
 async def test_queue_is_bounded_observable_and_lanes_are_independent():

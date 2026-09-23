@@ -1,6 +1,6 @@
 {
   "name": "lazarr-ui-tests",
   "private": true,
-  "scripts": {"test:ui": "node --test tests/ui.test.cjs"},
+  "scripts": {"test:ui": "node --test tests/ui.test.cjs tests/onboarding.test.cjs"},
   "devDependencies": {"jsdom": "26.1.0"}
 }

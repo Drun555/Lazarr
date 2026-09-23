@@ -17,6 +17,7 @@ from lazarr.sdk import ProviderError
 from lazarr.security import audit, permitted
 from lazarr.services import CreateTask
 from lazarr.telegram import TelegramError
+from lazarr.telegram_format import bold, escape, quote
 
 PAGE = 6
 
@@ -67,7 +68,7 @@ class TelegramMenu:
                 raise ValueError("Доступ не разрешён. Обратитесь к администратору Lazarr.")
             return actor.id
 
-    def save(self, identity, dialog, text=None, buttons=None, posters=None):
+    def save(self, identity, dialog, text=None, buttons=None, posters=None, markdown=False):
         with self.ctx.db.session() as db:
             user = db.get(TelegramUser, identity)
             if not user or user.status != "approved":
@@ -84,7 +85,11 @@ class TelegramMenu:
                     "stage"
                 ) == current.get("stage")
                 dialog["revision"] = current.get("revision", 0) + (0 if same_picker else 1)
-                dialog["view"] = {"buttons": buttons or [], "posters": posters or []}
+                dialog["view"] = {
+                    "buttons": buttons or [],
+                    "posters": posters or [],
+                    "parse_mode": "MarkdownV2" if markdown else None,
+                }
                 user.reply = text
                 user.reply_version += 1
                 user.retry_at = 0
@@ -116,6 +121,7 @@ class TelegramMenu:
             ]
         }
         posters = view.get("posters", [])
+        formatting = {"parse_mode": view["parse_mode"]} if view.get("parse_mode") else {}
         old_message = dialog.get("message_id")
         if old_message and dialog.get("sent_kind") == "text" and not posters:
             try:
@@ -126,12 +132,18 @@ class TelegramMenu:
                     message_id=old_message,
                     text=user.reply,
                     reply_markup=keyboard,
+                    **formatting,
                 )
             except TelegramError as exc:
                 if exc.code != 400:
                     raise
                 result = await self.bot.call(
-                    token, "sendMessage", chat_id=user.chat_id, text=user.reply, reply_markup=keyboard
+                    token,
+                    "sendMessage",
+                    chat_id=user.chat_id,
+                    text=user.reply,
+                    reply_markup=keyboard,
+                    **formatting,
                 )
         elif posters:
 
@@ -155,10 +167,16 @@ class TelegramMenu:
                 photo_bytes=photo,
                 caption=user.reply[:1024],
                 reply_markup=keyboard,
+                **formatting,
             )
         else:
             result = await self.bot.call(
-                token, "sendMessage", chat_id=user.chat_id, text=user.reply, reply_markup=keyboard
+                token,
+                "sendMessage",
+                chat_id=user.chat_id,
+                text=user.reply,
+                reply_markup=keyboard,
+                **formatting,
             )
         message_id = result.get("message_id", old_message) if isinstance(result, dict) else old_message
         garbage = list(dialog.get("garbage", []))
@@ -474,21 +492,25 @@ class TelegramMenu:
         if choices:
             choices = choices[:6]
             dialog.update(stage="candidates", choices=[c["id"] for c in choices])
-            lines = [
+            summary = (
                 f"Автоматически выбраны раздачи для {selected} из {len(statuses)} эпизодов."
                 if selected
-                else "Автоматически выбрать раздачу не удалось.",
-                "Наиболее подходящие варианты:",
-            ]
+                else "Автоматически выбрать раздачу не удалось."
+            )
+            lines = [bold(summary), escape("Наиболее подходящие варианты:")]
             rows = []
             for i, c in enumerate(choices, 1):
                 candidate = c["candidate"]
                 lines.append(
-                    f"{i}. {candidate.get('title', 'Раздача')[:260]}\nПокрытие: {c['matched']}/{c['total']} · Сиды: {candidate.get('seeds') or 0} · {candidate.get('provider', '')}"
+                    quote(
+                        f"{i}. {candidate.get('title', 'Раздача')[:260]}\n"
+                        f"Покрытие: {c['matched']}/{c['total']} · "
+                        f"Сиды: {candidate.get('seeds') or 0} · {candidate.get('provider', '')}"
+                    )
                 )
                 rows.append([(f"{i}. {candidate.get('title', 'Раздача')[:54]}", f"choose:{c['id']}")])
             rows.extend([[("Обновить", "refresh"), ("Новый поиск", "search")]])
-            self.save(identity, dialog, "\n\n".join(lines), rows)
+            self.save(identity, dialog, "\n\n".join(lines), rows, markdown=True)
         else:
             message = (
                 "Задача на паузе. Возобновите её в Lazarr."

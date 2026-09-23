@@ -317,6 +317,7 @@ class TelegramService:
 
     async def deliver_notifications_once(self, token, bot_id):
         from lazarr.notifications import PREFIX, DIGEST_PREFIX, COALESCE_SECONDS, digest_id, digest_text
+        from lazarr.telegram_format import escape
 
         with self.db.session() as db:
             entries = list(
@@ -353,20 +354,20 @@ class TelegramService:
             latest = batch[-1].value
             text = digest_text(items)
             if not any(row.get("event") for row in items.values()):
-                text = "\n\n".join(row["text"] for row in items.values())[:4000]
+                text = escape("\n\n".join(row["text"] for row in items.values()))[:4000]
             buttons = []
-            if latest.get("task_id"):
-                label = (
-                    "Выбрать раздачу"
-                    if any(row.get("event") == "selection" for row in items.values())
-                    else "Проверить серии"
-                )
-                buttons = [[{"text": label, "callback_data": f"notice:{digest}"}]]
+            if latest.get("task_id") and any(row.get("event") == "selection" for row in items.values()):
+                buttons = [[{"text": "Выбрать раздачу", "callback_data": f"notice:{digest}"}]]
             error = None
             message_id = delivery.get("message_id")
             if allowed:
                 try:
-                    payload = dict(chat_id=user.chat_id, text=text, reply_markup={"inline_keyboard": buttons})
+                    payload = dict(
+                        chat_id=user.chat_id,
+                        text=text,
+                        parse_mode="MarkdownV2",
+                        reply_markup={"inline_keyboard": buttons},
+                    )
                     if message_id and delivery.get("text") == text:
                         result = None
                     elif message_id:
