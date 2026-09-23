@@ -431,3 +431,84 @@ def test_oreimo_labelled_layout(media):
     assert Matcher().evaluate(item, requests[:1], paths).plan is None
     requests[0].absolute_number = 1
     assert Matcher().evaluate(item, requests[:1], paths).plan.bindings[0].video_index == 0
+
+
+def test_bakemonogatari_tv_special_pack_matches_main_episodes_and_sidecars():
+    from lazarr.sdk import MetadataItem
+
+    media = MetadataItem(
+        id="46195",
+        kind="tv",
+        title="Истории монстров",
+        original_title="化物語",
+        aliases=["Bakemonogatari"],
+        year=2009,
+        seasons=[{"number": 0, "episode_count": 49}, {"number": 1, "episode_count": 12}],
+    )
+    root = "[Beatrice-Raws] Bakemonogatari [BDRip 1920x1080 x264 FLAC]"
+    paths = []
+    # The actual torrent starts with episode 02, not episode 01.
+    for number in [2, 1, *range(3, 16)]:
+        stem = f"[Beatrice-Raws] Bakemonogatari {number:02} [BDRip 1920x1080 x264 FLAC]"
+        paths.extend(
+            [
+                f"{root}/{stem}.mkv",
+                f"{root}/RUS Sound/[NIKITOS & Viki] [SHIZA]/{stem}.[SHIZA].mka",
+                f"{root}/RUS Subs/{stem}.[Shift+Aragami].ass",
+                f"{root}/RUS Subs/надписи/{stem}.[Shift+Aragami].надписи.ass",
+            ]
+        )
+    paths.append(
+        f"{root}/Bonus/PV/[Beatrice-Raws] Bakemonogatari (TV previews 02) [BDRip 1920x1080 x264 FLAC].mkv"
+    )
+    torrent_files = files(*paths)
+    item = candidate(
+        title="Bakemonogatari [TV+Special] [12+3 из 12+3] [RUS(ext), JAP+Sub] [2009] [1080p]",
+        external_ids={},
+    )
+    requests = [request(media, n, n, subtitle_languages=["ru"]) for n in range(1, 13)]
+    special = request(media, 100, 1)
+    special.season = 0
+    report = Matcher().evaluate(item, [*requests, special], torrent_files)
+
+    assert [e.result for e in report.evaluations[:12]] == [MatchResult.MATCH] * 12
+    assert report.evaluations[-1].binding is None
+    assert len(report.plan.bindings) == 12
+    for binding in report.plan.bindings:
+        assert f"Bakemonogatari {binding.subtask_id:02} [" in paths[binding.video_index]
+        assert len(binding.tracks) == 3
+        assert all(t.language == "ru" for t in binding.tracks)
+        assert sum(t.forced for t in binding.tracks) == 1
+        assert binding.missing_subtitle_languages == []
+
+
+def test_mixed_episode_counts_require_tv_special_tag_and_matching_main_count(media):
+    from lazarr.matcher import first_season_by_year_and_count
+
+    media.seasons = [{"number": 1, "episode_count": 12}]
+    req = request(media)
+    for tag, count in (
+        ("[TV+Special]", "12+3 из 12+3"),
+        ("[TV + Specials]", "12 + 3 из 12 + 3"),
+    ):
+        assert first_season_by_year_and_count(candidate(title=f"Show (2020) {tag} [{count}]"), [req])
+    for title in (
+        "Show (2020) [12+3 из 12+3]",
+        "Show (2019) [TV+Special] [12+3 из 12+3]",
+        "Show (2020) [TV+Special] [11+3 из 12+3]",
+        "Show (2020) [TV+Special] [12+2 из 12+3]",
+        "Show (2020) [TV+Special] [9+3 из 9+3]",
+        "Show (2020) [TV+Special] [12+3+1 из 12+3+1]",
+    ):
+        assert not first_season_by_year_and_count(candidate(title=title), [req])
+    # The old simple-count regex could misread this as a complete "3 из 3" pack.
+    media.seasons = [{"number": 1, "episode_count": 3}]
+    assert not first_season_by_year_and_count(candidate(title="Show (2020) [12+3 из 3+12]"), [req])
+
+
+def test_sidecar_episode_hint_handles_group_suffix_without_guessing_other_numbers():
+    assert episode_numbers("Bakemonogatari 01 [1080p].[SHIZA].mka", season_hint=1) == (1, {1}, False)
+    assert episode_numbers("Bakemonogatari 01 [1080p].[Group].надписи.ass", season_hint=1) == (1, {1}, False)
+    assert episode_numbers("Bakemonogatari 01 [1080p].[Group].надписи.ass") == (None, {1}, True)
+    assert episode_numbers("Bakemonogatari 01 alternate 02.ass", season_hint=1) == (None, set(), False)
+    assert episode_numbers("Bakemonogatari 013 [1080p].[Group].mka", season_hint=1) == (None, {13}, True)

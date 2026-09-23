@@ -74,6 +74,16 @@ def episode_numbers(path, aliases=(), season_hint=None):
         return int(match[1]), {int(match[2])}, False
     parent = re.search(r"\b(?:season|сезон|tv|тв|s)[ ._-]*(\d{1,3})\b", str(PurePosixPath(path).parent), re.I)
     cleaned = re.sub(r"\[[^]]*\]|\([^)]*\)", " ", name)
+    # Sidecars append group tags and roles after the same episode stem.
+    # Remove only known subtitle roles, leaving arbitrary numbered tails ambiguous.
+    if PurePosixPath(path).suffix.lower() in SUBTITLE:
+        cleaned = re.sub(
+            r"(?:[ ._-]+(?:forced|full|надписи|полные|форсированные))+$",
+            "",
+            cleaned.strip(" ._-"),
+            flags=re.I,
+        )
+    cleaned = cleaned.rstrip(" ._-")
     # Explicit episode labels are also used without Sxx: "Ep01 [BDRip ...]"
     # and "Ep12 - True Route". Require token boundaries (not "Tape01") and
     # retain ambiguity when more than one episode label is present.
@@ -212,11 +222,21 @@ def first_season_by_year_and_count(candidate, requests):
     years = {int(value) for value in re.findall(r"\b(?:19|20)\d{2}\b", candidate.title)}
     if media.year is None or media.year not in years:
         return False
-    complete_counts = {
-        int(total)
-        for available, total in re.findall(r"(?<!\d)(\d{1,4})\s+из\s+(\d{1,4})(?!\d)", candidate.title, re.I)
-        if int(available) == int(total)
-    }
+    # TV+Special packs state main and bonus counts separately (12+3 из 12+3).
+    # Never partially read that expression as "3 из 12", or sum specials into S01.
+    counts = re.findall(
+        r"(?<![\d+])(\d{1,4}(?:\s*\+\s*\d{1,4})*)\s+из\s+"
+        r"(\d{1,4}(?:\s*\+\s*\d{1,4})*)(?![\d+])",
+        candidate.title,
+        re.I,
+    )
+    mixed_tv = bool(re.search(r"\[(?:TV|ТВ)\s*\+\s*Specials?\]", candidate.title, re.I))
+    complete_counts = set()
+    for available, total in counts:
+        available_parts = [int(v.strip()) for v in available.split("+")]
+        total_parts = [int(v.strip()) for v in total.split("+")]
+        if available_parts == total_parts and (len(total_parts) == 1 or (mixed_tv and len(total_parts) == 2)):
+            complete_counts.add(total_parts[0])
     first_season_counts = {
         int(season["episode_count"])
         for season in media.seasons
