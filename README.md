@@ -1,12 +1,12 @@
 # Lazarr
 
-*Not Lazarus. It's from lazy. Laz-arr. Get it?*
+*Not Lazarus. Think "lazy". Laz-arr. Get it?*
 
 ---
 
 ## Запуск
 
-1. Установите [Docker Desktop](https://www.docker.com/products/docker-desktop/) в режиме Linux containers.
+1. Установите [Docker Desktop](https://www.docker.com/products/docker-desktop/) в режиме WSL2.
 2. Сохраните [compose.yaml](compose.yaml) в отдельную папку и откройте в ней Терминал через ПКМ.
 3. Выполните:
 
