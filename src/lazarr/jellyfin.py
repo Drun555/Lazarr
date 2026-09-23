@@ -28,7 +28,7 @@ from lazarr.jellyfin_state import (
 
 from lazarr.library import LIBRARIES, library_kind
 from lazarr.languages import CODES, language, language_name
-from lazarr.matcher import classify_external_subtitles
+from lazarr.matcher import classify_external_subtitles, subtitle_title_is_forced
 from lazarr.models import (
     Download,
     Episode,
@@ -858,7 +858,8 @@ def media_streams(
             "Index": (integer(raw.get("index")) if raw.get("index") is not None else len(internal_streams)),
             "IsExternal": False,
             "IsDefault": bool(raw.get("disposition", {}).get("default")),
-            "IsForced": bool(raw.get("disposition", {}).get("forced")),
+            "IsForced": bool(raw.get("disposition", {}).get("forced"))
+            or (stream_type == "subtitle" and subtitle_title_is_forced(tags.get("title"))),
             "Width": integer(raw.get("width")),
             "Height": integer(raw.get("height")),
             "Channels": integer(raw.get("channels")),
@@ -1961,7 +1962,9 @@ def install_jellyfin_api(app, context):
         )
 
     def build_latest(ctx, user, params):
-        options = dict(params)
+        # Clients such as Fladder send arrays as repeated query parameters.
+        # A plain dict keeps only the last value (e.g. Thumb instead of Primary).
+        options = {key: ",".join(csv_parameter(params, key)) for key in params}
         options.setdefault("includeItemTypes", "Movie,Episode")
         options.setdefault("sortBy", "DateCreated,SortName")
         options.setdefault("sortOrder", "Descending,Ascending")

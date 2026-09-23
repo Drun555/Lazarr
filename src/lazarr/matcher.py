@@ -41,6 +41,12 @@ def normalized(value):
     return re.sub(r"[^\w]+", " ", unicodedata.normalize("NFKC", value).casefold()).strip()
 
 
+def subtitle_title_is_forced(title):
+    """Recognize signs-only titles without overriding an explicit full-track label."""
+    tokens = set(normalized(title or "").split())
+    return bool(tokens & FORCED_SUBTITLE_MARKERS) and not bool(tokens & FULL_SUBTITLE_MARKERS)
+
+
 def resolution(value):
     hits = {int(v) for v in re.findall(r"(?<!\d)(480|576|720|1080|1440|2160|4320)[pi]\b", value, re.I)}
     if re.search(r"\b4k\b", value, re.I):

@@ -13,6 +13,11 @@ import uuid
 from fastapi import HTTPException
 
 
+# Request-scoped response assembly is not user-facing background processing.
+# Keep it in the bounded executor, but out of the Processes list and history.
+API_REQUEST_KINDS = frozenset({"catalog", "latest", "item-detail", "library-detail", "next-up"})
+
+
 class BackgroundTasks:
     def __init__(self, capacity=64):
         # Long ffmpeg jobs must not starve interactive catalogue calculations.
@@ -68,14 +73,15 @@ class BackgroundTasks:
             self.active.pop(job["id"], None)
             if key:
                 self.shared.pop(key, None)
-            self.history.append(dict(job))
+            if job["kind"] not in API_REQUEST_KINDS:
+                self.history.append(dict(job))
 
     def snapshot(self, user_id):
         with self.lock:
             rows = [
                 dict(row)
                 for row in [*self.active.values(), *reversed(self.history)]
-                if row["owner_id"] in {None, user_id}
+                if row["owner_id"] in {None, user_id} and row["kind"] not in API_REQUEST_KINDS
             ]
         for row in rows:
             row.pop("owner_id")

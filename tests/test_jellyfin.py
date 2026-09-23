@@ -2,6 +2,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
@@ -662,6 +663,46 @@ def test_jellyfin_exposes_external_forced_subtitle_metadata(core, media, season)
         assert converted.status_code == 200
         assert b"00:00:01,000 --> 00:00:02,000" in converted.content
         assert "Привет" in converted.text
+
+
+@pytest.mark.parametrize(
+    "title,expected",
+    [
+        ("Надписи", True),
+        ("Русский [НАДПИСИ]", True),
+        ("Signs & Songs", True),
+        ("Forced", True),
+        ("Полные", False),
+        ("Full (dialogue + signs)", False),
+        (None, False),
+    ],
+)
+def test_jellyfin_recognizes_embedded_signs_by_title(core, media, season, title, expected):
+    playable_episode(core, media, season)
+    config, db, _, _ = core
+    with db.session() as session:
+        asset = session.scalar(select(MediaAsset))
+        probe = dict(asset.probe)
+        streams = [dict(stream) for stream in probe["streams"]]
+        subtitle = next(stream for stream in streams if stream.get("codec_type") == "subtitle")
+        subtitle["tags"] = {**subtitle.get("tags", {}), "title": title}
+        subtitle["disposition"] = {"forced": 0}
+        asset.probe = {**probe, "streams": streams}
+        index = subtitle["index"]
+    with TestClient(create_app(config)) as client:
+        jellyfin_login(client)
+        episode = client.get("/Items", params={"recursive": "true", "includeItemTypes": "Episode"}).json()[
+            "Items"
+        ][0]
+        source = client.post(f"/Items/{episode['Id']}/PlaybackInfo", json={}).json()["MediaSources"][0]
+        subtitles = [s for s in source["MediaStreams"] if s["Type"] == "Subtitle"]
+        target = next(s for s in subtitles if not s["IsExternal"] and s["Title"] == title)
+        assert target["IsForced"] is expected
+        if expected:
+            assert source["DefaultSubtitleStreamIndex"] != target["Index"]
+        with db.session() as session:
+            saved = session.scalar(select(MediaAsset)).probe["streams"]
+            assert next(s for s in saved if s["index"] == index)["disposition"]["forced"] == 0
 
 
 def test_jellyfin_can_keep_forced_subtitle_priority(core, media, season):

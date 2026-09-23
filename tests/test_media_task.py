@@ -140,14 +140,20 @@ async def test_merge_migration_preserves_download_links_and_remaps_ids(core, med
                 whole_season=True,
             )
         )
-        sub = session.scalar(select(Subtask))
-        newsub = Subtask(task_id=newer.id, episode_id=sub.episode_id, part_key=sub.part_key)
-        session.add(newsub)
-        session.flush()
+        # The current ORM model includes columns absent from revision 0009.
+        sub = session.execute(text("SELECT id, episode_id, part_key FROM subtasks")).one()
+        newsub_id = session.execute(
+            text(
+                "INSERT INTO subtasks (task_id, episode_id, part_key, status, next_search_at, "
+                "lease_until, attempts, missing_subtitle_languages) "
+                "VALUES (:task, :episode, :part, 'queued', 0, 0, 0, '[]') RETURNING id"
+            ),
+            {"task": newer.id, "episode": sub.episode_id, "part": sub.part_key},
+        ).scalar_one()
         link = session.scalar(select(SubtaskAsset))
         session.add(
             SubtaskAsset(
-                subtask_id=newsub.id,
+                subtask_id=newsub_id,
                 asset_id=link.asset_id,
                 pending=True,
                 preflight=deepcopy(link.preflight),
@@ -156,13 +162,13 @@ async def test_merge_migration_preserves_download_links_and_remaps_ids(core, med
         )
         decision = session.scalar(select(CandidateDecision))
         session.add(
-            CandidateDecision(subtask_id=newsub.id, release_id=decision.release_id, report=decision.report)
+            CandidateDecision(subtask_id=newsub_id, release_id=decision.release_id, report=decision.report)
         )
         download = session.scalar(select(Download))
         plan = deepcopy(download.plan)
-        plan["bindings"].append({**plan["bindings"][0], "subtask_id": newsub.id})
+        plan["bindings"].append({**plan["bindings"][0], "subtask_id": newsub_id})
         download.plan = plan
-        keep_task, keep_sub, old_sub = newer.id, newsub.id, sub.id
+        keep_task, keep_sub, old_sub = newer.id, newsub_id, sub.id
     db.migrate()
     with db.session() as session:
         assert session.scalar(select(func.count()).select_from(Task)) == 1

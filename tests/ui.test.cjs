@@ -44,7 +44,7 @@ test('Tasks popup shows running and queued jobs without switching tabs',async()=
     assert.equal(document.querySelector('#background-tasks-dialog').open,true);
     assert.match(document.querySelector('#background-tasks-open').textContent,/^Процессы/);
     assert.equal(document.querySelector('#process-pill').hidden,false);
-    assert.match(document.querySelector('#process-tooltip').textContent,/Идёт загрузка: 1/);
+    assert.equal(document.querySelector('.process-preview-count.download').textContent,'1');
     assert.match(document.querySelector('#process-tooltip').textContent,/Trickplay/);
     assert.equal(document.querySelector('#background-tasks-dialog').getAttribute('aria-label'),'Процессы');
     assert.equal(document.querySelector('#background-tasks-title'),null);
@@ -85,18 +85,81 @@ test('process indicator updates while closed and waiting selection applies to ma
     };
     await w.pollBackgroundTasks();
     assert.equal(d.querySelector('#background-tasks-dialog').open,false);
-    assert.equal(d.querySelector('#process-pill').textContent,'! 1');
-    assert.match(d.querySelector('#process-tooltip').textContent,/Требуют выбора: 1/);
+    assert.equal(d.querySelector('#process-pill .selection b').textContent,'1');
+    assert.match(d.querySelector('#process-pill').getAttribute('aria-label'),/Требуют выбора: 1/);
+    assert.equal(d.querySelector('#process-tooltip img'),null);
     d.querySelector('#background-tasks-open').click();await settle();await settle();
     assert.equal(d.querySelector('#background-selection-list img'),null);
     d.querySelector('[data-process-select="11"]').click();await settle();await settle();
     assert.equal(d.querySelector('#background-tasks-dialog').open,false);
+    assert.match(d.querySelector('.candidate-coverage').textContent,/Подходит ещё для 1 серии/);
     d.querySelector('[data-choose="55"]').click();await settle();await settle();
     assert.match(d.querySelector('#modal-body').textContent,/S01E01, S01E02/);
     d.querySelector('[data-process-confirm]').click();await settle();await settle();
-    assert.deepEqual(requests,[{preview:true},{subtask_ids:[11,12]}]);
+    assert.deepEqual(requests,[{preview:true},{preview:true},{subtask_ids:[11,12]}]);
     assert.equal(d.querySelector('#process-pill').hidden,true);
     assert.deepEqual(errors,[]);
+  }finally{dom.window.close();}
+});
+
+test('wait button hides selection and refreshes process count',async()=>{
+  const {dom,w,document:d,errors}=await setup();
+  try{
+    const original=w.fetch;let hidden=false,posts=0;
+    w.fetch=async(url,options={})=>{
+      if(url==='/api/v1/background-tasks')return {ok:true,status:200,json:async()=>({items:[],downloads:[],selection:hidden?[]:[{id:11,title:'Show',season:2,episode:4}]})};
+      if(url==='/api/v1/subtasks/11/wait'){assert.equal(options.method,'POST');hidden=true;posts++;return {ok:true,status:200,json:async()=>({hidden_until:9999999999})};}
+      return original(url,options);
+    };
+    d.querySelector('#background-tasks-open').click();await settle();await settle();
+    const button=d.querySelector('[data-process-wait="11"]');assert.equal(button.textContent,'Ждать');
+    button.click();await settle();await settle();
+    assert.equal(posts,1);assert.equal(d.querySelector('[data-process-select="11"]'),null);
+    assert.equal(d.querySelector('#process-pill').hidden,true);
+    assert.match(d.querySelector('#toast').textContent,/Поиск раздачи продолжится/);
+    assert.deepEqual(errors,[]);
+  }finally{dom.window.close();}
+});
+
+test('pending candidate cards show individual coverage, failures and manual mapping without selecting',async()=>{
+  const {dom,w,document:d,errors}=await setup();
+  try{
+    const original=w.fetch,requests=[];
+    w.fetch=async(url,options={})=>{
+      if(url==='/api/v1/subtasks/11/candidates')return {ok:true,status:200,json:async()=>[1,2,3,4,5,6].map(id=>({id,candidate:{title:`Pack ${id}`,url:'https://example.com'},action:id===6?'rejected':'',report:{binding:id===5?null:{video_index:0},criteria:[]}}))};
+      const match=url.match(/\/candidates\/(\d+)\/choice-pending$/);
+      if(match){
+        const id=Number(match[1]);requests.push({id,payload:JSON.parse(options.body)});
+        const count=id===1?21:id===2?2:0;
+        return {ok:id!==4,status:id===4?400:200,json:async()=>id===4?{detail:'Файл недоступен'}:{subtask_ids:[11,...Array.from({length:count},(_,i)=>100+i)],episodes:['S02E01','S02E02'],selected:count+1,total:22}};
+      }
+      return original(url,options);
+    };
+    await w.testCandidateDialog(11,true);await settle();await settle();
+    const nodes=[...d.querySelectorAll('.candidate-coverage')];
+    assert.match(nodes[0].textContent,/ещё для 21 серии/);
+    assert.match(nodes[1].textContent,/ещё для 2 серий/);
+    assert.match(nodes[2].textContent,/только для этой/);
+    assert.match(nodes[3].textContent,/Не удалось уточнить/);
+    assert.match(nodes[4].textContent,/сопоставьте файлы/);
+    assert.match(nodes[5].textContent,/отклонена/);
+    assert.deepEqual(requests.map(r=>r.id),[1,2,3,4]);
+    assert.ok(requests.every(r=>r.payload.preview===true));
+    assert.deepEqual(errors,[]);
+  }finally{dom.window.close();}
+});
+test('closing candidate dialog stops queued coverage checks',async()=>{
+  const {dom,w,document:d}=await setup();
+  try{
+    const original=w.fetch;let finish,calls=0;
+    w.fetch=async(url,options)=>{
+      if(url==='/api/v1/subtasks/11/candidates')return {ok:true,status:200,json:async()=>[1,2].map(id=>({id,candidate:{title:'Pack',url:'https://example.com'},report:{binding:{video_index:0},criteria:[]}}))};
+      if(url.endsWith('/choice-pending')){calls++;await new Promise(resolve=>{finish=resolve;});return {ok:true,status:200,json:async()=>({subtask_ids:[11,12],episodes:[]})};}
+      return original(url,options);
+    };
+    await w.testCandidateDialog(11,true);
+    assert.equal(calls,1);d.querySelector('#modal').close();finish();await settle();
+    assert.equal(calls,1);
   }finally{dom.window.close();}
 });
 
@@ -164,7 +227,7 @@ async function setup(){
     return {ok:true,status:200,json:async()=>result};
   };
   // A single realm matches ordered classic defer scripts in the real document.
-  w.eval(fs.readFileSync('src/lazarr/static/language-picker.js','utf8')+'\n'+fs.readFileSync('src/lazarr/static/library.js','utf8')+'\n'+fs.readFileSync('src/lazarr/static/app.js','utf8')+'\nwindow.pollBackgroundTasks=pollBackgroundTasks;window.testOpenLibraryMedia=openLibraryMedia;window.testRenderLibraries=renderLibraries;window.testSchedulePoll=schedulePoll;window.testRefreshLibraryProgress=refreshLibraryProgress;');
+  w.eval(fs.readFileSync('src/lazarr/static/language-picker.js','utf8')+'\n'+fs.readFileSync('src/lazarr/static/library.js','utf8')+'\n'+fs.readFileSync('src/lazarr/static/app.js','utf8')+'\nwindow.testCandidateDialog=candidateDialog;window.pollBackgroundTasks=pollBackgroundTasks;window.testOpenLibraryMedia=openLibraryMedia;window.testRenderLibraries=renderLibraries;window.testSchedulePoll=schedulePoll;window.testRefreshLibraryProgress=refreshLibraryProgress;');
   await settle();await settle();
   return {dom,w,document:w.document,errors,calls,setChoice:(files,selection,bindings={})=>{choiceFiles=files;choiceSelection=selection;choiceBindings=bindings},setMetadata:value=>metadata=value,setActivity:value=>activity=value,setProviders:value=>providers=value,setTasks:value=>{tasks.splice(0,tasks.length,...value)},setTaskChoices:value=>taskChoices=value,setLibrary:(groups,detail)=>{libraries=groups;libraryDetail=detail},updateLibraryDetail:update=>update(libraryDetail)};
 }
@@ -759,6 +822,11 @@ test('libraries switch categories, show details and delete media',async()=>{
     assert.equal(d.querySelector('.episode-still'),still);
     assert.equal(d.querySelector('.episode-download .progress').getAttribute('aria-valuenow'),'55.0');
     assert.equal(d.querySelector('[data-candidates="11"]').textContent,'Выбрать раздачу');
+    assert.equal(w.testRefreshLibraryProgress([{id:5,state:'downloading',stats:{progress:1}}]),true);
+    assert.equal(d.querySelector('[data-episode="14"] summary .progress'),null);
+    updateLibraryDetail(item=>{item.episodes[1].download.state='seeding';item.episodes[1].download.progress=.99;});
+    await w.testOpenLibraryMedia(2,true);
+    assert.equal(d.querySelector('[data-episode="14"] summary .progress'),null);
     d.querySelector('#library-delete').click();
     assert.equal(d.querySelector('#modal').open,true);
     const form=d.querySelector('#delete-media-form');
@@ -776,6 +844,22 @@ test('library theme uses flexible columns and retains the mobile two-column layo
   const css=fs.readFileSync('src/lazarr/static/material.css','utf8');
   assert.match(css,/\.library-grid\s*\{\s*grid-template-columns:\s*repeat\(auto-fill,\s*minmax\(180px,\s*1fr\)\)/);
   assert.match(css,/@media\s*\(max-width:\s*700px\)\s*\{[\s\S]*?\.library-grid\s*\{\s*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/);
+});
+
+test('library tiles show waiting selection alongside downloads and clear it on refresh',async()=>{
+  const {dom,w,document:d,setLibrary}=await setup();
+  try{
+    const item={id:1,title:'Show',kind:'tv',selection_count:22,download:{progress:.5,download_rate:1024}};
+    setLibrary([{id:'series',name:'Сериалы',items:[item,{id:2,title:'Ready',kind:'tv'}]}],{});
+    d.querySelector('[data-tab=library]').click();await settle();await settle();
+    assert.match(d.querySelector('.library-tile-selection').textContent,/Требуется выбор22 серии/);
+    assert.equal(d.querySelectorAll('.library-tile-selection').length,1);
+    assert.ok(d.querySelector('.library-tile [role=progressbar]'));
+    item.selection_count=0;w.testRenderLibraries(true);
+    assert.equal(d.querySelector('.library-tile-selection'),null);
+    item.selection_count=1;item.kind='movie';w.testRenderLibraries(true);
+    assert.equal(d.querySelector('.library-tile-selection').textContent,'Требуется выбор');
+  }finally{dom.window.close();}
 });
 
 test('silent library refresh keeps the tile grid class',async()=>{

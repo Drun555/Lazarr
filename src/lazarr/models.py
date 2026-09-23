@@ -136,6 +136,7 @@ class Subtask(Base):
     status: Mapped[str] = mapped_column(default="queued")
     last_search_at: Mapped[float | None] = mapped_column(nullable=True)
     next_search_at: Mapped[float] = mapped_column(default=0.0)
+    selection_hidden_until: Mapped[float] = mapped_column(default=0.0, server_default="0")
     lease_until: Mapped[float] = mapped_column(default=0.0)
     attempts: Mapped[int] = mapped_column(default=0)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)

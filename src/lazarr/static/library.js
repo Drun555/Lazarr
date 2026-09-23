@@ -20,9 +20,12 @@ function renderLibraries(silent=false){
   const selected=libraries.find(l=>l.id===librarySelection);
   const tiles=selected?.items.length?selected.items.map(m=>{
     const download=m.download;
+    const count=Number(m.selection_count)||0;
+    const episodeWord=count%10===1&&count%100!==11?'серия':count%10>=2&&count%10<=4&&(count%100<12||count%100>14)?'серии':'серий';
+    const selection=count>0?`<span class="library-tile-selection"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><path d="M12 8v5m0 3h.01M10.3 3.8 2.1 18a2 2 0 0 0 1.7 3h16.4a2 2 0 0 0 1.7-3L13.7 3.8a2 2 0 0 0-3.4 0Z"/></svg><span>Требуется выбор${m.kind==='tv'?`<small>${count} ${episodeWord}</small>`:''}</span></span>`:'';
     const initial=esc((m.title||'?').trim().charAt(0).toUpperCase()||'?');
     const poster=`<span class="library-poster-frame"><span class="library-poster-empty" aria-hidden="true"><b>${initial}</b><small>Нет обложки</small></span>${m.poster?`<img src="${esc(posterUrl(m.poster))}" alt="" loading="lazy">`:''}</span>`;
-    return `<button class="library-tile" data-library-media="${m.id}">${poster}<strong>${esc(m.title)}</strong><span class="fine">${m.year||'Год неизвестен'}${m.taxonomy_known?'':' · Классификация уточняется'}</span>${download?`<div class="library-tile-status"><div class="library-tile-download"><span>${(progressPercent(download.progress)).toFixed(1)}%</span><span>${bytes(download.download_rate)}/с</span></div>${progressBar(download.progress,`Загрузка ${m.title}`)}</div>`:''}</button>`;
+    return `<button class="library-tile" data-library-media="${m.id}">${poster}<strong>${esc(m.title)}</strong><span class="fine">${m.year||'Год неизвестен'}${m.taxonomy_known?'':' · Классификация уточняется'}</span>${selection||download?`<div class="library-tile-status">${selection}${download?`<div class="library-tile-download"><span>${(progressPercent(download.progress)).toFixed(1)}%</span><span>${bytes(download.download_rate)}/с</span></div>${progressBar(download.progress,`Загрузка ${m.title}`)}`:''}</div>`:''}</button>`;
   }).join(''):'<p class="muted">В этой библиотеке пока нет произведений.</p>';
   const container=$('#library-items');
   if(silent){
@@ -65,7 +68,8 @@ function renderEpisode(episode){
   const number=episode.episode==null?'Фильм':`${episode.episode}.`;
   const visual=`<span class="episode-visual"><span class="episode-still-empty" aria-hidden="true"><b>${episode.episode==null?'▶':esc(episode.episode)}</b><small>${episode.episode==null?'Видео':'Серия'}</small></span>${episode.still?`<img class="episode-still" src="${esc(posterUrl(episode.still))}" alt="" loading="lazy">`:''}</span>`;
   const status=episode.statuses?.length?episode.statuses.map(s=>esc(statuses[s]||s)).join(', '):episode.released?'Не запрошено':'Ожидание выхода';
-  return `<details class="library-episode" data-episode="${esc(episode.id)}"><summary><div class="episode-summary">${visual}<div><strong>${esc(number)} ${esc(episode.title)}</strong><span class="fine">${libraryDate(episode.air_date)} · ${status}</span>${episode.download?progressBar(episode.download.progress,'Прогресс серии'):''}</div></div></summary>${episode.overview?`<p class="episode-overview">${esc(episode.overview)}</p>`:''}<div class="episode-meta"><span class="fine">Последний поиск: ${searchDate(episode.last_search_at)}</span>${episodeActions(episode)}</div>${episode.files?.length?episode.files.map(libraryFile).join(''):'<p class="muted">Файл и раздача пока не выбраны.</p>'}</details>`;
+  const showProgress=episode.download&&['starting','downloading','paused','stopped','error'].includes(episode.download.state)&&progressPercent(episode.download.progress)<100;
+  return `<details class="library-episode" data-episode="${esc(episode.id)}"><summary><div class="episode-summary">${visual}<div><strong>${esc(number)} ${esc(episode.title)}</strong><span class="fine">${libraryDate(episode.air_date)} · ${status}</span>${showProgress?progressBar(episode.download.progress,'Прогресс серии'):''}</div></div></summary>${episode.overview?`<p class="episode-overview">${esc(episode.overview)}</p>`:''}<div class="episode-meta"><span class="fine">Последний поиск: ${searchDate(episode.last_search_at)}</span>${episodeActions(episode)}</div>${episode.files?.length?episode.files.map(libraryFile).join(''):'<p class="muted">Файл и раздача пока не выбраны.</p>'}</details>`;
 }
 function renderSeason(item,number,episodes,info={}){
   const ready=episodes.filter(episode=>episode.files?.some(file=>file.verified)).length;

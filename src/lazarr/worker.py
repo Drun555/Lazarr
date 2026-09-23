@@ -1429,7 +1429,13 @@ class Worker:
             if any(track.language_source == "content" for track in binding.tracks):
                 link.preflight = {**link.preflight, "binding": binding.model_dump(mode="json")}
             sub.missing_subtitle_languages = missing_subs
-            mismatch = any(c.result == MatchResult.MISMATCH for c in criteria)
+            # Manual selection accepts the actual resolution, but not an audio
+            # mismatch. Keep measured quality in the report without blocking it.
+            for criterion in criteria:
+                if criterion.field == "resolution" and link.override:
+                    criterion.required = False
+                    criterion.reason += " (ручной выбор: ограничение разрешения не применяется)"
+            mismatch = any(c.required and c.result == MatchResult.MISMATCH for c in criteria)
             unknown = any(c.result == MatchResult.UNKNOWN for c in criteria)
             link.verification = {
                 "phase": "verification",

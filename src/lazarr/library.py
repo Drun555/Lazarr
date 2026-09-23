@@ -4,7 +4,7 @@ import asyncio
 from contextlib import nullcontext
 import time
 from pathlib import Path
-from sqlalchemy import select
+from sqlalchemy import func, select
 from lazarr.models import (
     Media,
     Season,
@@ -174,6 +174,17 @@ class LibraryService:
             items = list(db.scalars(select(Media).order_by(Media.title, Media.id)))
             active = {"starting", "downloading"}
             summaries = {}
+            selection_counts = dict(
+                db.execute(
+                    select(Task.media_id, func.count(Subtask.id))
+                    .join(Subtask, Subtask.task_id == Task.id)
+                    .where(
+                        Subtask.status == "needs_selection",
+                        Subtask.selection_hidden_until <= time.time(),
+                    )
+                    .group_by(Task.media_id)
+                ).all()
+            )
             for media in items:
                 downloads = {
                     download.id: download
@@ -199,12 +210,16 @@ class LibraryService:
                 {
                     "id": key,
                     "name": name,
-                    "items": [self.tile(m, summaries.get(m.id)) for m in items if library_kind(m) == key],
+                    "items": [
+                        self.tile(m, summaries.get(m.id), selection_counts.get(m.id, 0))
+                        for m in items
+                        if library_kind(m) == key
+                    ],
                 }
                 for key, name in LIBRARIES
             ]
 
-    def tile(self, media, download=None):
+    def tile(self, media, download=None, selection_count=0):
         return {
             "id": media.id,
             "title": media.title,
@@ -214,6 +229,7 @@ class LibraryService:
             "library": library_kind(media),
             "taxonomy_known": bool(media.metadata_json.get("taxonomy_known")),
             "download": download,
+            "selection_count": selection_count,
         }
 
     def detail(self, identity, episode_id=None, *, include_versions=True):

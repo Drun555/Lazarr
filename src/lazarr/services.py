@@ -1,4 +1,6 @@
 import time
+import calendar
+from datetime import datetime, timezone
 from sqlalchemy import select, update, text
 from pydantic import BaseModel, Field
 from lazarr.search import enqueue
@@ -337,6 +339,18 @@ class TaskService:
             requirements=Requirements.model_validate(task.requirements),
         )
 
+    def wait_for_release(self, subtask_id, user_id):
+        now = datetime.now(timezone.utc)
+        year, month = (now.year + 1, 1) if now.month == 12 else (now.year, now.month + 1)
+        until = now.replace(year=year, month=month, day=min(now.day, calendar.monthrange(year, month)[1]))
+        with self.db.session() as db:
+            subtask = db.get(Subtask, subtask_id)
+            if subtask is None or subtask.status != "needs_selection":
+                raise ValueError("Серия больше не требует выбора раздачи")
+            subtask.selection_hidden_until = until.timestamp()
+            audit(db, user_id, "subtask.wait", str(subtask_id))
+        return {"hidden_until": until.timestamp()}
+
     def selection_activity(self):
         """One cheap query; never inspect torrents while polling the top bar."""
         with self.db.session() as db:
@@ -356,7 +370,10 @@ class TaskService:
                     .join(Media, Media.id == Task.media_id)
                     .join(Episode, Episode.id == Subtask.episode_id)
                     .join(Season, Season.id == Episode.season_id)
-                    .where(Subtask.status == "needs_selection")
+                    .where(
+                        Subtask.status == "needs_selection",
+                        Subtask.selection_hidden_until <= time.time(),
+                    )
                     .order_by(Media.title, Season.number, Episode.number, Subtask.id)
                 )
             ]

@@ -77,6 +77,40 @@ def test_catalog_filters_discovery_projection_and_scope(core, media, season):
         assert client.get("/Items/Filters", params={"userId": auth["User"]["Id"]}).status_code == 200
 
 
+def test_latest_preserves_repeated_image_types_and_fields(core, media, season):
+    playable_episode(core, media, season)
+    with core[1].session() as db:
+        row = db.scalar(select(Media))
+        row.metadata_json = {
+            **row.metadata_json,
+            "poster": "https://image.tmdb.org/t/p/w500/poster.jpg",
+            "backdrop": "https://image.tmdb.org/t/p/w1280/backdrop.jpg",
+            "overview": "Series overview",
+            "genres": ["Drama"],
+        }
+    with TestClient(create_app(core[0])) as client:
+        auth = jellyfin_login(client)
+        for path in ("/Items/Latest", f"/Users/{auth['User']['Id']}/Items/Latest"):
+            for extra in ("", "&sortBy=DateCreated"):
+                query = (
+                    "fields=Genres&fields=Overview&imageTypeLimit=1"
+                    "&enableImageTypes=Primary&enableImageTypes=Backdrop&enableImageTypes=Thumb"
+                )
+                response = client.get(f"{path}?{query}{extra}")
+                assert response.status_code == 200
+                item = response.json()[0]
+                assert item["Type"] == "Series"
+                assert item["ImageTags"]["Primary"]
+                assert item["BackdropImageTags"]
+                assert item["Genres"] == ["Drama"]
+                assert item["Overview"] == "Series overview"
+                compact = client.get(
+                    f"{path}?fields=Genres,Overview&imageTypeLimit=1"
+                    f"&enableImageTypes=Primary,Backdrop,Thumb{extra}"
+                ).json()[0]
+                assert item == compact
+
+
 def test_latest_multisort_suggestions_and_similarity(core, media, season):
     playable_episode(core, media, season)
     with core[1].session() as db:

@@ -735,6 +735,10 @@ def create_app(config: RuntimeConfig | None = None):
         ctx.scheduler.discard_satisfied()
         return result
 
+    @app.post("/api/v1/subtasks/{subtask_id}/wait")
+    async def wait_for_release(subtask_id: int, request: Request, user=Depends(permission("tasks"))):
+        return await asyncio.to_thread(context(request).service.wait_for_release, subtask_id, user.id)
+
     class PendingChoiceInput(BaseModel):
         preview: bool = False
         subtask_ids: list[int] = Field(default_factory=list, max_length=10000)

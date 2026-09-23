@@ -3,11 +3,27 @@ from sqlalchemy import select
 from fastapi.testclient import TestClient
 from lazarr.app import create_app
 from lazarr.library import LibraryService, library_kind
-from lazarr.models import Media, SubtaskAsset, MediaAsset, Download
+from lazarr.models import Media, Subtask, SubtaskAsset, MediaAsset, Download
 from lazarr.sdk import MetadataItem, ProviderError
 from lazarr.services import CreateTask
 from test_api import login
 from test_worker import worker_setup as worker_setup
+
+
+def test_library_tiles_count_waiting_selection(core, media, season):
+    _, db, plugins, service = core
+    service.create_from_metadata(CreateTask(media_id="42", kind="tv", season=1), media, season, 1)
+    library = LibraryService(db, plugins, service)
+    assert library.list()[0]["items"][0]["selection_count"] == 0
+    with db.session() as session:
+        subtasks = list(session.scalars(select(Subtask).order_by(Subtask.id)))
+        for subtask in subtasks[:2]:
+            subtask.status = "needs_selection"
+        identity = subtasks[0].id
+    assert library.list()[0]["items"][0]["selection_count"] == 2
+    with db.session() as session:
+        session.get(Subtask, identity).status = "downloading"
+    assert library.list()[0]["items"][0]["selection_count"] == 1
 
 
 def test_classification_includes_anime_movies_but_not_japanese_live_action():

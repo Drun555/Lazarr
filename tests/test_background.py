@@ -109,6 +109,43 @@ def test_processes_show_waiting_episodes_and_use_scoped_batch_choice(core, media
         client.app.state.ctx.engine = None
 
 
+def test_wait_hides_selection_until_expiry_without_pausing_search(core, media, season):
+    import time
+    from fastapi.testclient import TestClient
+    from lazarr.app import create_app
+    from lazarr.models import Subtask, Task
+    from lazarr.services import CreateTask
+    from test_api import login
+
+    config, database, _, service = core
+    service.create_from_metadata(CreateTask(media_id="42", kind="tv", season=1), media, season, 1)
+    with database.session() as db:
+        sub = db.get(Subtask, 1)
+        sub.status = "needs_selection"
+        sub.next_search_at = 123
+    with TestClient(create_app(config)) as client:
+        assert client.post("/api/v1/subtasks/1/wait").status_code == 401
+        login(client)
+        result = client.post("/api/v1/subtasks/1/wait")
+        assert result.status_code == 200
+        until = result.json()["hidden_until"]
+        assert 27 * 86400 < until - time.time() <= 31 * 86400
+        assert client.get("/api/v1/background-tasks").json()["selection"] == []
+        tiles = [item for group in client.get("/api/v1/libraries").json() for item in group["items"]]
+        assert tiles[0]["selection_count"] == 0
+        with database.session() as db:
+            sub = db.get(Subtask, 1)
+            assert sub.status == "needs_selection" and sub.next_search_at == 123
+            assert not db.get(Task, sub.task_id).paused
+            assert sub.selection_hidden_until == until
+            sub.selection_hidden_until = time.time() - 1
+        assert len(client.get("/api/v1/background-tasks").json()["selection"]) == 1
+        tiles = [item for group in client.get("/api/v1/libraries").json() for item in group["items"]]
+        assert tiles[0]["selection_count"] == 1
+        assert client.post("/api/v1/subtasks/99999/wait").status_code == 422
+        assert client.post("/api/v1/subtasks/2/wait").status_code == 422
+
+
 def test_download_activity_in_tasks_is_compact_and_excludes_finished(core):
     from fastapi.testclient import TestClient
     from lazarr.app import create_app
@@ -220,11 +257,51 @@ def test_next_up_keeps_health_and_tasks_responsive(core, monkeypatch):
                 assert client.get("/health").status_code == 200
                 response = client.get("/api/v1/background-tasks")
                 assert response.status_code == 200
-                assert response.json()["items"][0]["kind"] == "next-up"
-                assert response.json()["items"][0]["state"] == "running"
+                assert response.json()["items"] == []
+                assert not future.done()
             finally:
                 release.set()
             assert future.result().status_code == 200
+
+
+@pytest.mark.parametrize("kind", ["catalog", "latest", "item-detail", "library-detail", "next-up"])
+async def test_api_response_jobs_are_hidden_but_still_run_in_bounded_queue(kind):
+    queue = BackgroundTasks(capacity=2)
+    started, release = threading.Event(), threading.Event()
+
+    def work():
+        started.set()
+        assert release.wait(5)
+        return 42
+
+    first = asyncio.create_task(queue.run(kind, work, lane="catalog", owner_id=1))
+    second = None
+    try:
+        assert await asyncio.to_thread(started.wait, 2)
+        second = asyncio.create_task(queue.run(kind, lambda: 43, lane="catalog", owner_id=1))
+        await asyncio.sleep(0)
+        assert len(queue.active) == 2
+        assert queue.snapshot(1)["items"] == []
+        with pytest.raises(HTTPException):
+            await queue.run(kind, lambda: 0, lane="catalog")
+    finally:
+        release.set()
+        assert await first == 42
+        if second:
+            assert await second == 43
+        await queue.close()
+    assert not queue.active and not queue.history
+
+
+async def test_api_requests_do_not_evict_real_background_history():
+    queue = BackgroundTasks()
+    try:
+        await queue.run("subtitle-analysis", lambda: None)
+        for _ in range(35):
+            await queue.run("latest", lambda: None, lane="catalog")
+        assert [row["kind"] for row in queue.snapshot(1)["items"]] == ["subtitle-analysis"]
+    finally:
+        await queue.close()
 
 
 async def test_queue_is_bounded_observable_and_lanes_are_independent():

@@ -149,6 +149,84 @@ def worker_setup(core, media):
     return worker, engine, Demo
 
 
+async def test_waiting_for_release_does_not_stop_automatic_search(core, media, season, worker_setup):
+    _, db, _, service = core
+    worker, _, provider = worker_setup
+    service.create_from_metadata(CreateTask(media_id="42", kind="tv", season=1), media, season, 1)
+    with db.session() as session:
+        session.get(Subtask, 1).status = "needs_selection"
+    service.wait_for_release(1, 1)
+    assert 1 in [identity for group in await worker.due_groups() for identity in group]
+    await worker.run_due()
+    assert provider.calls > 0
+    with db.session() as session:
+        assert session.get(Subtask, 1).last_search_at
+        assert session.scalar(select(SubtaskAsset).where(SubtaskAsset.subtask_id == 1))
+
+
+@pytest.mark.parametrize(
+    "manual,height,audio,accepted",
+    [
+        (True, 576, "rus", True),
+        (True, 4320, "rus", True),
+        (False, 576, "rus", False),
+        (False, 4320, "rus", False),
+        (True, 576, "eng", False),
+    ],
+)
+async def test_manual_selection_ignores_verified_resolution_only(
+    core, media, season, worker_setup, manual, height, audio, accepted
+):
+    _, db, _, service = core
+    worker, _, _ = worker_setup
+    service.create_from_metadata(
+        CreateTask(
+            media_id="42",
+            kind="tv",
+            season=1,
+            episodes=[1],
+            requirements=Requirements(audio_languages=["ru"], min_resolution=1080, max_resolution=2160),
+        ),
+        media,
+        season,
+        1,
+    )
+    await worker.run_due()
+    if manual:
+        with db.session() as session:
+            decision_id = session.scalar(select(CandidateDecision.id))
+        await worker.choose(decision_id, 1)
+
+    async def probe(*args):
+        return {
+            "ok": True,
+            "streams": [
+                {"codec_type": "video", "width": 720 if height == 576 else 7680, "height": height},
+                {"codec_type": "audio", "tags": {"language": audio}},
+            ],
+        }
+
+    worker._probe = probe
+    with db.session() as session:
+        link = session.scalar(select(SubtaskAsset))
+        asset = session.get(MediaAsset, link.asset_id)
+        root = session.get(Download, asset.download_id).save_path
+        ids = (link.id, asset.id, link.subtask_id)
+        assert link.override == manual
+    await worker._verify(*ids, root, {"complete": False})
+    with db.session() as session:
+        assert session.get(Subtask, ids[2]).status == ("ready" if accepted else "needs_selection")
+    if accepted:
+        await worker._verify(*ids, root, {"complete": True})
+    with db.session() as session:
+        link = session.get(SubtaskAsset, ids[0])
+        quality = next(c for c in link.verification["criteria"] if c["field"] == "resolution")
+        assert quality["result"] == "MISMATCH" and quality["required"] == (not manual)
+        assert session.get(MediaAsset, ids[1]).resolution == height
+        assert link.current == accepted
+        assert session.get(Subtask, ids[2]).status == ("done" if accepted else "needs_selection")
+
+
 async def test_new_episode_candidates_include_season_release(core, media, season, worker_setup):
     _, db, _, service = core
     worker, _, _ = worker_setup
