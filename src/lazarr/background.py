@@ -17,7 +17,7 @@ from fastapi import HTTPException
 # user-facing background processing. Keep them in the bounded executor, but
 # out of the Processes list and history.
 HIDDEN_KINDS = frozenset(
-    {"catalog", "latest", "item-detail", "library-detail", "next-up", "subtitle-analysis"}
+    {"catalog", "latest", "item-detail", "library-detail", "next-up", "resume", "subtitle-analysis"}
 )
 
 

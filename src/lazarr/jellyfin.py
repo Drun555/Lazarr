@@ -284,11 +284,6 @@ class JellyfinDtoBatch:
         return [current] + [value for value in candidates if value["asset"].id != current["asset"].id]
 
 
-def is_fladder(request):
-    header = request.headers.get("Authorization") or request.headers.get("X-Emby-Authorization", "")
-    return bool(re.search(r'\bClient=["\']?Fladder(?:["\',\s]|$)', header, re.I))
-
-
 def object_id(kind, identity, secondary=0):
     value = (KINDS[kind] << 120) | (int(identity) << 32) | int(secondary)
     return str(uuid.UUID(int=value))
@@ -839,7 +834,6 @@ def media_streams(
     media_source_id,
     user=None,
     play_session_id=None,
-    subtitle_compatibility=False,
     batch=None,
 ):
     asset, link, download = playable["asset"], playable["link"], playable["download"]
@@ -917,8 +911,7 @@ def media_streams(
         track_language = track.get("language", "und")
         if language(track_language) == "und":
             track_language = stored_subtitle_language(asset, path)
-        source_suffix = path.suffix.lower().lstrip(".")
-        suffix = "srt" if subtitle_compatibility and source_suffix in {"ass", "ssa"} else source_suffix
+        suffix = path.suffix.lower().lstrip(".")
         entry = {
             "Codec": suffix,
             "Language": jellyfin_language(track_language),
@@ -963,7 +956,7 @@ def media_streams(
         suffix = (
             stream["Codec"]
             if stream["IsExternal"]
-            else ("ass" if stream["Codec"] in {"ass", "ssa"} and not subtitle_compatibility else "srt")
+            else ("ass" if stream["Codec"] in {"ass", "ssa"} else "srt")
         )
         if stream["Codec"] == "hdmv_pgs_subtitle":
             suffix = "sup"
@@ -1039,7 +1032,6 @@ def media_source(
     item_id,
     user=None,
     play_session_id=None,
-    subtitle_compatibility=False,
     source_id=None,
     batch=None,
 ):
@@ -1055,7 +1047,6 @@ def media_source(
         source_id,
         user,
         play_session_id,
-        subtitle_compatibility,
         batch,
     )
     remembered = playback_selection(ctx, user, item_id, batch)
@@ -2334,6 +2325,11 @@ def install_jellyfin_api(app, context):
     async def jellyfin_resume_items(request: Request, userId: str | None = None, user=Depends(authenticated)):
         check_requested_user(request, user)
         ctx = context(request)
+        return await ctx.background_tasks.run(
+            "resume", build_resume, ctx, request.query_params, user, lane="catalog", owner_id=user.id
+        )
+
+    def build_resume(ctx, params, user):
         batch = JellyfinDtoBatch(ctx, user)
         with ctx.db.session() as db:
             rows = list(
@@ -2358,9 +2354,34 @@ def install_jellyfin_api(app, context):
         source_parents = {h.source_id: h.item_id for h in histories}
         resumed_sources = {row.item_id for row in rows if row.item_id in source_parents}
         source_backed = {source_parents[source] for source in resumed_sources}
-        parent_id = parameter(request.query_params, "parentId")
+        parent_id = parameter(params, "parentId")
         allowed = None
-        if parent_id:
+        try:
+            library_key = (
+                next(
+                    (key for key, value in library_ids(ctx).items() if value == str(uuid.UUID(parent_id))),
+                    None,
+                )
+                if parent_id
+                else None
+            )
+        except ValueError as exc:
+            raise HTTPException(404, "Parent not found") from exc
+        if library_key:
+            # Library membership needs IDs, not DTOs for every episode in the
+            # library (including filesystem checks and media stream assembly).
+            with ctx.db.session() as db:
+                media = [row for row in db.scalars(select(Media)) if library_kind(row) == library_key]
+                allowed = {object_id("media", row.id) for row in media if row.kind == "movie"}
+                allowed.update(
+                    object_id("episode", identity)
+                    for identity in db.scalars(
+                        select(Episode.id)
+                        .join(Season)
+                        .where(Season.media_id.in_([row.id for row in media if row.kind == "tv"]))
+                    )
+                )
+        elif parent_id:
             allowed = {
                 item["Id"]
                 for item in items_response(
@@ -2373,7 +2394,7 @@ def install_jellyfin_api(app, context):
                 )
             }
         active = set()
-        if bool_parameter(request.query_params, "excludeActiveSessions"):
+        if bool_parameter(params, "excludeActiveSessions"):
             with ctx.db.session() as db:
                 active = set(
                     db.scalars(
@@ -2388,15 +2409,11 @@ def install_jellyfin_api(app, context):
             try:
                 if row.item_id in source_backed:
                     continue
-                item = item_dto(ctx, row.item_id, user, batch)
                 parent_item = source_parents.get(row.item_id, row.item_id)
-                if (
-                    item.get("MediaType") != "Video"
-                    or item.get("PlayAccess") != "Full"
-                    or parent_item in active
-                ):
+                if parent_item in active or (allowed is not None and parent_item not in allowed):
                     continue
-                if allowed is not None and parent_item not in allowed:
+                item = item_dto(ctx, row.item_id, user, batch)
+                if item.get("MediaType") != "Video" or item.get("PlayAccess") != "Full":
                     continue
                 if row.item_id in source_parents:
                     current = playback_for_item(ctx, parent_item)
@@ -2406,7 +2423,6 @@ def install_jellyfin_api(app, context):
                 items.append(item)
             except HTTPException:
                 continue
-        params = request.query_params
         return page(filter_items(items, params), params)
 
     def playback_for(ctx, item_id, source_id=None):
@@ -2424,7 +2440,7 @@ def install_jellyfin_api(app, context):
             object_id("asset", version["asset"].id) for version in versions[1:]
         ]
         play_sessions[play_session_id] = (tuple([item_id] + identities), time.time() + 6 * 60 * 60)
-        return {
+        response = {
             "MediaSources": [
                 media_source(
                     context(request),
@@ -2432,13 +2448,35 @@ def install_jellyfin_api(app, context):
                     item_id,
                     user,
                     play_session_id,
-                    subtitle_compatibility=is_fladder(request),
                     source_id=identity,
                 )
                 for version, identity in zip(versions, identities, strict=True)
             ],
             "PlaySessionId": play_session_id,
         }
+        # Clients disable direct playback when retrying after an error. Sending
+        # the same method again makes Wholphin restart playback indefinitely.
+        for source in response["MediaSources"]:
+            for option, capability in (
+                ("EnableDirectPlay", "SupportsDirectPlay"),
+                ("EnableDirectStream", "SupportsDirectStream"),
+            ):
+                body_value = (payload or {}).get(option)
+                enabled = bool_parameter(
+                    request.query_params, option, True if body_value is None else body_value
+                )
+                source[capability] = source[capability] and enabled
+            if source["SupportsDirectStream"]:
+                # Jellyfin clients use TranscodingUrl for direct-stream delivery
+                # too, even when the original video is copied without encoding.
+                source["TranscodingUrl"] = source["DirectStreamUrl"] + f"&playSessionId={play_session_id}"
+                source["TranscodingContainer"] = source["Container"]
+        if not any(
+            source["SupportsDirectPlay"] or source["SupportsDirectStream"]
+            for source in response["MediaSources"]
+        ):
+            response["ErrorCode"] = "NoCompatibleStream"
+        return response
 
     @app.get("/Playback/BitrateTest")
     async def jellyfin_bitrate_test(size: int = 100_000, user=Depends(authenticated)):

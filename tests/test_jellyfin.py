@@ -489,7 +489,8 @@ def test_jellyfin_direct_play_range_languages_and_external_subtitles(core, media
         assert source["SupportsDirectPlay"] is True
         assert source["SupportsDirectStream"] is True
         assert source["DirectStreamUrl"].startswith(f"/Videos/{episode['Id']}/stream")
-        assert source["SupportsTranscoding"] is False and "TranscodingUrl" not in source
+        assert source["SupportsTranscoding"] is False
+        assert source["TranscodingUrl"].startswith(source["DirectStreamUrl"] + "&playSessionId=")
         streams = source["MediaStreams"]
         assert all(stream["DisplayTitle"] != "Не определён" for stream in streams)
         assert streams[0]["Type"] == "Subtitle" and streams[0]["IsExternal"] is True
@@ -651,8 +652,8 @@ def test_jellyfin_exposes_external_forced_subtitle_metadata(core, media, season)
         assert external["IsForced"] is True
         assert external["Title"] == "Форсированные"
         assert "Форсированные" in external["DisplayTitle"]
-        assert external["Codec"] == "srt"
-        assert "/Stream.srt?" in external["DeliveryUrl"]
+        assert external["Codec"] == "ass"
+        assert "/Stream.ass?" in external["DeliveryUrl"]
         subtitle.write_text(
             "[Script Info]\nScriptType: v4.00+\n\n[V4+ Styles]\n"
             "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, "
@@ -664,10 +665,9 @@ def test_jellyfin_exposes_external_forced_subtitle_metadata(core, media, season)
             "Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,Привет\n",
             encoding="utf-8",
         )
-        converted = client.get(external["DeliveryUrl"])
-        assert converted.status_code == 200
-        assert b"00:00:01,000 --> 00:00:02,000" in converted.content
-        assert "Привет" in converted.text
+        delivered = client.get(external["DeliveryUrl"])
+        assert delivered.status_code == 200
+        assert delivered.text == subtitle.read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize(

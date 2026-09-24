@@ -293,7 +293,7 @@ def test_next_up_keeps_health_and_tasks_responsive(core, monkeypatch):
             assert future.result().status_code == 200
 
 
-@pytest.mark.parametrize("kind", ["catalog", "latest", "item-detail", "library-detail", "next-up"])
+@pytest.mark.parametrize("kind", ["catalog", "latest", "item-detail", "library-detail", "next-up", "resume"])
 async def test_api_response_jobs_are_hidden_but_still_run_in_bounded_queue(kind):
     queue = BackgroundTasks(capacity=2)
     started, release = threading.Event(), threading.Event()
