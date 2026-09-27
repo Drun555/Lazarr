@@ -343,6 +343,26 @@ def test_jellyfin_marks_episode_season_and_series_played(core, media, season):
         assert not progress(season_item)["Played"] and not progress(series)["Played"]
 
 
+def test_anime_library_advertises_mixed_content(core, media, season):
+    playable_episode(core, media, season)
+    movie = media.model_copy(
+        update={"id": "movie-42", "kind": "movie", "title": "Anime Movie", "seasons": []}
+    )
+    core[3].create_from_metadata(CreateTask(media_id=movie.id, kind="movie"), movie, None, 1)
+    with TestClient(create_app(core[0])) as client:
+        jellyfin_login(client)
+        for path in ("/UserViews", "/Items", "/Library/MediaFolders", "/Library/VirtualFolders"):
+            response = client.get(path).json()
+            views = response if isinstance(response, list) else response["Items"]
+            anime = next(item for item in views if item["Name"] == "Аниме")
+            assert anime["CollectionType"] == "unknown"
+            assert next(item for item in views if item["Name"] == "Кино")["CollectionType"] == "movies"
+            assert next(item for item in views if item["Name"] == "Сериалы")["CollectionType"] == "tvshows"
+        items = client.get("/Items", params={"ParentId": anime["ItemId"]}).json()["Items"]
+        assert {item["Type"] for item in items} == {"Series", "Movie"}
+        assert next(item for item in items if item["Type"] == "Movie")["Name"] == "Anime Movie"
+
+
 def test_jellyfin_marks_movie_title_without_a_playable_file(core, media):
     config, _, _, service = core
     movie = media.model_copy(

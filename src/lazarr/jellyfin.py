@@ -54,7 +54,9 @@ API_VERSION = "12.0.0"
 TICKS_PER_SECOND = 10_000_000
 KINDS = {"media": 1, "season": 2, "episode": 3, "asset": 4, "user": 5, "playlist": 6}
 KIND_NAMES = {value: key for key, value in KINDS.items()}
-LIBRARY_COLLECTIONS = {"series": "tvshows", "movies": "movies", "anime": "tvshows"}
+# Anime contains both movies and series. Advertising tvshows makes clients
+# request only Series items, hiding anime movies from the library.
+LIBRARY_COLLECTIONS = {"series": "tvshows", "movies": "movies", "anime": "unknown"}
 VISIBLE_DOWNLOAD_STATES = {"starting", "downloading", "ready"}
 
 
