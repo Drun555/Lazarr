@@ -28,12 +28,14 @@ LIBRARIES = [("series", "Сериалы"), ("movies", "Кино"), ("anime", "А
 
 
 def library_kind(media):
+    if media.kind == "movie":
+        return "movies"
     data = media.metadata_json
     if 16 in data.get("genre_ids", []) and (
         "JP" in data.get("origin_countries", []) or data.get("original_language") == "ja"
     ):
         return "anime"
-    return "movies" if media.kind == "movie" else "series"
+    return "series"
 
 
 class LibraryService:

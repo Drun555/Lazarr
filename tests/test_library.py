@@ -26,7 +26,7 @@ def test_library_tiles_count_waiting_selection(core, media, season):
     assert library.list()[0]["items"][0]["selection_count"] == 1
 
 
-def test_classification_includes_anime_movies_but_not_japanese_live_action():
+def test_classification_keeps_all_movies_in_movies_and_only_anime_shows_in_anime():
     def classify(kind, genres, countries, lang=""):
         return library_kind(
             Media(
@@ -35,7 +35,10 @@ def test_classification_includes_anime_movies_but_not_japanese_live_action():
             )
         )
 
-    assert classify("movie", [16], ["JP"]) == "anime"
+    assert classify("movie", [16], ["JP"]) == "movies"
+    assert classify("movie", [16], [], "ja") == "movies"
+    assert classify("movie", [18], ["JP"], "ja") == "movies"
+    assert classify("tv", [16], ["JP"]) == "anime"
     assert classify("tv", [16], [], "ja") == "anime"
     assert classify("tv", [18], ["JP"], "ja") == "series"
     assert classify("movie", [16], ["US"], "en") == "movies"

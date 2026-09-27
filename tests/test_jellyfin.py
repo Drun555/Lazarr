@@ -343,7 +343,7 @@ def test_jellyfin_marks_episode_season_and_series_played(core, media, season):
         assert not progress(season_item)["Played"] and not progress(series)["Played"]
 
 
-def test_anime_library_advertises_mixed_content(core, media, season):
+def test_anime_movies_appear_in_movies_and_anime_library_contains_only_series(core, media, season):
     playable_episode(core, media, season)
     movie = media.model_copy(
         update={"id": "movie-42", "kind": "movie", "title": "Anime Movie", "seasons": []}
@@ -355,12 +355,17 @@ def test_anime_library_advertises_mixed_content(core, media, season):
             response = client.get(path).json()
             views = response if isinstance(response, list) else response["Items"]
             anime = next(item for item in views if item["Name"] == "Аниме")
-            assert anime["CollectionType"] == "unknown"
-            assert next(item for item in views if item["Name"] == "Кино")["CollectionType"] == "movies"
+            assert anime["CollectionType"] == "tvshows"
+            movies = next(item for item in views if item["Name"] == "Кино")
+            assert movies["CollectionType"] == "movies"
             assert next(item for item in views if item["Name"] == "Сериалы")["CollectionType"] == "tvshows"
         items = client.get("/Items", params={"ParentId": anime["ItemId"]}).json()["Items"]
-        assert {item["Type"] for item in items} == {"Series", "Movie"}
-        assert next(item for item in items if item["Type"] == "Movie")["Name"] == "Anime Movie"
+        assert {item["Type"] for item in items} == {"Series"}
+        items = client.get(
+            "/Items", params={"ParentId": movies["ItemId"], "IncludeItemTypes": "Movie"}
+        ).json()["Items"]
+        assert [item["Name"] for item in items] == ["Anime Movie"]
+        assert items[0]["ParentId"] == movies["ItemId"]
 
 
 def test_jellyfin_marks_movie_title_without_a_playable_file(core, media):
