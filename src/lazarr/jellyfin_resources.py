@@ -15,9 +15,10 @@ from pathlib import Path
 from urllib.parse import urlencode
 
 from fastapi import Depends, HTTPException, Request
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from sqlalchemy import select, text
 
+from lazarr.http import FileResponse
 from lazarr.jellyfin_state import (
     bool_parameter,
     csv_parameter,

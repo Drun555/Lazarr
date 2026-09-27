@@ -230,15 +230,9 @@ def create_app(config: RuntimeConfig | None = None):
     templates.env.filters["poster_url"] = poster_url
     app.mount("/static", StaticFiles(directory=package / "static"), name="static")
 
-    @app.middleware("http")
-    async def security_headers(request, call_next):
-        response = await call_next(request)
-        response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["Referrer-Policy"] = "same-origin"
-        response.headers["X-Frame-Options"] = "DENY"
-        if not request.url.path.startswith("/static/"):
-            response.headers["Cache-Control"] = "no-store"
-        return response
+    from lazarr.http import SecurityHeadersMiddleware
+
+    app.add_middleware(SecurityHeadersMiddleware)
 
     if config.log == "performance":
         from lazarr.performance import PerformanceMiddleware
