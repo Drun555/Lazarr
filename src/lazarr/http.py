@@ -8,6 +8,10 @@ from starlette.responses import FileResponse as StarletteFileResponse
 class FileResponse(StarletteFileResponse):
     """Stop reading a media file as soon as its client disconnects."""
 
+    # Amortize worker-thread handoffs for high-bitrate media. Awaiting each
+    # send still applies backpressure, including while a player is paused.
+    chunk_size = 1024 * 1024
+
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
             return await super().__call__(scope, receive, send)

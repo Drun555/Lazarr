@@ -328,7 +328,11 @@ async def remux_audio(ctx, playable, audio, request):
         finally:
             await close()
 
-    return StreamingResponse(chunks(), media_type="video/x-matroska", headers={"Accept-Ranges": "none"})
+    return StreamingResponse(
+        chunks(),
+        media_type="video/x-matroska",
+        headers={"Accept-Ranges": "none", "X-Accel-Buffering": "no"},
+    )
 
 
 def media_segments(playable, item_id, allowed=None):

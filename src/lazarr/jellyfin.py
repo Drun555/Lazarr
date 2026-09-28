@@ -11,10 +11,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import Response
 from sqlalchemy import select, delete, text
 
 from lazarr import jellyfin_catalog, jellyfin_playlists, jellyfin_resources, jellyfin_state
+from lazarr.http import FileResponse
 from lazarr.jellyfin_state import (
     DisplayPreferences,
     UserDataUpdate,
@@ -2552,7 +2553,11 @@ def install_jellyfin_api(app, context):
         path = playable["path"]
         if container and container.casefold() != path.suffix.lstrip(".").casefold():
             raise HTTPException(415, "Container conversion is disabled")
-        return FileResponse(path, media_type=mimetypes.guess_type(path.name)[0] or "application/octet-stream")
+        return FileResponse(
+            path,
+            media_type=mimetypes.guess_type(path.name)[0] or "application/octet-stream",
+            headers={"X-Accel-Buffering": "no"},
+        )
 
     @app.get("/Videos/{item_id}/stream")
     @app.get("/Videos/{item_id}/stream.{container}")

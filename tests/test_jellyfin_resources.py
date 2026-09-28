@@ -266,6 +266,7 @@ def test_external_audio_is_remuxed_without_reencoding(video, core, tmp_path):
     assert not source["SupportsDirectPlay"]
     response = client.get(source["DirectStreamUrl"])
     assert response.status_code == 200, response.text
+    assert response.headers["x-accel-buffering"] == "no"
     output = tmp_path / "remux.mkv"
     output.write_bytes(response.content)
     probe = probe_file(output)
