@@ -1357,3 +1357,53 @@ async def test_previous_topics_use_completed_current_assets_and_same_season(
         episode = session.get(Episode, session.get(Subtask, 2).episode_id)
         episode.season_id = other_season.id
     assert worker.previous_candidates([2], ["demo"]) == []
+
+
+async def test_named_season_with_bare_tv_tag_reaches_files(core, media, season, worker_setup, monkeypatch):
+    _, db, _, service = core
+    worker, _, demo = worker_setup
+    media.title = "Истории монстров"
+    media.original_title = "Monogatari"
+    media.year = 2009
+    media.external_ids = {}
+    media.seasons = [{"number": 2, "title": "Истории подделок", "air_date": "2012-01-08"}]
+    season.number = 2
+    for episode in season.episodes:
+        episode.air_date = "2012-01-08"
+    service.create_from_metadata(
+        CreateTask(media_id="42", kind="tv", season=2, episodes=[1]), media, season, 1
+    )
+    path = "Nisemonogatari - 01.mkv"
+    inspected = []
+
+    async def search(self, query, cursor=None):
+        return SearchPage(
+            items=[
+                candidate(
+                    provider="demo",
+                    id="nise",
+                    external_ids={},
+                    title="Истории подделок / Nisemonogatari [TV] [11 из 11] [2012, BDRip] [1080p]",
+                )
+            ]
+            if query.text == "Истории подделок 2012"
+            else []
+        )
+
+    async def inspect(self, item):
+        inspected.append(item.id)
+        return item.model_copy(update={"evidence": [audio_claim(path)]})
+
+    async def resolve(self, item):
+        return DownloadSource(torrent=json.dumps([path]).encode())
+
+    monkeypatch.setattr(demo, "search", search)
+    monkeypatch.setattr(demo, "inspect", inspect)
+    monkeypatch.setattr(demo, "resolve_download", resolve)
+    await worker.run_due()
+    assert inspected == ["nise"]
+    with db.session() as session:
+        decision = session.scalar(select(CandidateDecision))
+        assert decision.report["result"] == "MATCH"
+        assert decision.report["score"] == 140
+        assert session.scalar(select(SubtaskAsset)) is not None

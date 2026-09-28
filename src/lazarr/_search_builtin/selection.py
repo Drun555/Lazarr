@@ -3,7 +3,13 @@
 import re
 
 
-def title_seasons(title):
+UNNUMBERED_TV = r"\b(?:тв|tv)(?=\s*(?:\+\s*specials?\b)?\s*[\])]|$)"
+TV_NUMBERS = r"\b(?:tv|тв)[\s._:#№-]*\d{1,3}(?:\s*[-–]\s*(?:(?:tv|тв)[\s._:#№-]*)?\d{1,3})?\b"
+
+
+def title_seasons(title, *, include_tv=True):
+    if not include_tv:
+        title = re.sub(TV_NUMBERS, " ", title, flags=re.I)
     reverse = r"\b(\d{1,3})(?:\s*[-–]\s*(\d{1,3}))?\s+сезон(?:а|ы|ов)?\b"
     seasons = set()
     for start, end in re.findall(reverse, title, re.I):
@@ -27,9 +33,8 @@ def title_seasons(title):
         if int(end) < int(start) or int(end) - int(start) > 100:
             return set()
         seasons.update(range(int(start), int(end) + 1))
-    # Tracker titles commonly use a standalone [TV] / [ТВ] tag for the
-    # original television run. A numbered TV-2 tag is handled above.
-    if re.search(r"(?:^|[\s[(])(?:тв|tv)(?=$|[\s\])])", title, re.I):
+    # TV is equivalent to TV-1 for scoring and as a file hint, never a hard constraint.
+    if include_tv and re.search(UNNUMBERED_TV, title, re.I):
         seasons.add(1)
     return seasons
 
@@ -65,13 +70,8 @@ def confirmed_tv_number(candidate, request):
     # Provider episode mappings are authoritative; never invent an offset over them.
     if request.media.episode_numbering.get(f"{request.season}:{request.episode}"):
         return None
-    pattern = r"\b(?:tv|тв)[\s._:#№-]*(\d{1,3})\b"
-    numbers = {int(value) for value in re.findall(pattern, candidate.title, re.I)}
-    if (
-        len(numbers) != 1
-        or title_seasons(candidate.title) != numbers
-        or title_seasons(re.sub(pattern, " ", candidate.title, flags=re.I))
-    ):
+    numbers = title_seasons(candidate.title)
+    if len(numbers) != 1 or title_seasons(candidate.title, include_tv=False):
         return None
     if not confirmed_named_season(candidate, request):
         # An exact series alias plus this season's year can also identify it.
@@ -255,11 +255,11 @@ def assess_candidate(candidate, request, stage=1, criteria=(), allow_preference_
                 source="title",
             )
         )
-        if not agrees:
-            # Explicit season labels/mappings remain authoritative. A solitary TV-N
-            # is weaker than a confirmed season title and premiere year.
-            if confirmed_tv_number(candidate, request) is None:
-                blockers.append("Указан другой сезон")
+        # Broadcast numbering is only a weighted hint. Even without a confirmed
+        # name/year override, a TV mismatch must reach description/file checks.
+        explicit = title_seasons(candidate.title, include_tv=False)
+        if explicit and not explicit & request_seasons(request):
+            blockers.append("Указан другой сезон")
     if stage < 3:
         from .matcher import episode_numbers
 

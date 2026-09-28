@@ -93,7 +93,7 @@ def test_season_identity_requires_title_season_and_episode_year(rezero):
     assert Matcher().identity(item, rezero.model_copy(update={"air_date": None})).result == "UNKNOWN"
     assert (
         Matcher().identity(item.model_copy(update={"title": "Re:Zero (ТВ-3) [2021]"}), rezero).result
-        == "UNKNOWN"
+        == "MATCH"
     )
     assert (
         Matcher().identity(item.model_copy(update={"title": "Unrelated (ТВ-2) [2021]"}), rezero).result
