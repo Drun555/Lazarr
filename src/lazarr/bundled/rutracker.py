@@ -33,7 +33,7 @@ class Plugin(ContentProvider):
         id="rutracker",
         name="Rutracker",
         kind="content",
-        version="1.0.4",
+        version="1.0.5",
         sdk=">=1.3,<2",
         config_fields=[
             ConfigField(name="base_url", label="URL форума", default="https://rutracker.org/forum"),
@@ -203,8 +203,10 @@ class Plugin(ContentProvider):
         if imdb:
             ids["imdb"] = imdb.group(1)
         infohash = re.search(r"\b[A-Fa-f0-9]{40}\b", soup.get_text(" "))
+        heading = soup.select_one("#topic-title")
         return candidate.model_copy(
             update={
+                "title": heading.get_text(" ", strip=True) if heading else candidate.title,
                 "description": description,
                 "evidence": [*candidate.evidence, *evidence],
                 "external_ids": ids,

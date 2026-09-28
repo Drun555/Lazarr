@@ -12,7 +12,7 @@ from lazarr.languages import language as language, ALIASES
 
 LANGUAGES = ALIASES
 
-SDK_VERSION = "1.6"
+SDK_VERSION = "1.7"
 
 
 def safe_relative_path(value: str) -> str:
@@ -206,11 +206,31 @@ class FileBinding(BaseModel):
     missing_subtitle_languages: list[str] = Field(default_factory=list)
 
 
+class ScoreSignal(BaseModel):
+    group: str
+    points: int
+    reason: str
+    source: str
+
+
+class StageAssessment(BaseModel):
+    stage: int
+    total: int
+    threshold: int
+    passed: bool
+    signals: list[ScoreSignal] = Field(default_factory=list)
+    blockers: list[str] = Field(default_factory=list)
+
+
 class SubtaskEvaluation(BaseModel):
     subtask_id: int
     result: MatchResult
     criteria: list[Criterion]
     binding: FileBinding | None = None
+    score: int = 0
+    scoring: list[StageAssessment] = Field(default_factory=list)
+    manual_candidate: bool = False
+    needs_mapping: bool = False
 
 
 class DownloadPlan(BaseModel):

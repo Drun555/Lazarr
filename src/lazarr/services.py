@@ -476,6 +476,25 @@ class TaskService:
                 .order_by(SubtaskAsset.id)
             ):
                 assets.setdefault(sub_id, asset)
+            recommendations = {}
+            pending_ids = [
+                sub.id for rows in subs_by_task.values() for sub in rows if sub.status == "needs_selection"
+            ]
+            if pending_ids:
+                for decision in db.scalars(
+                    select(CandidateDecision)
+                    .where(
+                        CandidateDecision.subtask_id.in_(pending_ids),
+                        CandidateDecision.action.not_in(["rejected", "selected"]),
+                    )
+                    .order_by(CandidateDecision.id)
+                ):
+                    report = decision.report or {}
+                    previous = recommendations.get(decision.subtask_id)
+                    if report.get("manual_candidate") and (
+                        previous is None or report.get("score", 0) > previous.report.get("score", 0)
+                    ):
+                        recommendations[decision.subtask_id] = decision
             result = []
             for task in tasks:
                 media = media_rows[task.media_id]
@@ -525,6 +544,12 @@ class TaskService:
                             if episode
                             else media.metadata_json.get("release_date"),
                             "status": "paused" if task.paused and sub.status != "done" else sub.status,
+                            "needs_mapping": sub.status == "needs_selection"
+                            and sub.id in recommendations
+                            and bool(recommendations[sub.id].report.get("needs_mapping")),
+                            "recommended_candidate_id": recommendations[sub.id].id
+                            if sub.status == "needs_selection" and sub.id in recommendations
+                            else None,
                             "next_search_at": sub.next_search_at,
                             "error": sub.last_error,
                             "missing_subtitle_languages": sub.missing_subtitle_languages,
@@ -797,7 +822,34 @@ class TaskService:
                         ),
                     }
                 )
-            return sorted(result, key=lambda choice: not bool(choice["used_in_season"]))
+            result.sort(
+                key=lambda choice: (
+                    choice["action"] == "rejected",
+                    not (
+                        choice["report"].get("manual_candidate") or choice["report"].get("result") == "MATCH"
+                    ),
+                    -choice["report"].get("score", 0),
+                    not bool(choice["used_in_season"]),
+                    -(choice["candidate"].get("seeds") or 0),
+                    choice["id"],
+                )
+            )
+            recommended = (
+                next(
+                    (
+                        choice["id"]
+                        for choice in result
+                        if choice["action"] not in {"rejected", "selected"}
+                        and choice["report"].get("manual_candidate")
+                    ),
+                    None,
+                )
+                if subtask and subtask.status == "needs_selection"
+                else None
+            )
+            for choice in result:
+                choice["recommended"] = choice["id"] == recommended
+            return result
 
     def task_candidates(self, task_id, season_number=None):
         """Return each release once, scoped to the task or one of its seasons."""

@@ -268,6 +268,23 @@ class LibraryService:
                 )
             task_versions = {}
             selected_candidates = {}
+            mapping_recommendations = {}
+            pending_ids = [sub.id for sub in subs if sub.status == "needs_selection"]
+            if pending_ids:
+                for row in db.scalars(
+                    select(CandidateDecision)
+                    .where(
+                        CandidateDecision.subtask_id.in_(pending_ids),
+                        CandidateDecision.action.not_in(["rejected", "selected"]),
+                    )
+                    .order_by(CandidateDecision.id)
+                ):
+                    report = row.report or {}
+                    previous = mapping_recommendations.get(row.subtask_id)
+                    if report.get("manual_candidate") and (
+                        previous is None or report.get("score", 0) > previous.report.get("score", 0)
+                    ):
+                        mapping_recommendations[row.subtask_id] = row
             if subs and include_versions:
                 decisions = {
                     (row.subtask_id, row.release_id): row.id
@@ -348,6 +365,9 @@ class LibraryService:
                                 "id": sub.id,
                                 "task_id": sub.task_id,
                                 "selected_candidate_id": selected_candidates.get(sub.id),
+                                "needs_mapping": sub.status == "needs_selection"
+                                and sub.id in mapping_recommendations
+                                and bool(mapping_recommendations[sub.id].report.get("needs_mapping")),
                                 "status": "paused" if tasks[sub.task_id].paused else sub.status,
                             }
                             for sub in related

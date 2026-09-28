@@ -6,6 +6,7 @@ from sqlalchemy import select, func
 import pytest
 from lazarr.models import (
     ProviderConfig,
+    Release,
     Subtask,
     Download,
     MediaAsset,
@@ -296,10 +297,10 @@ async def test_grouped_subtasks_share_one_download(core, media, season, worker_s
         assert session.scalar(select(func.count()).select_from(MediaAsset)) == 2
         assert session.scalar(select(func.count()).select_from(SubtaskAsset)) == 2
         assert len(list(session.scalars(select(Subtask).where(Subtask.status == "starting")))) == 2
-    assert demo.calls == 1
+    assert demo.calls == 2
     # An immediate retry must not duplicate active work.
     await worker.run_due()
-    assert demo.calls == 1
+    assert demo.calls == 2
     engine.completed = {1, 2, 3}
     await worker.poll()
     with db.session() as session:
@@ -308,7 +309,7 @@ async def test_grouped_subtasks_share_one_download(core, media, season, worker_s
         assert session.scalar(select(func.count()).select_from(LibraryAsset)) == 2
 
 
-async def test_search_uses_requested_season_year_and_stops_on_match(
+async def test_search_uses_requested_season_year_and_compares_all_queries(
     core, media, season, worker_setup, monkeypatch
 ):
     _, _, _, service = core
@@ -328,7 +329,7 @@ async def test_search_uses_requested_season_year_and_stops_on_match(
 
     monkeypatch.setattr(demo, "search", search)
     await worker.run_due()
-    assert queries == ["Example Show 2022"]
+    assert queries == ["Example Show 2022", "Example Show"]
 
 
 async def test_search_falls_back_without_year_when_no_release_matches(
@@ -1106,3 +1107,253 @@ async def test_updated_topic_keeps_release_and_decision_ids_and_existing_downloa
     assert choices[0]["used_in_season"] == [1]
     assert choices[0]["episode_missing"] is False
     assert len(service.task_candidates(task_id, 1)) == 1
+
+
+async def test_search_includes_requested_season_name(core, media, season, worker_setup, monkeypatch):
+    _, _, _, service = core
+    worker, _, demo = worker_setup
+    media.seasons[0].update(title="Named story", air_date="2022-01-01")
+    for episode in season.episodes:
+        episode.air_date = "2022-01-01"
+    service.create_from_metadata(
+        CreateTask(media_id="42", kind="tv", season=1, episodes=[1]), media, season, 1
+    )
+    queries = []
+
+    async def search(self, query, cursor=None):
+        queries.append(query.text)
+        return SearchPage(items=[])
+
+    monkeypatch.setattr(demo, "search", search)
+    await worker.run_due()
+    assert queries == ["Example Show 2022", "Named story 2022", "Example Show", "Named story"]
+
+
+async def test_best_scored_candidate_wins_even_when_later_query(
+    core, media, season, worker_setup, monkeypatch
+):
+    _, db, _, service = core
+    worker, _, demo = worker_setup
+    media.external_ids = {}
+    media.seasons[0].update(title="Northern Lights", air_date="2020-01-01")
+    service.create_from_metadata(
+        CreateTask(media_id="42", kind="tv", season=1, episodes=[1]), media, season, 1
+    )
+
+    async def search(self, query, cursor=None):
+        named = query.text.startswith("Northern")
+        return SearchPage(
+            items=[
+                candidate(
+                    provider="demo",
+                    id="strong" if named else "weak",
+                    title="Northern Lights (2020) 1080p" if named else "Example Show (2020) 1080p",
+                    external_ids={},
+                    seeds=1 if named else 10000,
+                )
+            ]
+        )
+
+    monkeypatch.setattr(demo, "search", search)
+    await worker.run_due()
+    with db.session() as session:
+        download = session.scalar(select(Download))
+        assert session.get(Release, download.release_id).external_id == "strong"
+        assert session.scalar(select(func.count()).select_from(CandidateDecision)) == 2
+
+
+async def test_missing_episode_recommends_best_without_download_and_allows_manual_mapping(
+    core, media, season, worker_setup, monkeypatch
+):
+    _, db, _, service = core
+    worker, engine, demo = worker_setup
+    service.create_from_metadata(
+        CreateTask(media_id="42", kind="tv", season=1, episodes=[3]), media, season, 1
+    )
+    await worker.run_due()
+    with db.session() as session:
+        sub = session.scalar(select(Subtask))
+        identity = sub.id
+        assert sub.status == "needs_selection"
+        assert session.scalar(select(func.count()).select_from(Download)) == 0
+    choices = service.candidates(identity)
+    assert choices[0]["recommended"]
+    assert choices[0]["report"]["needs_mapping"]
+    assert choices[0]["report"]["result"] == "MISMATCH"
+    assert service.list_tasks()[0]["subtasks"][0]["needs_mapping"]
+    with pytest.raises(ValueError, match="вручную"):
+        await worker.choose(choices[0]["id"], 1)
+    assert not engine.handles
+    await worker.choose(choices[0]["id"], 1, video_index=0, track_indices=[])
+    with db.session() as session:
+        assert session.get(Subtask, identity).status == "starting"
+        assert session.get(CandidateDecision, choices[0]["id"]).action == "selected"
+        assert not session.get(CandidateDecision, choices[0]["id"]).report["needs_mapping"]
+
+
+async def test_topic_score_gates_torrent_fetch(core, media, season, worker_setup, monkeypatch):
+    _, db, _, service = core
+    worker, engine, demo = worker_setup
+    media.external_ids = {}
+    service.create_from_metadata(
+        CreateTask(media_id="42", kind="tv", season=1, episodes=[1]), media, season, 1
+    )
+
+    async def search(self, query, cursor=None):
+        return SearchPage(items=[candidate(provider="demo", title="Example Show", external_ids={})])
+
+    monkeypatch.setattr(demo, "search", search)
+    await worker.run_due()
+    assert engine.inspect_calls == 0
+    with db.session() as session:
+        assert session.scalar(select(Subtask)).status == "queued"
+
+
+async def test_only_top_twelve_title_candidates_are_inspected(core, media, season, worker_setup, monkeypatch):
+    _, db, _, service = core
+    worker, engine, demo = worker_setup
+    service.create_from_metadata(
+        CreateTask(media_id="42", kind="tv", season=1, episodes=[1]), media, season, 1
+    )
+
+    async def search(self, query, cursor=None):
+        return SearchPage(items=[candidate(provider="demo", id=str(i), seeds=i) for i in range(20)])
+
+    monkeypatch.setattr(demo, "search", search)
+    await worker.run_due()
+    assert engine.inspect_calls == 12
+    with db.session() as session:
+        assert session.get(Release, session.scalar(select(Download)).release_id).external_id == "19"
+
+
+async def test_missing_episode_recommends_highest_score_and_never_rejected_choice(
+    core, media, season, worker_setup, monkeypatch
+):
+    _, db, _, service = core
+    worker, _, demo = worker_setup
+    media.external_ids = {}
+    media.seasons[0].update(title="Northern Lights", air_date="2020-01-01")
+    service.create_from_metadata(
+        CreateTask(media_id="42", kind="tv", season=1, episodes=[3]), media, season, 1
+    )
+
+    async def search(self, query, cursor=None):
+        return SearchPage(
+            items=[
+                candidate(
+                    provider="demo", id="weak", title="Example Show (2020) 1080p", external_ids={}, seeds=1000
+                ),
+                candidate(
+                    provider="demo",
+                    id="strong",
+                    title="Northern Lights (2020) 1080p",
+                    external_ids={},
+                    seeds=1,
+                ),
+            ]
+        )
+
+    monkeypatch.setattr(demo, "search", search)
+    await worker.run_due()
+    with db.session() as session:
+        identity = session.scalar(select(Subtask)).id
+        assert session.scalar(select(func.count()).select_from(Download)) == 0
+    choices = service.candidates(identity)
+    assert choices[0]["candidate"]["id"] == "strong" and choices[0]["recommended"]
+    await worker.choose(choices[0]["id"], 1, reject=True)
+    choices = service.candidates(identity)
+    assert choices[0]["candidate"]["id"] == "weak" and choices[0]["recommended"]
+    assert not choices[1]["recommended"]
+
+
+@pytest.mark.parametrize(
+    "updated,rejected,alternatives",
+    [(True, False, False), (False, False, False), (True, True, False), (True, False, True)],
+)
+async def test_completed_topics_are_refreshed_before_discovery(
+    core, media, season, worker_setup, monkeypatch, updated, rejected, alternatives
+):
+    _, db, _, service = core
+    worker, engine, demo = worker_setup
+    service.create_from_metadata(
+        CreateTask(media_id="42", kind="tv", season=1, episodes=[1, 2]), media, season, 1
+    )
+    paths = ["Show.S01E01.1080p.mkv"]
+    events = []
+    original_search = demo.search
+
+    async def search(self, query, cursor=None):
+        events.append("search")
+        return await original_search(self, query, cursor)
+
+    async def inspect(self, item):
+        events.append("inspect")
+        return item.model_copy(update={"evidence": [audio_claim(path) for path in paths]})
+
+    async def resolve(self, item):
+        events.append("resolve")
+        return DownloadSource(torrent=json.dumps(paths).encode())
+
+    monkeypatch.setattr(demo, "search", search)
+    monkeypatch.setattr(demo, "inspect", inspect)
+    monkeypatch.setattr(demo, "resolve_download", resolve)
+    await worker._run_group([1])
+    with db.session() as session:
+        link = session.scalar(select(SubtaskAsset).where(SubtaskAsset.subtask_id == 1))
+        assert link is not None
+        link.current, link.pending = True, False
+        session.get(Subtask, 1).status = "done"
+        download = session.scalar(select(Download))
+        old_hash, old_plan = download.infohash, download.plan
+        if rejected:
+            session.add(
+                CandidateDecision(subtask_id=2, release_id=download.release_id, action="rejected", report={})
+            )
+    if updated:
+        paths.append("Show.S01E02.1080p.mkv")
+    events.clear()
+    worker.progress.begin()
+    if alternatives:
+        await worker.search_alternatives(2)
+    else:
+        await worker._run_group([2])
+    assert events[:2] == ["inspect", "resolve"]
+    assert events.count("inspect") == 1  # Search result references the same refreshed topic.
+    assert ("search" in events) == (not updated or rejected or alternatives)
+    with db.session() as session:
+        original = session.scalar(select(Download).where(Download.infohash == old_hash))
+        assert original.plan == old_plan
+        second = session.scalar(select(SubtaskAsset).where(SubtaskAsset.subtask_id == 2))
+        assert (second is not None) == (updated and not rejected and not alternatives)
+        assert len(session.scalar(select(Release)).files) == len(paths)
+    assert worker.progress.value["candidates_checked"] == 1
+    assert not worker.progress.value["errors"]
+    assert len(engine.plans) == (2 if updated and not rejected and not alternatives else 1)
+
+
+async def test_previous_topics_use_completed_current_assets_and_same_season(
+    core, media, season, worker_setup
+):
+    from lazarr.models import Season
+
+    _, db, _, service = core
+    worker, _, _ = worker_setup
+    service.create_from_metadata(
+        CreateTask(media_id="42", kind="tv", season=1, episodes=[1, 2]), media, season, 1
+    )
+    await worker._run_group([1])
+    assert worker.previous_candidates([2], ["demo"]) == []  # Still downloading.
+    with db.session() as session:
+        link = session.scalar(select(SubtaskAsset))
+        link.current, link.pending = True, False
+        session.get(Subtask, 1).status = "done"
+    assert len(worker.previous_candidates([2], ["demo"])) == 1
+    assert worker.previous_candidates([2], []) == []
+    assert worker.previous_candidates([2], ["nyaa"]) == []
+    with db.session() as session:
+        other_season = Season(media_id=1, number=2)
+        session.add(other_season)
+        session.flush()
+        episode = session.get(Episode, session.get(Subtask, 2).episode_id)
+        episode.season_id = other_season.id
+    assert worker.previous_candidates([2], ["demo"]) == []

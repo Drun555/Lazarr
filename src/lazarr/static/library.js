@@ -56,7 +56,7 @@ function libraryFile(file){
 function episodeActions(episode){
   const subtasks=episode.subtasks||[];
   if(!subtasks.length)return `<div class="episode-actions">${episode.episode!=null&&!episode.files?.length?`<button class="primary" data-download-season="${esc(episode.season)}" data-download-episode="${esc(episode.episode)}">Скачать серию</button>`:''}<button class="ghost" data-delete-episode="${esc(episode.id)}" ${episode.files?.length?'':'disabled'}>Удалить</button></div>`;
-  return `<div class="episode-actions">${subtasks.map(sub=>`<button class="ghost" data-candidates="${sub.id}">Выбрать раздачу</button>${episode.episode==null&&sub.selected_candidate_id?`<button class="ghost" data-map-files="${sub.selected_candidate_id}">Изменить файлы</button>`:''}<button class="ghost" data-delete-selection="${sub.id}">Удалить</button>`).join('')}</div>`;
+  return `<div class="episode-actions">${subtasks.map(sub=>`<button class="ghost" data-candidates="${sub.id}">${sub.needs_mapping?'Сопоставить файлы':'Выбрать раздачу'}</button>${episode.episode==null&&sub.selected_candidate_id?`<button class="ghost" data-map-files="${sub.selected_candidate_id}">Изменить файлы</button>`:''}<button class="ghost" data-delete-selection="${sub.id}">Удалить</button>`).join('')}</div>`;
 }
 function renderMediaTask(item, identity){
   const task=item.task??(state.tasks||[]).find(t=>t.media_id===identity);
@@ -75,7 +75,7 @@ function renderMediaTask(item, identity){
 function renderEpisode(episode){
   const number=episode.episode==null?'Фильм':`${episode.episode}.`;
   const visual=`<span class="episode-visual"><span class="episode-still-empty" aria-hidden="true"><b>${episode.episode==null?'▶':esc(episode.episode)}</b><small>${episode.episode==null?'Видео':'Серия'}</small></span>${episode.still?`<img class="episode-still" src="${esc(posterUrl(episode.still))}" alt="" loading="lazy">`:''}</span>`;
-  const status=episode.statuses?.length?episode.statuses.map(s=>esc(statuses[s]||s)).join(', '):episode.released?'Не запрошено':'Ожидание выхода';
+  const status=episode.subtasks?.some(sub=>sub.needs_mapping)?'Требуется сопоставление файлов':episode.statuses?.length?episode.statuses.map(s=>esc(statuses[s]||s)).join(', '):episode.released?'Не запрошено':'Ожидание выхода';
   const showProgress=episode.download&&['starting','downloading','paused','stopped','error'].includes(episode.download.state)&&progressPercent(episode.download.progress)<100;
   return `<details class="library-episode" data-episode="${esc(episode.id)}"><summary><div class="episode-summary">${visual}<div><strong>${esc(number)} ${esc(episode.title)}</strong><span class="fine">${libraryDate(episode.air_date)} · ${status}</span>${showProgress?progressBar(episode.download.progress,'Прогресс серии'):''}</div></div></summary>${episode.overview?`<p class="episode-overview">${esc(episode.overview)}</p>`:''}<div class="episode-meta"><span class="fine">Последний поиск: ${searchDate(episode.last_search_at)}</span>${episodeActions(episode)}</div>${episode.files?.length?episode.files.map(libraryFile).join(''):'<p class="muted">Файл и раздача пока не выбраны.</p>'}</details>`;
 }

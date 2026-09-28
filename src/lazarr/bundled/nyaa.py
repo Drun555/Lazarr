@@ -21,7 +21,7 @@ class Plugin(ContentProvider):
         id="nyaa",
         name="Nyaa",
         kind="content",
-        version="1.0.3",
+        version="1.0.4",
         sdk=">=1.3,<2",
         config_fields=[ConfigField(name="base_url", label="URL", default="https://nyaa.si")],
         capabilities=["search", "torrent", "magnet", "anonymous"],
@@ -73,8 +73,10 @@ class Plugin(ContentProvider):
             li.get_text(" ", strip=True) for li in soup.select(".torrent-file-list li") if not li.find("ul")
         ]
         magnet = soup.select_one('a[href^="magnet:"]')
+        heading = soup.select_one(".panel-title")
         return candidate.model_copy(
             update={
+                "title": heading.get_text(" ", strip=True) if heading else candidate.title,
                 "description": text,
                 "file_hints": hints,
                 "evidence": description_evidence(text),

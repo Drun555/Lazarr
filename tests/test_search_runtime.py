@@ -118,3 +118,16 @@ async def test_rollback_external_version_pauses_updater(tmp_path):
     manager.bootstrap()
     assert manager.status()["version"] == "1.0.1"
     assert json.loads((tmp_path / "active.json").read_text())["automatic"] is False
+
+
+def test_search_queries_supports_old_engine(media, monkeypatch):
+    from types import SimpleNamespace
+    from lazarr import search_runtime
+    from lazarr.provider_utils import search_queries
+
+    monkeypatch.setattr(
+        search_runtime,
+        "_generation",
+        SimpleNamespace(provider_utils=SimpleNamespace(search_titles=lambda media: [media.title])),
+    )
+    assert search_queries(media, season=1, year=2022) == ["Example Show 2022", "Example Show"]

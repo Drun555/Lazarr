@@ -18,7 +18,7 @@ class Plugin(MetadataProvider):
         id="tmdb",
         name="TMDB",
         kind="metadata",
-        version="1.0.6",
+        version="1.0.7",
         sdk=">=1.4,<2",
         config_fields=[
             ConfigField(name="api_key", label="API key или Read Access Token", secret=True, required=True),
@@ -121,7 +121,12 @@ class Plugin(MetadataProvider):
             aliases=list(dict.fromkeys([original or ""] + [n["title"] for n in names])),
             external_ids=ids,
             seasons=[
-                {"number": s["season_number"], "title": s["name"], "episode_count": s["episode_count"]}
+                {
+                    "number": s["season_number"],
+                    "title": s["name"],
+                    "episode_count": s["episode_count"],
+                    "air_date": s.get("air_date"),
+                }
                 for s in data.get("seasons", [])
             ],
         )

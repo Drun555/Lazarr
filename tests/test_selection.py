@@ -152,9 +152,9 @@ async def test_worker_filters_before_inspect_and_resolve_and_orders_candidates(
         1,
     )
     await worker.run_due()
-    assert inspected == resolved == ["2"]
+    assert inspected == resolved == ["2", "1"]
     p = worker.progress.snapshot()
-    assert p["candidates_found"] == 4 and p["candidates_filtered"] == 2 and p["candidates_checked"] == 1
+    assert p["candidates_found"] == 4 and p["candidates_filtered"] == 2 and p["candidates_checked"] == 2
     assert len(engine.plans) == 1
 
 
@@ -183,7 +183,9 @@ async def test_description_filter_does_not_resolve_torrent(core, media, season, 
     assert worker.progress.snapshot()["candidates_checked"] == 0
 
 
-async def test_search_stops_when_covered_below_maximum(core, media, season, worker_setup, monkeypatch):
+async def test_search_compares_bounded_pages_even_when_already_covered(
+    core, media, season, worker_setup, monkeypatch
+):
     _, _, _, service = core
     worker, _, demo = worker_setup
     original_search = demo.search
@@ -208,7 +210,7 @@ async def test_search_stops_when_covered_below_maximum(core, media, season, work
         1,
     )
     await worker.run_due()
-    assert calls == [None]
+    assert calls == [None, "more", None, "more"]
     assert worker.progress.snapshot()["candidates_checked"] == 1
 
 
@@ -249,6 +251,9 @@ async def test_cooldown_stops_candidate_loop_and_pagination_and_retries_only_fai
     await scheduler.process_queue()
     assert calls == [
         ("demo", "search", None),
+        ("demo", "search", "50"),
+        ("demo", "search", None),
+        ("demo", "search", "50"),
         ("demo", "inspect", "0"),
         ("second", "search", None),
         ("second", "search", None),
@@ -264,7 +269,13 @@ async def test_cooldown_stops_candidate_loop_and_pagination_and_retries_only_fai
         session.get(ProviderConfig, "demo").retry_at = 0
     calls.clear()
     await Scheduler(worker, service).process_queue()
-    assert calls == [("demo", "search", None), ("demo", "inspect", "0")]
+    assert calls == [
+        ("demo", "search", None),
+        ("demo", "search", "50"),
+        ("demo", "search", None),
+        ("demo", "search", "50"),
+        ("demo", "inspect", "0"),
+    ]
     assert Scheduler(worker, service).snapshot()["pending_requests"] == 1
 
 
@@ -292,7 +303,9 @@ async def test_search_expands_query_and_logs_actual_text(core, media, season, wo
 
 def test_season_and_episode_ranges_keep_partial_coverage(rezero):
     assert reject_reason(candidate(title="Re:Zero S01-S03 1080p"), [rezero]) is None
-    assert reject_reason(candidate(title="Re:Zero S02E01-E13 1080p"), [rezero])
+    assert (
+        reject_reason(candidate(title="Re:Zero S02E01-E13 1080p"), [rezero]) is None
+    )  # Keep for manual mapping.
     assert reject_reason(candidate(title="Re:Zero S02E14-E25 1080p"), [rezero]) is None
 
 

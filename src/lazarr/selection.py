@@ -1,6 +1,6 @@
 """Compatibility facade for the replaceable search engine."""
 
-from lazarr.search_runtime import engine_call
+from lazarr.search_runtime import engine_call, current_engine
 
 
 def title_seasons(*args, **kwargs):
@@ -21,3 +21,8 @@ def reject_reason(*args, **kwargs):
 
 def candidate_rank(*args, **kwargs):
     return engine_call("selection", "candidate_rank", *args, **kwargs)
+
+
+def assess_candidate(*args, **kwargs):
+    assess = getattr(current_engine().selection, "assess_candidate", None)
+    return assess(*args, **kwargs) if assess else None

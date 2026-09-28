@@ -26,7 +26,14 @@ async def test_tmdb_exposes_large_backdrop(core):
                 "external_ids": {},
                 "alternative_titles": {"results": []},
                 "episode_groups": {"results": []},
-                "seasons": [],
+                "seasons": [
+                    {
+                        "season_number": 2,
+                        "name": "Named season",
+                        "episode_count": 11,
+                        "air_date": "2012-01-08",
+                    }
+                ],
             },
         )
     )
@@ -34,6 +41,7 @@ async def test_tmdb_exposes_large_backdrop(core):
         item = await provider.get_media("tv", "42")
     assert item.poster == "https://image.tmdb.org/t/p/w342/poster.jpg"
     assert item.backdrop == "https://image.tmdb.org/t/p/w1280/backdrop.jpg"
+    assert item.seasons[0]["air_date"] == "2012-01-08"
 
 
 async def test_nyaa_search_inspect_and_download(core, media):
@@ -54,7 +62,8 @@ async def test_nyaa_search_inspect_and_download(core, media):
         )
         assert page.items[0].seeds == 42
         assert page.items[0].size == int(2.5 * 1024**3)
-        candidate = await provider.inspect(page.items[0])
+        candidate = await provider.inspect(page.items[0].model_copy(update={"title": "Old title"}))
+        assert candidate.title == "Example Show"
         assert candidate.file_hints == ["Show.S01E01.1080p.mkv", "Show.S01E02.1080p.mkv"]
         assert candidate.evidence[0].value == ["ru", "ja"]
         assert (await provider.resolve_download(candidate)).torrent == b"d4:infodee"
@@ -80,7 +89,8 @@ async def test_rutracker_cookie_pagination_cp1251_and_expiry(core, media):
         page = await provider.search(SearchQuery(media=media, season=1, requirements=Requirements()))
         assert page.next_cursor == "50"
         assert page.items[0].seeds == 15
-        detailed = await provider.inspect(page.items[0])
+        detailed = await provider.inspect(page.items[0].model_copy(update={"title": "Old title"}))
+        assert detailed.title == "Example Show updated"
         assert detailed.external_ids == {"imdb": "tt0042"}
         assert detailed.evidence[0].value == ["ru", "ja"]
     expired = True

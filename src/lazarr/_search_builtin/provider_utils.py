@@ -213,3 +213,42 @@ def search_titles(media):
             result.append(name)
             seen.add(name.casefold())
     return result[:4]
+
+
+def named_season(media, number):
+    """Return only a requested season with a distinctive metadata title."""
+    if media.kind != "tv" or number is None:
+        return None
+    for season in media.seasons:
+        if season.get("number") != number:
+            continue
+        title = str(season.get("title") or "").strip()
+        generic = (
+            r"(?:(?:season|сезон|series|серии|сезоны)\s*\d*|"
+            r"\d+(?:st|nd|rd|th)?\s*(?:season|сезон)|"
+            r"specials?|спец(?:выпуски|эпизоды|материалы)|специальные эпизоды|s\d+|\d+)"
+        )
+        if title and not re.fullmatch(generic, title, re.I):
+            return season
+    return None
+
+
+def season_year(season):
+    date = season.get("air_date") if season else None
+    return int(date[:4]) if isinstance(date, str) and re.match(r"^\d{4}-", date) else None
+
+
+def search_queries(media, season=None, year=None):
+    """Series alternatives plus the requested season's own title and premiere year."""
+    titles = search_titles(media)
+    result = [f"{title} {year}" for title in titles] if year else []
+    named = named_season(media, season)
+    if named:
+        title = named["title"].strip()
+        premiere = season_year(named) or year
+        if premiere:
+            result.append(f"{title} {premiere}")
+    result.extend(titles)
+    if named:
+        result.append(named["title"].strip())
+    return list(dict.fromkeys(result))

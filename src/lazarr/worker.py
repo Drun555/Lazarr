@@ -1,14 +1,14 @@
 from lazarr.search_runtime import current_engine, pinned
 from lazarr.notifications import queue_episode_notification
-from lazarr.selection import reject_reason, candidate_rank
-from lazarr.provider_utils import search_titles
+from lazarr.selection import reject_reason, candidate_rank, assess_candidate
+from lazarr.provider_utils import search_queries
 
 import asyncio
 import logging
 import re
 import time
 from pathlib import Path, PurePosixPath
-from sqlalchemy import select, update
+from sqlalchemy import select, update, tuple_
 from lazarr.calendar import next_search_start, released, TMDBCalendar
 from lazarr.matcher import Matcher
 from lazarr.search import SearchProgress, defer
@@ -124,6 +124,18 @@ class Worker:
             "matching", f"Сопоставление {len(metadata.files)} файлов с эпизодами и дорожками"
         )
         report = self.matcher.evaluate(detailed, subtasks, metadata.files, metadata.infohash)
+        for evaluation in report.evaluations:
+            request = next(r for r in subtasks if r.id == evaluation.subtask_id)
+            initial = assess_candidate(candidate, request, stage=1)
+            if initial and evaluation.scoring:
+                evaluation.scoring[0] = initial
+            if evaluation.scoring:
+                final = evaluation.scoring[-1]
+                self.progress.record(
+                    "score",
+                    f"{candidate.title}: {final.total} баллов (порог {final.threshold}); "
+                    + ("; ".join(final.blockers) if final.blockers else "проверка завершена"),
+                )
         return detailed, metadata, report
 
     async def add_manual_candidate(self, subtask_id, url):
@@ -270,6 +282,7 @@ class Worker:
                 unavailable = (
                     bool(groups)
                     and not self.progress.value["search_requests"]
+                    and not self.progress.value["candidates_checked"]
                     and not self.progress.value.get("satisfied")
                 )
                 self.progress.record(
@@ -375,7 +388,10 @@ class Worker:
             completed = False
             try:
                 await self._run_group([subtask_id], acquire=False)
-                if not self.progress.value["search_requests"]:
+                if (
+                    not self.progress.value["search_requests"]
+                    and not self.progress.value["candidates_checked"]
+                ):
                     self.progress.value["errors"] += 1
                     self.progress.record(
                         "error",
@@ -396,6 +412,42 @@ class Worker:
                 )
                 task = self.progress.tasks[task_id]
                 task.update(running=False, state=state, message=self.progress.value["message"])
+
+    def previous_candidates(self, ids, provider_ids):
+        """Refresh actual completed selections from these tasks and seasons."""
+        with self.db.session() as db:
+            scopes = list(
+                db.execute(
+                    select(Subtask.task_id, Episode.season_id)
+                    .join(Episode, Subtask.episode_id == Episode.id)
+                    .where(Subtask.id.in_(ids))
+                    .distinct()
+                ).tuples()
+            )
+            if not scopes or not provider_ids:
+                return []
+            releases = db.scalars(
+                select(Release)
+                .join(Download, Download.release_id == Release.id)
+                .join(MediaAsset, MediaAsset.download_id == Download.id)
+                .join(SubtaskAsset, SubtaskAsset.asset_id == MediaAsset.id)
+                .join(Subtask, Subtask.id == SubtaskAsset.subtask_id)
+                .join(Episode, Episode.id == Subtask.episode_id)
+                .where(
+                    tuple_(Subtask.task_id, Episode.season_id).in_(scopes),
+                    Subtask.status == "done",
+                    SubtaskAsset.current.is_(True),
+                    Release.provider.in_(provider_ids),
+                )
+                .distinct()
+                .order_by(Release.id.desc())
+            )
+            return [
+                Candidate.model_validate(release.data).model_copy(
+                    update={"description": "", "evidence": [], "external_ids": {}, "file_hints": []}
+                )
+                for release in releases
+            ]
 
     @pinned
     async def _run_group(self, ids, provider_filter=None, acquire=True):
@@ -444,6 +496,44 @@ class Worker:
                 self.progress.record(
                     "provider_skipped", f"{item['name']}: {item['reason']}", provider=item["name"]
                 )
+        checked_topics = set()
+
+        async def inspect_candidate(candidate, participation, provider_name):
+            try:
+                detailed, metadata, report = await self.evaluate(
+                    candidate,
+                    requests,
+                    allow_preference_mismatch=not acquire,
+                )
+                release_id, allowed = self._record(detailed, metadata, report)
+                choices.append((detailed, metadata, report, release_id, allowed))
+                checked_topics.add((candidate.provider, candidate.id))
+                self.progress.value["candidates_checked"] += 1
+            except CandidateFiltered as exc:
+                checked_topics.add((candidate.provider, candidate.id))
+                self.progress.value["candidates_filtered"] += 1
+                self.progress.record("filtered", f"Отсеяно: {candidate.title} — {exc}")
+            except Exception as exc:
+                self.progress.value["candidates_failed"] += 1
+                errors.append(self._error(exc))
+                self.progress.record("candidate_error", f"Кандидат не проверен: {self._error(exc)}")
+                latest = next(p for p in self.plugins.search_status() if p["id"] == candidate.provider)
+                if latest["state"] == "cooldown":
+                    if acquire:
+                        self.defer_requests(claimed, candidate.provider, latest["retry_at"])
+                    participation.update(
+                        state="cooldown", reason=latest["reason"], retry_at=latest["retry_at"]
+                    )
+                    self.progress.record(
+                        "provider_cooldown",
+                        f"{provider_name}: обход остановлен до окончания паузы",
+                    )
+            if acquire:
+                with self.db.session() as db:
+                    db.execute(
+                        update(Subtask).where(Subtask.id.in_(claimed)).values(lease_until=time.time() + 600)
+                    )
+
         interrupted = False
         try:
             if not provider_ids:
@@ -462,8 +552,37 @@ class Worker:
                 provider="",
             )
             seen = set()
-            covered = set()
-            for provider_id in provider_ids:
+            for candidate in self.previous_candidates(claimed, provider_ids):
+                if acquire and not self.unresolved(claimed):
+                    break
+                participation = provider_state[candidate.provider]
+                if participation["state"] == "cooldown":
+                    continue
+                provider_name = self.plugins.classes[candidate.provider].manifest.name
+                participation.update(state="checking", reason="Проверка ранее выбранной темы")
+                self.progress.record(
+                    "previous_release",
+                    f"{provider_name}: проверка ранее выбранной темы — {candidate.title}",
+                    provider=provider_name,
+                )
+                with self.db.session() as db:
+                    db.execute(
+                        update(Subtask).where(Subtask.id.in_(claimed)).values(last_search_at=time.time())
+                    )
+                self.progress.value["candidates_found"] += 1
+                await inspect_candidate(candidate, participation, provider_name)
+                if participation["state"] != "cooldown":
+                    participation.update(state="completed", reason="Ранее выбранная тема проверена")
+            covered = {
+                evaluation.subtask_id
+                for _, _, report, _, allowed in choices
+                for evaluation in report.evaluations
+                if evaluation.result == MatchResult.MATCH and evaluation.subtask_id in allowed
+            }
+            # Familiar topics are the first search phase. Compare all of them;
+            # broad discovery is needed only when they cannot cover this group.
+            discovery_providers = [] if acquire and set(claimed) <= covered else provider_ids
+            for provider_id in discovery_providers:
                 if acquire and not self.unresolved(claimed):
                     self.progress.value["satisfied"] = True
                     self.progress.record("finished", "Поиск остановлен: раздачи уже выбраны")
@@ -471,12 +590,6 @@ class Worker:
                 provider_name = self.plugins.classes[provider_id].manifest.name
                 self.progress.value["provider"] = provider_name
                 participation = provider_state[provider_id]
-                if acquire and all(r.id in covered for r in requests):
-                    participation.update(
-                        state="skipped", reason="Для всех эпизодов найдены подходящие раздачи"
-                    )
-                    self.progress.record("provider_skipped", f"{provider_name}: {participation['reason']}")
-                    continue
                 if participation["state"] == "cooldown":
                     reason = participation["reason"]
                     if acquire:
@@ -485,16 +598,14 @@ class Worker:
                     self.progress.record("provider_cooldown", f"{provider_name}: {reason}")
                     continue
                 cursor = None
-                titles = search_titles(query.media)
-                variants = [f"{title} {year}" for title in titles] + titles if year else titles
+                variants = search_queries(query.media, season=query.season, year=year)
                 variant = 0
                 variant_pages = 0
                 stopped = False
+                provider_candidates = []
                 for _page in range(3 * len(variants)):
                     if acquire and not self.unresolved(claimed):
                         self.progress.value["satisfied"] = True
-                        break
-                    if acquire and all(r.id in covered for r in requests):
                         break
                     query.text = variants[variant]
                     participation.update(state="searching", reason=f"Запрос страницы {_page + 1}")
@@ -535,7 +646,7 @@ class Worker:
                     unique = []
                     for candidate in page.items:
                         key = (candidate.provider, candidate.id, candidate.revision)
-                        if key not in seen:
+                        if key not in seen and (candidate.provider, candidate.id) not in checked_topics:
                             seen.add(key)
                             unique.append(candidate)
                     self.progress.value["candidates_found"] += len(unique)
@@ -547,59 +658,7 @@ class Worker:
                             self.progress.record("filtered", f"Отсеяно: {candidate.title} — {reason}")
                         else:
                             shortlist.append(candidate)
-                    ordered = sorted(shortlist, key=lambda c: candidate_rank(c, requests))
-                    for position, candidate in enumerate(ordered):
-                        if acquire and not self.unresolved(claimed):
-                            self.progress.value["satisfied"] = True
-                            break
-                        if acquire and all(r.id in covered for r in requests):
-                            break
-                        try:
-                            detailed, metadata, report = await self.evaluate(
-                                candidate,
-                                requests,
-                                allow_preference_mismatch=not acquire,
-                            )
-                            release_id, allowed = self._record(detailed, metadata, report)
-                            choices.append((detailed, metadata, report, release_id, allowed))
-                            self.progress.value["candidates_checked"] += 1
-                            for evaluation in report.evaluations:
-                                if (
-                                    evaluation.result == MatchResult.MATCH
-                                    and evaluation.subtask_id in allowed
-                                ):
-                                    covered.add(evaluation.subtask_id)
-                        except CandidateFiltered as exc:
-                            self.progress.value["candidates_filtered"] += 1
-                            self.progress.record("filtered", f"Отсеяно: {candidate.title} — {exc}")
-                        except Exception as exc:
-                            self.progress.value["candidates_failed"] += 1
-                            errors.append(self._error(exc))
-                            self.progress.record(
-                                "candidate_error", f"Кандидат не проверен: {self._error(exc)}"
-                            )
-                            latest = next(p for p in self.plugins.search_status() if p["id"] == provider_id)
-                            if latest["state"] == "cooldown":
-                                if acquire:
-                                    self.defer_requests(claimed, provider_id, latest["retry_at"])
-                                participation.update(
-                                    state="cooldown", reason=latest["reason"], retry_at=latest["retry_at"]
-                                )
-                                self.progress.value["candidates_deferred"] += len(ordered) - position - 1
-                                self.progress.record(
-                                    "provider_cooldown",
-                                    f"{provider_name}: обход остановлен до окончания паузы",
-                                )
-                                stopped = True
-                                break
-                        if not acquire:
-                            continue
-                        with self.db.session() as db:
-                            db.execute(
-                                update(Subtask)
-                                .where(Subtask.id.in_(claimed))
-                                .values(lease_until=time.time() + 600)
-                            )
+                    provider_candidates.extend(shortlist)
                     if not stopped:
                         self.progress.value["pages_checked"] += 1
                         self.progress.value["group_pages_checked"] += 1
@@ -613,6 +672,22 @@ class Worker:
                         variant_pages = 0
                         cursor = None
                     else:
+                        break
+                # Search all bounded pages first, then spend expensive inspections on
+                # the strongest title candidates, independent of result/query order.
+                ordered = sorted(provider_candidates, key=lambda c: candidate_rank(c, requests))[:12]
+                if len(provider_candidates) > len(ordered):
+                    self.progress.record(
+                        "limit",
+                        f"{provider_name}: подробно проверяем {len(ordered)} лучших из {len(provider_candidates)} кандидатов",
+                    )
+                for position, candidate in enumerate(ordered):
+                    if acquire and not self.unresolved(claimed):
+                        self.progress.value["satisfied"] = True
+                        break
+                    await inspect_candidate(candidate, participation, provider_name)
+                    if participation["state"] == "cooldown":
+                        self.progress.value["candidates_deferred"] += len(ordered) - position - 1
                         break
             if not acquire:
                 self.progress.record("alternatives", "Поиск вариантов завершён. Выберите раздачу вручную.")
@@ -630,7 +705,7 @@ class Worker:
                     binding = evaluation.binding
                     ranked.append(
                         (
-                            -(binding.resolution or 0),
+                            (-evaluation.score, -(binding.resolution or 0)),
                             len(binding.missing_subtitle_languages),
                             -(candidate.seeds or 0),
                             candidate.size or 2**63,
@@ -684,9 +759,15 @@ class Worker:
                     )
                     if not pending:
                         unknown = any(
-                            next(e for e in r.evaluations if e.subtask_id == identity).result
-                            == MatchResult.UNKNOWN
-                            for _, _, r, _, _ in choices
+                            identity in allowed
+                            and (
+                                evaluation.manual_candidate
+                                if evaluation.scoring
+                                else evaluation.result == MatchResult.UNKNOWN
+                            )
+                            for _, _, report, _, allowed in choices
+                            for evaluation in report.evaluations
+                            if evaluation.subtask_id == identity
                         )
                         sub.status = "done" if current else "needs_selection" if unknown else "queued"
                     if sub.status == "needs_selection":
@@ -881,6 +962,7 @@ class Worker:
             if binding is None:
                 raise ValueError("Укажите соответствие видео и внешних дорожек вручную")
             evaluation.binding = binding
+            evaluation.needs_mapping = False
             plan = DownloadPlan(infohash=infohash, files=metadata.files, bindings=[binding])
             await self.submit(release_id, metadata, plan, {request.id: evaluation}, override=True)
             self.selection_changed.set()

@@ -29,14 +29,14 @@ async def test_new_task_searches_immediately_and_only_it(core, media, season, wo
     scheduler = Scheduler(worker, service)
     assert scheduler.snapshot()["pending_requests"] == 1
     assert await scheduler.process_queue()
-    assert demo.calls == 1
+    assert demo.calls == 2
     with db.session() as session:
         assert session.scalar(select(Subtask).where(Subtask.task_id == new)).status == "starting"
         assert session.scalar(select(Subtask).where(Subtask.task_id == old)).status == "queued"
     assert scheduler.snapshot()["pending_requests"] == 0
     progress = scheduler.snapshot()
     assert progress["groups_done"] == progress["groups_total"] == 1
-    assert progress["pages_checked"] == 1
+    assert progress["pages_checked"] == 2
     stages = {event["stage"] for event in progress["history"]}
     assert {
         "search",
@@ -72,7 +72,7 @@ async def test_queue_survives_restart_and_deduplicates_manual_requests(core, med
     restarted = Scheduler(worker, service)
     assert restarted.snapshot()["pending_requests"] == 2
     assert await restarted.process_queue()
-    assert demo.calls == 1
+    assert demo.calls == 2
     assert not await restarted.process_queue()
 
 
@@ -100,7 +100,7 @@ async def test_manual_retry_clears_provider_cooldown_and_deferred_search(core, m
         assert session.get(ProviderConfig, "demo").retry_at == 0
     assert scheduler.snapshot(task_id)["next_attempt_at"] == 0
     assert await scheduler.process_queue()
-    assert demo.calls == 1
+    assert demo.calls == 2
     assert scheduler.snapshot(task_id)["pending_requests"] == 0
 
 
@@ -128,7 +128,7 @@ async def test_new_task_can_arrive_during_search(core, media, season, worker_set
     await running
     assert scheduler.snapshot()["pending_requests"] == 1
     await scheduler.process_queue()
-    assert demo.calls == 2
+    assert demo.calls == 4
 
 
 async def test_manual_queue_preserves_pause_and_calendar(core, media, season, worker_setup):

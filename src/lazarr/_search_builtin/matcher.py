@@ -4,7 +4,7 @@ import re
 import unicodedata
 from pathlib import PurePosixPath
 from lazarr.languages import language_name
-from .provider_utils import title_subtitle_evidence
+from .provider_utils import title_subtitle_evidence, named_season, season_year
 from lazarr.sdk import (
     Candidate,
     TorrentFile,
@@ -39,6 +39,45 @@ FULL_SUBTITLE_MARKERS = {"full", "полные", "полная"}
 
 def normalized(value):
     return re.sub(r"[^\w]+", " ", unicodedata.normalize("NFKC", value).casefold()).strip()
+
+
+def title_matches(title, aliases):
+    segments = [normalized(part) for part in re.split(r"[/|]", re.sub(r"\[[^]]*\]", " ", title))]
+    found = False
+    for alias in aliases:
+        name = normalized(alias)
+        if not name:
+            continue
+        for segment in segments:
+            if segment == name:
+                found = True
+            elif segment.startswith(name + " "):
+                tail = segment[len(name) :].strip()
+                # A sequel or a longer title must not match merely by containing an alias.
+                if re.match(
+                    r"(?:(?:19|20)\d{2}|s\d+|season\b|сезон\b|тв\b|tv\b|\d+(?:st|nd|rd|th) season\b|\d+(?: \d+)? сезон(?:а|ы|ов)?\b|\d{3,4}[pi]\b|4k\b)",
+                    tail,
+                ):
+                    found = True
+    return found
+
+
+def season_title_matches(title, name):
+    # Trackers also write "Series: Season title (TV-N)" as a single segment.
+    return title_matches(title, [name]) or any(
+        title_matches(part, [name]) for part in re.split(r":\s+", title)[1:]
+    )
+
+
+def confirmed_named_season(candidate, request):
+    season = named_season(request.media, request.season)
+    if not season or not season_title_matches(candidate.title, season["title"]):
+        return False
+    year = season_year(season)
+    if year is None and request.air_date and re.match(r"^\d{4}-", request.air_date):
+        year = int(request.air_date[:4])
+    years = {int(v) for v in re.findall(r"\b(?:19|20)\d{2}\b", candidate.title)}
+    return year is not None and years == {year}
 
 
 def subtitle_title_is_forced(title):
@@ -257,68 +296,45 @@ class Matcher:
                 result=MatchResult.MISMATCH if mismatch else MatchResult.MATCH,
                 reason="Внешние идентификаторы различаются" if mismatch else "Совпали внешние идентификаторы",
             )
-        aliases = [request.media.title, request.media.original_title, *request.media.aliases]
-        segments = [
-            normalized(part) for part in re.split(r"[/|]", re.sub(r"\[[^]]*\]", " ", candidate.title))
-        ]
-        found = False
-        for alias in aliases:
-            name = normalized(alias)
-            if not name:
-                continue
-            for segment in segments:
-                if segment == name:
-                    found = True
-                elif segment.startswith(name + " "):
-                    tail = segment[len(name) :].strip()
-                    # A sequel or a longer title must not match merely by containing an alias.
-                    if re.match(
-                        r"(?:(?:19|20)\d{2}|s\d+|season\b|сезон\b|тв\b|tv\b|\d+(?:st|nd|rd|th) season\b|\d+(?: \d+)? сезон(?:а|ы|ов)?\b|\d{3,4}[pi]\b|4k\b)",
-                        tail,
-                    ):
-                        found = True
-        years = {int(v) for v in re.findall(r"\b(?:19|20)\d{2}\b", candidate.title)}
-        if not found:
-            return Criterion(
-                field="identity", result=MatchResult.UNKNOWN, reason="Название произведения не подтверждено"
-            )
-        if years and request.media.year and request.media.year not in years:
-            if request.media.kind == "tv":
-                from .selection import title_seasons, request_seasons
+        from .selection import assess_candidate, identity_signal, SCORE_WEIGHTS
 
-                episode_year = (
-                    int(request.air_date[:4])
-                    if request.air_date and re.match(r"^\d{4}-", request.air_date)
-                    else None
-                )
-                if episode_year in years and title_seasons(candidate.title) & request_seasons(request):
-                    return Criterion(
-                        field="identity",
-                        result=MatchResult.MATCH,
-                        reason="Совпали название, сезон и год выхода эпизода",
-                    )
-                return Criterion(
-                    field="identity",
-                    result=MatchResult.UNKNOWN,
-                    reason="Название совпало; год раздачи может относиться к отдельному сезону, нужен ID или ручное подтверждение",
-                )
+        signal = identity_signal(candidate, request, 2)
+        if (
+            signal.points >= SCORE_WEIGHTS["series_name_year"]
+            and assess_candidate(candidate, request, 2).passed
+        ):
+            return Criterion(field="identity", result=MatchResult.MATCH, reason=signal.reason)
+        years = {int(v) for v in re.findall(r"\b(?:19|20)\d{2}\b", candidate.title)}
+        if (
+            request.media.kind == "movie"
+            and signal.points
+            and years
+            and request.media.year
+            and request.media.year not in years
+        ):
             return Criterion(
                 field="identity", result=MatchResult.MISMATCH, reason="Год произведения отличается"
             )
-        if request.media.year and request.media.year in years:
-            return Criterion(field="identity", result=MatchResult.MATCH, reason="Совпали название и год")
         return Criterion(
             field="identity",
             result=MatchResult.UNKNOWN,
-            reason="Название совпало, но год или ID не подтверждены",
+            reason=signal.reason
+            if signal.points < SCORE_WEIGHTS["series_name_year"]
+            else "Название и год совпали, но есть противоречия в сведениях раздачи",
         )
 
     def _video_matches(self, file, request, season_hint=None):
         if request.media.kind == "movie":
             return True
+        named = named_season(request.media, request.season)
         season, numbers, absolute = episode_numbers(
             file.path,
-            [request.media.title, request.media.original_title, *request.media.aliases],
+            [
+                request.media.title,
+                request.media.original_title,
+                *request.media.aliases,
+                *([named["title"]] if named else []),
+            ],
             season_hint,
         )
         if absolute:
@@ -352,7 +368,7 @@ class Matcher:
         title_evidence = title_subtitle_evidence(candidate.title)
         if title_evidence:
             candidate = candidate.model_copy(update={"evidence": [*candidate.evidence, *title_evidence]})
-        from .selection import title_seasons
+        from .selection import title_seasons, confirmed_tv_number
 
         release_seasons = title_seasons(candidate.title)
         season_hint = next(iter(release_seasons)) if len(release_seasons) == 1 else None
@@ -366,10 +382,23 @@ class Matcher:
         reports = []
         for request in requests:
             criteria = [self.identity(candidate, request)]
-            possible = [v for v in videos if self._video_matches(v, request, season_hint)]
+            request_hint = season_hint
+            named = named_season(request.media, request.season)
+            if (
+                named
+                and not release_seasons
+                and season_title_matches(candidate.title, named["title"])
+                or confirmed_tv_number(candidate, request) is not None
+            ):
+                request_hint = request.season
+            possible = [v for v in videos if self._video_matches(v, request, request_hint)]
             video = possible[0] if len(possible) == 1 else None
             numbered = [
-                episode_numbers(v.path, [request.media.title, request.media.original_title], season_hint)
+                episode_numbers(
+                    v.path,
+                    [request.media.title, request.media.original_title, *([named["title"]] if named else [])],
+                    request_hint,
+                )
                 for v in videos
             ]
             absent_episode = (
@@ -453,10 +482,22 @@ class Matcher:
                     for v in videos:
                         same_stem = stem_key(file.path) == stem_key(v.path)
                         file_number = episode_numbers(
-                            file.path, [request.media.title, request.media.original_title], season_hint
+                            file.path,
+                            [
+                                request.media.title,
+                                request.media.original_title,
+                                *([named["title"]] if named else []),
+                            ],
+                            request_hint,
                         )
                         video_number = episode_numbers(
-                            v.path, [request.media.title, request.media.original_title], season_hint
+                            v.path,
+                            [
+                                request.media.title,
+                                request.media.original_title,
+                                *([named["title"]] if named else []),
+                            ],
+                            request_hint,
                         )
                         same_episode = bool(file_number[1]) and file_number == video_number
                         if same_stem or same_episode:
@@ -586,8 +627,32 @@ class Matcher:
                 if MatchResult.MISMATCH in required
                 else (MatchResult.UNKNOWN if MatchResult.UNKNOWN in required else MatchResult.MATCH)
             )
+            from .selection import assess_candidate
+
+            stages = [
+                assess_candidate(candidate, request, stage, criteria if stage == 3 else ())
+                for stage in (1, 2, 3)
+            ]
+            if outcome == MatchResult.MATCH and not stages[-1].passed:
+                outcome = MatchResult.UNKNOWN
+            manual_candidate = (
+                bool(videos)
+                and stages[1].passed
+                and not any(
+                    c.required and c.field != "episode" and c.result == MatchResult.MISMATCH for c in criteria
+                )
+            )
             reports.append(
-                SubtaskEvaluation(subtask_id=request.id, result=outcome, criteria=criteria, binding=binding)
+                SubtaskEvaluation(
+                    subtask_id=request.id,
+                    result=outcome,
+                    criteria=criteria,
+                    binding=binding,
+                    score=stages[-1].total,
+                    scoring=stages,
+                    manual_candidate=manual_candidate,
+                    needs_mapping=manual_candidate and binding is None,
+                )
             )
         bindings = [r.binding for r in reports if r.result == MatchResult.MATCH and r.binding]
         return EvaluationReport(

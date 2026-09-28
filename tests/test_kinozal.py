@@ -219,7 +219,7 @@ def test_kinozal_season_and_partial_episode_coverage(title, seasons, coverage):
     assert title_episode_coverage(title) == coverage
 
 
-def test_wrong_season_and_unreleased_episodes_rejected_before_inspect(media):
+def test_wrong_season_rejected_and_missing_episodes_kept_for_manual_mapping(media):
     title = "Example Show (2 сезон: 1-3 серии из 8) / 2020 / СТ / WEB-DL (1080p)"
     candidate = item().model_copy(update={"title": title})
     request = SubtaskRequest(id=1, media=media, season=1, episode=1, requirements=Requirements())
@@ -228,7 +228,7 @@ def test_wrong_season_and_unreleased_episodes_rejected_before_inspect(media):
     assert reject_reason(candidate, [request]) is None
     assert Matcher().identity(candidate, request).result == "MATCH"
     request.episode = 8
-    assert "не пересекаются" in reject_reason(candidate, [request])
+    assert reject_reason(candidate, [request]) is None
     candidate.title = "Example Show (1-2 сезон: 1-16 серии из 16) / 2020 / WEB-DL (1080p)"
     assert reject_reason(candidate, [request]) is None
 

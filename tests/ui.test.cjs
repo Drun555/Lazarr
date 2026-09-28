@@ -1231,3 +1231,25 @@ test('storage status reports paths and an unavailable status does not block sett
     assert.equal(d.querySelector('[name="prefer_full_subtitles"]').checked,true);
   }finally{dom.window.close();}
 });
+
+test('scored recommendation explains stages and opens mapping even from pending choice',async()=>{
+  const {dom,w,document:d,errors,calls,setChoice}=await setup();
+  try{
+    setChoice([{index:0,path:'video.mkv',size:1000}],null);
+    const original=w.fetch;
+    w.fetch=async(url,options)=>url==='/api/v1/subtasks/11/candidates'?{ok:true,status:200,json:async()=>[{
+      id:5,action:'evaluated',recommended:true,candidate:{title:'Best match',url:'https://example.com/release',provider:'demo'},
+      report:{result:'MISMATCH',binding:null,score:100,needs_mapping:true,criteria:[{field:'episode',required:true,result:'MISMATCH',reason:'В торренте нет запрошенного эпизода'}],
+        scoring:[{stage:3,total:100,threshold:100,passed:false,signals:[{group:'identity',points:120,reason:'Совпали внешние идентификаторы'},{group:'episode',points:-20,reason:'Серия не найдена'}],blockers:['Требуется сопоставление']}]} }] }:original(url,options);
+    await w.testCandidateDialog(11,true);await settle();
+    assert.match(d.querySelector('.candidate').textContent,/Рекомендуемая раздача/);
+    assert.match(d.querySelector('.candidate-score').textContent,/100 баллов/);
+    assert.match(d.querySelector('.candidate-score').textContent,/\+120/);
+    assert.match(d.querySelector('.candidate-score').textContent,/-20/);
+    assert.equal(d.querySelector('[data-choose="5"]').textContent,'Сопоставить файлы');
+    d.querySelector('[data-choose="5"]').click();await settle();await settle();
+    assert.ok(d.querySelector('#mapping-form'));
+    assert.ok(!calls.some(c=>/\/choice$/.test(c.url)));
+    assert.deepEqual(errors,[]);
+  }finally{dom.window.close();}
+});

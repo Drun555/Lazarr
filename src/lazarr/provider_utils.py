@@ -1,6 +1,6 @@
 """Compatibility facade for the replaceable search engine."""
 
-from lazarr.search_runtime import engine_call
+from lazarr.search_runtime import engine_call, current_engine
 
 
 def size_bytes(*args, **kwargs):
@@ -29,3 +29,11 @@ def search_title(*args, **kwargs):
 
 def search_titles(*args, **kwargs):
     return engine_call("provider_utils", "search_titles", *args, **kwargs)
+
+
+def search_queries(media, season=None, year=None):
+    build = getattr(current_engine().provider_utils, "search_queries", None)
+    if build is not None:
+        return build(media, season=season, year=year)
+    titles = search_titles(media)
+    return [f"{title} {year}" for title in titles] + titles if year else titles
