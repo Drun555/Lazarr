@@ -1,3 +1,4 @@
+from lazarr.search_runtime import current_engine
 import time
 import calendar
 from datetime import datetime, timezone
@@ -202,9 +203,22 @@ class TaskService:
                     membership.whole_season |= selection.episodes is None
                     membership.numbering = numbering
                 for episode in db.scalars(select(Episode).where(Episode.season_id == season.id)):
-                    if episode.id not in existing and (
-                        canonical.episodes is None or episode.number in canonical.episodes
-                    ):
+                    requested = canonical.episodes is None or episode.number in canonical.episodes
+                    if episode.id in existing and requested:
+                        sub = db.scalar(
+                            select(Subtask).where(
+                                Subtask.task_id == task.id, Subtask.episode_id == episode.id
+                            )
+                        )
+                        if sub.status == "removed":
+                            current = db.scalar(
+                                select(SubtaskAsset.id).where(
+                                    SubtaskAsset.subtask_id == sub.id, SubtaskAsset.current.is_(True)
+                                )
+                            )
+                            sub.status = "done" if current else "queued"
+                            sub.next_search_at = 0
+                    if episode.id not in existing and requested:
                         db.add(
                             Subtask(task_id=task.id, episode_id=episode.id, part_key=f"episode:{episode.id}")
                         )
@@ -238,14 +252,27 @@ class TaskService:
             db.add(season)
             db.flush()
         season.title, season.refreshed_at = info.title, time.time()
+        episodes = list(db.scalars(select(Episode).where(Episode.season_id == season.id)))
+        by_original_number = {}
+        occupied = {episode.number for episode in episodes}
+        for episode in episodes:
+            override = db.get(ConfigEntry, f"episode_number.{episode.id}")
+            original = override.value["original"] if override else episode.number
+            by_original_number[original] = episode
         for item in info.episodes:
-            episode = db.scalar(
-                select(Episode).where(Episode.season_id == season.id, Episode.number == item.number)
-            )
+            episode = by_original_number.get(item.number)
             if not episode:
+                # A manual number takes precedence over newly discovered metadata.
+                if item.number in occupied:
+                    continue
                 episode = Episode(season_id=season.id, number=item.number)
                 db.add(episode)
-            episode.external_id, episode.title, episode.air_date = item.id, item.title, item.air_date
+                by_original_number[item.number] = episode
+                occupied.add(item.number)
+            episode.external_id, episode.air_date = item.id, item.air_date
+            override = db.get(ConfigEntry, f"episode_title.{episode.id}") if episode.id else None
+            if not override or override.value.get("title") != episode.title:
+                episode.title = item.title
             episode.overview, episode.still = item.overview, item.still
             episode.absolute_number = item.absolute_number
         db.flush()
@@ -424,7 +451,11 @@ class TaskService:
                     select(Season).where(Season.id.in_({m.season_id for m in memberships_all}))
                 )
             }
-            subs_query = select(Subtask).where(Subtask.task_id.in_(task_ids)).order_by(Subtask.id)
+            subs_query = (
+                select(Subtask)
+                .where(Subtask.task_id.in_(task_ids), Subtask.status != "removed")
+                .order_by(Subtask.id)
+            )
             subs_by_task = {}
             for sub in db.scalars(subs_query):
                 subs_by_task.setdefault(sub.task_id, []).append(sub)
@@ -523,11 +554,86 @@ class TaskService:
                 )
             return result
 
-    def edit(self, task_id, user_id, *, requirements=None, paused=None):
+    async def prepare_selections(self, task_id, selections):
         with self.db.session() as db:
             task = db.get(Task, task_id)
             if not task:
                 raise ValueError("Задача не найдена")
+            media = db.get(Media, task.media_id)
+            payload = CreateTask(
+                provider=media.provider, media_id=media.external_id, kind=media.kind, seasons=selections
+            )
+        resolved, occupied = [], set()
+        async with self.plugins.open(payload.provider) as provider:
+            item = await provider.get_media(payload.kind, payload.media_id)
+            for selection in payload.selections():
+                canonical, numbering = resolve_numbering(selection, item)
+                info = await provider.get_season(payload.media_id, canonical.season)
+                numbers = {episode.number for episode in info.episodes}
+                if canonical.episodes is not None:
+                    if not canonical.episodes or not set(canonical.episodes) <= numbers:
+                        raise ValueError("Указаны неизвестные или отсутствующие серии")
+                    numbers = set(canonical.episodes)
+                parts = {(info.number, number) for number in numbers}
+                if occupied & parts:
+                    raise ValueError("Выбранные сезоны содержат одни и те же серии")
+                occupied.update(parts)
+                resolved.append((selection, numbering, info, numbers))
+        return resolved
+
+    def _replace_selections(self, db, task, selections):
+        for membership in db.scalars(select(TaskSeason).where(TaskSeason.task_id == task.id)):
+            db.delete(membership)
+        db.flush()
+        wanted = set()
+        memberships = []
+        for selection, numbering, info, numbers in selections:
+            season = self._upsert_season(db, task.media_id, info)
+            membership = TaskSeason(
+                task_id=task.id,
+                season_id=season.id,
+                selection_key=f"alt:{selection.numbering_season}" if numbering else str(season.number),
+                whole_season=selection.episodes is None,
+                numbering=numbering,
+            )
+            db.add(membership)
+            memberships.append(membership)
+            wanted.update(
+                db.scalars(
+                    select(Episode.id).where(Episode.season_id == season.id, Episode.number.in_(numbers))
+                )
+            )
+        existing = list(db.scalars(select(Subtask).where(Subtask.task_id == task.id)))
+        for sub in existing:
+            if sub.episode_id in wanted:
+                wanted.remove(sub.episode_id)
+                if sub.status == "removed":
+                    current = db.scalar(
+                        select(SubtaskAsset.id).where(
+                            SubtaskAsset.subtask_id == sub.id, SubtaskAsset.current.is_(True)
+                        )
+                    )
+                    sub.status = "done" if current else "queued"
+                    sub.next_search_at = 0
+            else:
+                sub.status, sub.lease_until = "removed", 0
+                for link in db.scalars(select(SubtaskAsset).where(SubtaskAsset.subtask_id == sub.id)):
+                    link.pending = False
+        for episode_id in wanted:
+            db.add(Subtask(task_id=task.id, episode_id=episode_id, part_key=f"episode:{episode_id}"))
+        task.season_id = memberships[0].season_id if len(memberships) == 1 else None
+        task.numbering = memberships[0].numbering if len(memberships) == 1 else {}
+        task.whole_season = all(m.whole_season for m in memberships)
+        db.flush()
+        enqueue(db, task.id)
+
+    def edit(self, task_id, user_id, *, requirements=None, paused=None, selections=None):
+        with self.db.session() as db:
+            task = db.get(Task, task_id)
+            if not task:
+                raise ValueError("Задача не найдена")
+            if selections is not None:
+                self._replace_selections(db, task, selections)
             if requirements is not None:
                 task.requirements = requirements.model_dump()
                 # A new requirements revision invalidates earlier decisions/overrides.
@@ -570,6 +676,31 @@ class TaskService:
                     enqueue(db, task_id)
             task.updated_by, task.updated_at = user_id, time.time()
             audit(db, user_id, "task.update", str(task_id))
+
+    def refresh_candidate_report(self, db, decision, release, subtask):
+        if not release.files or (
+            decision.report.get("release_revision") == release.revision
+            and decision.report.get("engine_version") == current_engine().identity
+        ):
+            return
+        from lazarr.matcher import Matcher
+        from lazarr.sdk import Candidate, TorrentFile
+
+        evaluation = (
+            Matcher()
+            .evaluate(
+                Candidate.model_validate(release.data),
+                [self.request_for(db, subtask)],
+                [TorrentFile.model_validate(file) for file in release.files],
+                release.revision,
+            )
+            .evaluations[0]
+        )
+        decision.report = {
+            **evaluation.model_dump(mode="json"),
+            "release_revision": release.revision,
+            "engine_version": current_engine().identity,
+        }
 
     def candidates(self, subtask_id):
         with self.db.session() as db:
@@ -620,8 +751,18 @@ class TaskService:
                             .evaluate(
                                 Candidate.model_validate(release.data),
                                 [self.request_for(db, subtask)],
-                                [TorrentFile.model_validate(file) for file in download.plan.get("files", [])],
-                                download.infohash,
+                                [
+                                    TorrentFile.model_validate(file)
+                                    for file in (
+                                        release.files
+                                        or (
+                                            download.plan.get("files", [])
+                                            if download.infohash == release.revision
+                                            else []
+                                        )
+                                    )
+                                ],
+                                release.revision,
                             )
                             .evaluations[0]
                         )
@@ -639,6 +780,7 @@ class TaskService:
                 .join(Release)
                 .where(CandidateDecision.subtask_id == subtask_id)
             ):
+                self.refresh_candidate_report(db, decision, release, subtask)
                 candidate = dict(release.data)
                 candidate.pop("magnet", None)
                 candidate.pop("download_url", None)
@@ -684,6 +826,7 @@ class TaskService:
                 .order_by(Release.id, Episode.number, Subtask.id)
             )
             for decision, release, subtask, episode in rows:
+                self.refresh_candidate_report(db, decision, release, subtask)
                 item = grouped.get(release.id)
                 if item is None:
                     candidate = dict(release.data)

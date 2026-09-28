@@ -1,4 +1,4 @@
-"""Durable search requests and a bounded, credential-free activity snapshot."""
+"""Durable search requests and a complete, credential-free activity history."""
 
 import time
 from copy import deepcopy
@@ -32,6 +32,7 @@ class SearchProgress:
     def __init__(self):
         self.tasks = {}
         self.active_tasks = []
+        self.run_tasks = set()
         self.baseline = {}
         self.value = {
             "running": False,
@@ -62,30 +63,41 @@ class SearchProgress:
 
     def record(self, stage, message, **values):
         self.value.update(values, stage=stage, message=message, updated_at=time.time())
-        self.value["history"] = [
-            *self.value["history"][-39:],
-            {
-                "time": time.time(),
-                "stage": stage,
-                "message": message,
-                "provider": self.value.get("provider", ""),
-            },
-        ]
+        event = {
+            "time": time.time(),
+            "stage": stage,
+            "message": message,
+            "provider": self.value.get("provider", ""),
+        }
+        self.value["history"].append(event)
         self.sync_tasks()
-        for identity in self.active_tasks:
+        targets = self.active_tasks
+        if not targets and stage in {"finished", "error", "interrupted"}:
+            targets = self.run_tasks
+        for identity in targets:
             task = self.tasks[identity]
-            task["history"] = [*task["history"][-39:], deepcopy(self.value["history"][-1])]
+            task["history"].append(deepcopy(event))
+            if not self.active_tasks:
+                task.update(message=message, stage=stage, updated_at=event["time"])
 
-    def prepare_tasks(self, groups):
-        seen = set()
+    def prepare_tasks(self, groups, extra_tasks=()):
+        identities = set(extra_tasks)
+        identities.update(identity for ids in groups for identity in ids)
+        self.run_tasks = identities
+        for identity in identities:
+            history = []
+            self.tasks[identity] = SearchProgress().snapshot()
+            self.tasks[identity].update(
+                state="queued",
+                message="Ожидает поиска",
+                started_at=time.time(),
+                history=history,
+            )
+            # begin() runs before the affected tasks are known.
+            if self.value["history"]:
+                history.append(deepcopy(self.value["history"][-1]))
         for ids in groups:
-            for identity in ids:
-                if identity not in seen:
-                    self.tasks[identity] = SearchProgress().snapshot()
-                    self.tasks[identity].update(
-                        state="queued", message="Ожидает поиска", started_at=time.time()
-                    )
-                    seen.add(identity)
+            for identity in set(ids):
                 self.tasks[identity]["groups_total"] += 1
 
     def start_group(self, identities):

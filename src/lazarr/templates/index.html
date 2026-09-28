@@ -41,7 +41,7 @@
   </section>
   <section id="tab-library" class="tab-panel" hidden>
     <div class="library-page-heading"><h2>Библиотеки</h2></div>
-    <div id="library-overview"><div id="library-nav" class="library-nav" aria-label="Выбор библиотеки"></div><div id="library-items" class="library-grid"></div></div>
+    <div id="library-overview"><div id="library-items" class="library-sections"></div></div>
     <div id="all-tasks-control"><section class="panel search-activity"><div id="search-activity" hidden><div class="search-activity-heading"><h2 id="search-state"></h2><span id="search-counts" class="fine"></span></div><div id="search-progress" class="progress" role="progressbar" aria-label="Прогресс поиска"><span></span></div><p id="search-current" role="status" aria-live="polite"></p><p id="search-query" class="fine"></p><details><summary>Ход поиска</summary><div id="search-providers" class="search-providers"></div><ol id="search-history"></ol></details></div><div class="all-tasks-heading"><p class="fine">Поиск во всех активных задачах. Задачи на паузе пропускаются.</p><button type="button" class="primary" id="run-queue">Запустить поиск по всем задачам</button></div><div id="engine-notice"></div></section></div>
     <div id="library-detail" hidden><div class="library-toolbar"><button id="library-back" class="ghost">← К библиотекам</button><div><button id="library-delete" class="danger-button">Удалить</button></div></div><div id="library-detail-body"></div></div>
   </section>
@@ -67,6 +67,8 @@
       <div class="form-grid"><label>Папка фильмов<input name="movie_path" required></label><label>Папка сериалов<input name="series_path" required></label>
         <label>Время начала поиска<input name="search_start" type="time" required><small>Ежедневно. Начавшийся поиск выполняется до завершения.</small></label>
         <label>Коэффициент раздачи<input name="seed_ratio" type="number" min="0" step="0.1" placeholder="Без ограничения"><small>Пусто — без ограничения; 0 — до конца загрузки.</small></label>
+        <label>Движок поиска и сопоставления<input name="search_engine_repository" type="url" placeholder="https://…/catalog.json"><small>Совместимые версии устанавливаются автоматически. Пустой адрес отключает обновления.</small></label>
+        <div class="inline-form"><button type="button" class="ghost" id="search-engine-update">Обновить движок</button><button type="button" class="ghost" id="search-engine-rollback">Откатить движок</button><span class="fine" id="search-engine-status" role="status"></span></div>
         <label>Каталог плагинов<input name="plugin_repository" type="url" placeholder="https://…/catalog.json"><small>Плагины обновляются автоматически.</small></label>
       </div><div class="form-footer"><p class="form-error" role="alert"></p><button class="primary" type="submit">Сохранить настройки</button></div>
     </form>

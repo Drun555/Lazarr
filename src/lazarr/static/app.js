@@ -143,16 +143,18 @@ async function refreshTasks() {
   state.tasks=await api('/tasks'); $('#task-count').textContent=state.tasks.length;
   $('#task-list').innerHTML=state.tasks.length?state.tasks.map(task=>`<article class="task-card"><div class="task-main">${task.poster?`<img class="task-poster" src="${esc(posterUrl(task.poster))}" alt="">`:'<span class="task-poster"></span>'}<div class="task-info"><h3>${esc(task.title)}</h3><div class="task-meta"><span>${task.year||'—'}</span><span>${(task.seasons||[]).length?`Сезоны ${esc(task.seasons.map(s=>s.season).join(', '))}`:task.season!=null?`Сезон ${task.season}`:'Фильм'}</span><span>${task.subtasks.filter(s=>s.status==='done').length}/${task.subtasks.length} готово</span>${task.completed?'<span>Завершена</span>':''}</div></div><div class="task-actions"><button class="primary" data-library-media="${task.media_id}">Открыть</button></div></div></article>`).join(''):'<div class="empty"><p>Нет задач. Найдите произведение, чтобы добавить задачу.</p></div>';
 }
-async function switchTab(tab) {
+async function switchTab(tab,media=null) {
+  resetLibraryView();
   state.tab=tab;
   $$('.tab-panel').forEach(p=>p.hidden=p.id!==`tab-${tab}`);
   $$('.nav-tab').forEach(b=>b.classList.toggle('active',b.dataset.tab===tab));
   if(tab==='settings'){
+    loadSearchEngineStatus().catch(()=>{});
     await Promise.all([loadSettings(),loadProviders(),loadAccounts(),loadTelegram()]);
     const challenge=state.providers.find(p=>p.kind==='content'&&p.enabled&&p.auth_methods?.includes('captcha')&&p.error?.startsWith('auth_required:')&&p.error.includes('CAPTCHA'));
     if(challenge)await providerAuth(challenge.id);
   }
-  if(tab==='library'){await refreshDownloads();if(libraryMedia)await openLibraryMedia(libraryMedia);else await loadLibraries();}
+  if(tab==='library')await Promise.all([refreshDownloads(),media===null?loadLibraries():openLibraryMedia(media)]);
 }
 function renderSearchActivity(status) {
   const search=status.search||{};state.search=search;
@@ -234,7 +236,7 @@ async function candidateDialog(subtaskId, pending) {
   pending??=$('#modal[open] [data-candidate-dialog]')?.dataset.candidateDialog===String(subtaskId)&&$('[data-candidate-dialog]')?.dataset.pendingChoice==='true';
   const logOpen=$('.candidate-search-log')?.open??false;
   const [choices,search]=await Promise.all([api(`/subtasks/${subtaskId}/candidates`),api(`/subtasks/${subtaskId}/search`)]);
-  const cards=choices.length?choices.map(choice=>`<article class="candidate"><h3><a href="${esc(choice.candidate.url)}" target="_blank" rel="noopener noreferrer">${esc(choice.candidate.title)} ↗</a></h3><p class="fine">${esc(choice.candidate.provider)} · ${bytes(choice.candidate.size)} · ${choice.candidate.seeds??'—'} сидов${choice.action==='rejected'?' · Отклонено':''}</p>${choice.used_in_season?.length?`<p class="fine"><strong>Используется в других сериях этого сезона</strong> · Серии: ${esc(choice.used_in_season.join(', '))}</p>${choice.episode_missing?'<p class="fine">В этой раздаче пока нет выбранной серии (по последней проверке файлов).</p>':''}`:''}${choice.report.criteria.map(c=>`<div class="criterion"><span class="${esc(c.result)}">${c.result==='MATCH'?'✓':c.result==='MISMATCH'?'×':'?'}</span><span>${esc(c.reason)}${c.required?'':' <span class="fine">(не блокирует)</span>'}</span></div>`).join('')}<div class="candidate-footer"><button class="primary" data-choose="${choice.id}" data-has-binding="${Boolean(choice.report.binding)}">Выбрать раздачу</button><button class="ghost" data-map-files="${choice.id}">Сопоставить файлы</button><button class="ghost" data-reject="${choice.id}">Отклонить</button></div></article>`).join(''):'<div class="empty compact"><h3>Пока нет кандидатов</h3><p>Результаты появятся после поиска.</p></div>';
+  const cards=choices.length?choices.map(choice=>`<article class="candidate"><div class="candidate-report-heading"><h3><a href="${esc(choice.candidate.url)}" target="_blank" rel="noopener noreferrer">${esc(choice.candidate.title)} ↗</a></h3>${candidateReportButton(choice.id,'episode')}</div><p class="fine">${esc(choice.candidate.provider)} · ${bytes(choice.candidate.size)} · ${choice.candidate.seeds??'—'} сидов${choice.action==='rejected'?' · Отклонено':''}</p>${choice.used_in_season?.length?`<p class="fine"><strong>Используется в других сериях этого сезона</strong> · Серии: ${esc(choice.used_in_season.join(', '))}</p>${choice.episode_missing?'<p class="fine">В этой раздаче пока нет выбранной серии (по последней проверке файлов).</p>':''}`:''}${choice.report.criteria.map(c=>`<div class="criterion"><span class="${esc(c.result)}">${c.result==='MATCH'?'✓':c.result==='MISMATCH'?'×':'?'}</span><span>${esc(c.reason)}${c.required?'':' <span class="fine">(не блокирует)</span>'}</span></div>`).join('')}<div class="candidate-footer"><button class="primary" data-choose="${choice.id}" data-has-binding="${Boolean(choice.report.binding)}">Выбрать раздачу</button><button class="ghost" data-reject="${choice.id}">Отклонить</button></div></article>`).join(''):'<div class="empty compact"><h3>Пока нет кандидатов</h3><p>Результаты появятся после поиска.</p></div>';
   openModal('Раздачи и результаты проверки',`<div data-candidate-dialog="${subtaskId}"><p class="fine">Замена удалит прежние файлы серии, если они не нужны другим сериям.</p>${manualCandidateForm({subtask:subtaskId})}<button class="ghost" data-search-alternatives="${subtaskId}">Найти другие раздачи</button>${candidateSearchLog(search,logOpen)}${cards}</div>`);
   if(pending){
     const root=$('[data-candidate-dialog]');root.dataset.pendingChoice='true';root.querySelector('p.fine').textContent='Выбранная раздача подключится ко всем подходящим сериям этой задачи, ожидающим выбора. Уже выбранные серии не изменятся.';
@@ -276,7 +278,7 @@ async function taskCandidateDialog(taskId) {
 }
 async function seasonCandidateDialog(taskId,season) {
   const choices=await api(`/tasks/${taskId}/seasons/${season}/candidates`);
-  const cards=choices.length?choices.map(choice=>`<article class="candidate"><h3><a href="${esc(choice.candidate.url)}" target="_blank" rel="noopener noreferrer">${esc(choice.candidate.title)} ↗</a></h3><p class="fine">${esc(choice.candidate.provider)} · ${bytes(choice.candidate.size)} · ${choice.candidate.seeds??'—'} сидов</p><p>Сопоставлено в этом сезоне: <strong>${choice.matched} из ${choice.total}</strong></p><div class="candidate-footer"><button class="primary" data-choose-season="${choice.id}" data-season-task="${taskId}" data-season-number="${season}" ${choice.matched?'':'disabled'}>${choice.matched?'Выбрать для сезона':'Не подходит ни одной серии'}</button></div></article>`).join(''):'<div class="empty compact"><h3>Пока нет кандидатов для сезона</h3><p>Запустите поиск задачи или выберите раздачу отдельно для серии.</p></div>';
+  const cards=choices.length?choices.map(choice=>`<article class="candidate"><div class="candidate-report-heading"><h3><a href="${esc(choice.candidate.url)}" target="_blank" rel="noopener noreferrer">${esc(choice.candidate.title)} ↗</a></h3>${candidateReportButton(choice.id,'season')}</div><p class="fine">${esc(choice.candidate.provider)} · ${bytes(choice.candidate.size)} · ${choice.candidate.seeds??'—'} сидов</p><p>Сопоставлено в этом сезоне: <strong>${choice.matched} из ${choice.total}</strong></p><div class="candidate-footer"><button class="primary" data-choose-season="${choice.id}" data-season-task="${taskId}" data-season-number="${season}" ${choice.matched?'':'disabled'}>${choice.matched?'Выбрать для сезона':'Не подходит ни одной серии'}</button></div></article>`).join(''):'<div class="empty compact"><h3>Пока нет кандидатов для сезона</h3><p>Запустите поиск задачи или выберите раздачу отдельно для серии.</p></div>';
   openModal(`Раздача для сезона ${season}`,`<p class="muted small">Раздача будет применена только к сериям сезона ${season}. Другие сезоны задачи не изменятся.</p>${manualCandidateForm({task:taskId,season})}${cards}`);
 }
 function mappingFileOrder(a,b) {
@@ -464,9 +466,19 @@ document.addEventListener('submit', event=>{const form=event.target;if(!(form in
   if(form.id==='setup-form'){await api('/setup','POST',Object.fromEntries(data));location.assign('/onboarding');}
   else if(form.id==='login-form'){await api('/session','POST',Object.fromEntries(data));location.assign('/');}
   else if(form.id==='task-form'){if(!state.selected)throw new Error('Выберите произведение');const payload={provider:state.selected.provider,media_id:state.selected.id,kind:state.selected.kind,requirements:readRequirements(form)};if(state.selected.kind==='tv')payload.seasons=taskSeasonSelections();await api('/tasks','POST',payload);$('#selection').hidden=true;$('#search-results').innerHTML='';$('#media-search').value='';state.selected=null;toast('Задача создана. Поиск поставлен в очередь.');await refreshTasks();await switchTab('library');}
-  else if(form.id==='settings-form'){const payload={...state.settings,defaults:readRequirements(form,'default_'),jellyfin:{audio_languages:selectedLanguages(form,'jellyfin_audio_languages'),subtitle_languages:selectedLanguages(form,'jellyfin_subtitle_languages')}};for(const key of ['movie_path','series_path','search_start','plugin_repository'])payload[key]=String(data.get(key));payload.theme_color=String(data.get('theme_color')||'purple');payload.seed_ratio=String(data.get('seed_ratio')).trim()===''?null:Number(data.get('seed_ratio'));payload.prefer_full_subtitles=data.get('prefer_full_subtitles')==='on';await api('/settings','PUT',payload);state.settings=payload;toast('Настройки сохранены');}
+  else if(form.id==='settings-form'){const payload={...state.settings,defaults:readRequirements(form,'default_'),jellyfin:{audio_languages:selectedLanguages(form,'jellyfin_audio_languages'),subtitle_languages:selectedLanguages(form,'jellyfin_subtitle_languages')}};for(const key of ['movie_path','series_path','search_start','plugin_repository','search_engine_repository'])payload[key]=String(data.get(key));payload.theme_color=String(data.get('theme_color')||'purple');payload.seed_ratio=String(data.get('seed_ratio')).trim()===''?null:Number(data.get('seed_ratio'));payload.prefer_full_subtitles=data.get('prefer_full_subtitles')==='on';await api('/settings','PUT',payload);state.settings=payload;toast('Настройки сохранены');}
   else if(form.id==='account-form'){await api('/accounts','POST',Object.fromEntries(data));form.reset();toast('Аккаунт создан');await loadAccounts();}
   else if(form.id==='delete-task-form'){const result=await api(`/tasks/${form.dataset.task}`,'DELETE',{delete_media:data.get('delete_media')==='on'});$('#modal').close();await refreshTasks();await refreshDownloads();await refreshLibraryView();toast(result.cleanup_pending?'Задача удалена. Очистка файлов будет повторена автоматически.':'Задача удалена');}
+  else if(form.id==='inline-task-form'){
+    const payload={requirements:readRequirements(form)};
+    if($('[data-inline-seasons]',form)){
+      payload.seasons=$$('[data-inline-season]',form).map(row=>{const value=$('select',row).value;if(!value)throw new Error('Выберите сезон');return {season:Number(value.replace('alt:','')),episodes:episodeList($('input',row).value),...(value.startsWith('alt:')?{numbering_season:Number(value.slice(4))}:{})};});
+      if(!payload.seasons.length)throw new Error('Выберите хотя бы один сезон');
+      const keys=payload.seasons.map(s=>(s.numbering_season!=null?'alt:':'')+s.season);
+      if(new Set(keys).size!==keys.length)throw new Error('Сезон указан несколько раз');
+    }
+    await api('/tasks/'+form.dataset.task,'PATCH',payload);closeInlineTaskEditor();await refreshTasks();await refreshLibraryView();toast('Задача обновлена');
+  }
   else if(form.id==='edit-task-form'){await api(`/tasks/${form.dataset.task}`,'PATCH',{requirements:readRequirements(form)});$('#modal').close();await refreshTasks();await refreshLibraryView();toast('Требования обновлены');}
   else if(form.dataset.providerForm){const values=Object.fromEntries(data);delete values.enabled;for(const input of $$('input[data-clear-secret]',form))if(!input.value)values[input.name]=null;await api(`/providers/${form.dataset.providerForm}`,'PUT',{enabled:data.get('enabled')==='on',config:values});toast('Провайдер сохранён');await loadProviders();}
   else if(form.id==='manual-candidate-form'){const subtask=form.dataset.subtask?Number(form.dataset.subtask):null,task=form.dataset.task?Number(form.dataset.task):null,season=form.dataset.season?Number(form.dataset.season):null;const path=subtask!==null?`/subtasks/${subtask}/candidates/manual`:season!==null?`/tasks/${task}/seasons/${season}/candidates/manual`:`/tasks/${task}/candidates/manual`;await api(path,'POST',{url:String(data.get('url')).trim()});toast('Раздача добавлена в список');if(subtask!==null)await candidateDialog(subtask);else if(season!==null)await seasonCandidateDialog(task,season);else await taskCandidateDialog(task);}
@@ -498,3 +510,15 @@ if($('#task-list')){
 
 document.addEventListener('error',event=>{if(event.target instanceof HTMLImageElement){event.target.classList.add('failed');event.target.alt='Обложка недоступна';}},true);
 if(location.hash==='#settings'&&$('[data-tab="settings"]'))$('[data-tab="settings"]').click();
+
+async function loadSearchEngineStatus(){
+  const status=await api('/search-engine');
+  $('#search-engine-status').textContent=`Версия ${status.version}${status.source==='bundled'?' · встроенная':''}${!status.automatic?' · автообновление приостановлено после отката':''}${status.error?' · '+status.error:''}`;
+  $('#search-engine-rollback').disabled=!status.can_rollback;
+}
+document.addEventListener('click',async event=>{
+  const button=event.target.closest('#search-engine-update,#search-engine-rollback');if(!button)return;
+  button.disabled=true;
+  try{await api('/search-engine/'+(button.id==='search-engine-update'?'update':'rollback'),'POST',{});await loadSearchEngineStatus();toast('Движок обновлён');}
+  catch(error){toast(error.message,true);}finally{button.disabled=false;}
+});

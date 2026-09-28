@@ -536,7 +536,10 @@ async def test_bluray_bdmv_candidates_are_never_recorded(core, media, season, wo
 async def test_manual_url_is_inspected_and_saved_for_selection(
     core, media, season, worker_setup, monkeypatch
 ):
-    _, _, plugins, service = core
+    import time
+    from lazarr.sdk import ProviderError
+
+    _, db, plugins, service = core
     worker, _, _ = worker_setup
     task_id = service.create_from_metadata(
         CreateTask(media_id="42", kind="tv", season=1, episodes=[1, 2]), media, season, 1
@@ -557,6 +560,12 @@ async def test_manual_url_is_inspected_and_saved_for_selection(
 
     monkeypatch.setattr(provider, "inspect", inspect)
     monkeypatch.setattr(provider, "resolve_download", resolve_download)
+    with db.session() as session:
+        row = session.get(ProviderConfig, "nyaa")
+        row.retry_at = time.time() + 3600
+        row.last_error = "unavailable: Trawl не смог открыть страницу"
+    with pytest.raises(ProviderError, match="Повтор через"):
+        await worker.evaluate(plugins.manual_candidate("https://nyaa.si/view/321"), [])
     decision_id = await worker.add_manual_candidate(1, "https://nyaa.si/view/321")
     choices = service.candidates(1)
     assert choices[0]["id"] == decision_id
@@ -1047,3 +1056,53 @@ async def test_unknown_external_subtitle_language_is_detected_and_saved(core, me
         assert link.preflight["binding"]["tracks"][0]["language"] == "ru"
         assert link.preflight["binding"]["tracks"][0]["language_source"] == "content"
         assert session.get(Subtask, ids[2]).missing_subtitle_languages == []
+
+
+async def test_updated_topic_keeps_release_and_decision_ids_and_existing_download(
+    core, media, season, worker_setup, monkeypatch
+):
+    from lazarr.models import Release
+
+    _, db, plugins, service = core
+    worker, _, _ = worker_setup
+    task_id = service.create_from_metadata(
+        CreateTask(media_id="42", kind="tv", season=1, episodes=[1, 2]), media, season, 1
+    )
+    plugins.configure("nyaa", {}, True)
+    provider = plugins.classes["nyaa"]
+    paths = ["Show.S01E01.1080p.mkv"]
+
+    async def inspect(self, item):
+        return item.model_copy(update={"title": "Example Show 1080p", "evidence": [audio_claim(paths[0])]})
+
+    async def resolve_download(self, item):
+        return DownloadSource(torrent=json.dumps(paths).encode())
+
+    monkeypatch.setattr(provider, "inspect", inspect)
+    monkeypatch.setattr(provider, "resolve_download", resolve_download)
+    first = await worker.add_manual_task_candidate(task_id, "https://nyaa.si/view/321", 1)
+    await worker.choose(first, 1, video_index=0, track_indices=[])
+    with db.session() as session:
+        identity = session.scalar(select(Release.id))
+        original = session.scalar(select(Download))
+        old_hash, old_plan = original.infohash, original.plan
+        decisions = {row.subtask_id: row.id for row in session.scalars(select(CandidateDecision))}
+    # New file order must not retarget the already selected video at index zero.
+    paths.insert(0, "Show.S01E02.1080p.mkv")
+    again = await worker.add_manual_candidate(1, "https://nyaa.si/view/321")
+    assert again == first
+    with db.session() as session:
+        releases = list(session.scalars(select(Release)))
+        assert len(releases) == 1 and releases[0].id == identity
+        assert releases[0].revision != old_hash
+        assert len(releases[0].files) == 2
+        assert {row.subtask_id: row.id for row in session.scalars(select(CandidateDecision))} == decisions
+        original = session.scalar(select(Download))
+        assert original.infohash == old_hash and original.plan == old_plan
+        second = session.get(CandidateDecision, decisions[2])
+        assert second.report["binding"]["video_index"] == 0
+    choices = service.candidates(2)
+    assert len(choices) == 1
+    assert choices[0]["used_in_season"] == [1]
+    assert choices[0]["episode_missing"] is False
+    assert len(service.task_candidates(task_id, 1)) == 1

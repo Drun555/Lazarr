@@ -58,6 +58,9 @@ def atomic_write(path: Path, content: bytes):
 class PluginManager:
     def __init__(self, db, config, secrets, transport=None):
         self.db, self.config, self.secrets = db, config, secrets
+        from lazarr.search_runtime import SearchEngineManager
+
+        self.search_engine = SearchEngineManager(config.plugin_dir / "search_engine", transport)
         self.root = config.plugin_dir
         self.classes: dict[str, type[Provider]] = {}
         self.entries: dict[str, dict] = {}
@@ -70,6 +73,7 @@ class PluginManager:
         self.request_interval_ranges = {"rutracker": (10.0, 30.0)}
 
     def bootstrap(self):
+        self.search_engine.bootstrap()
         bundled = Path(__file__).parent / "bundled"
         catalog = json.loads((bundled / "catalog.json").read_text())
         for raw in catalog["plugins"]:
@@ -79,6 +83,8 @@ class PluginManager:
                 content = (bundled / f"{entry.id}.py").read_bytes()
                 self._activate(entry, content)
         for pointer in self.root.glob("*/active.json"):
+            if pointer.parent.name == "search_engine":
+                continue
             try:
                 entry = CatalogEntry.model_validate_json(pointer.read_text())
                 if entry.kind not in PROVIDER_TYPES:

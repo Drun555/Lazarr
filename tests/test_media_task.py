@@ -97,7 +97,8 @@ async def test_task_progress_is_scoped_and_keeps_all_season_groups(
     try:
         one, two = scheduler.snapshot(first), scheduler.snapshot(second)
         assert one["running"] and one["stage"] == "search"
-        assert not two["running"] and two["history"] == []
+        assert not two["running"]
+        assert [event["stage"] for event in two["history"]] == ["prepare"]
         assert two["groups_total"] == 2
     finally:
         release.set()
@@ -189,3 +190,107 @@ async def test_merge_migration_preserves_download_links_and_remaps_ids(core, med
             == 2
         )
         assert session.execute(text("PRAGMA foreign_key_check")).all() == []
+
+
+def test_edit_task_replaces_seasons_atomically_and_can_restore_selection(core, media, monkeypatch):
+    config, db, _, service = core
+    task_id = service.create_from_metadata(
+        CreateTask(media_id="42", kind="tv", seasons=[{"season": 1}, {"season": 2}]),
+        media,
+        [season_info(1), season_info(2)],
+        1,
+    )
+    original_ids = {s["id"] for s in service.list_tasks()[0]["subtasks"]}
+    with TestClient(create_app(config)) as client:
+        login(client)
+
+        async def get_media(*args):
+            return media
+
+        async def get_season(self, external_id, number):
+            return season_info(number)
+
+        provider = client.app.state.ctx.plugins.classes["tmdb"]
+        monkeypatch.setattr(provider, "get_media", get_media)
+        monkeypatch.setattr(provider, "get_season", get_season)
+        url = f"/api/v1/tasks/{task_id}"
+        requirements = Requirements(min_resolution=1080, max_resolution=2160).model_dump()
+        assert (
+            client.patch(
+                url, json={"seasons": [{"season": 2, "episodes": [1]}], "requirements": requirements}
+            ).status_code
+            == 200
+        )
+        result = client.get("/api/v1/tasks").json()[0]
+        assert [s["season"] for s in result["seasons"]] == [2]
+        assert not result["seasons"][0]["whole_season"]
+        assert len(result["subtasks"]) == 1 and result["subtasks"][0]["episode"] == 1
+        assert result["requirements"] == requirements
+        assert (
+            client.patch(
+                url,
+                json={
+                    "seasons": [{"season": 1, "episodes": [999]}],
+                    "requirements": Requirements().model_dump(),
+                },
+            ).status_code
+            == 422
+        )
+        assert client.get("/api/v1/tasks").json()[0] == result
+        assert client.patch(url, json={"seasons": []}).status_code == 422
+        assert client.patch(url, json={"seasons": [{"season": 1}, {"season": 2}]}).status_code == 200
+        restored = client.get("/api/v1/tasks").json()[0]
+        assert {s["id"] for s in restored["subtasks"]} == original_ids
+        assert all(s["status"] != "removed" for s in restored["subtasks"])
+
+
+def test_edit_seasons_keeps_downloaded_files_and_restores_completed_parts(core, media, season, tmp_path):
+    from lazarr.services import SeasonSelection
+    from lazarr.models import LibraryAsset, MediaAsset, Release
+
+    _, db, _, service = core
+    task_id = service.create_from_metadata(CreateTask(media_id="42", kind="tv", season=1), media, season, 1)
+    path = tmp_path / "Show.S01E01.1080p.mkv"
+    path.write_bytes(b"keep this file")
+    with db.session() as session:
+        task = session.get(Task, task_id)
+        release = Release(provider="demo", external_id="completed", data={})
+        session.add(release)
+        session.flush()
+        download = Download(
+            release_id=release.id, infohash="completed", save_path=str(tmp_path), torrent_file="", plan={}
+        )
+        session.add(download)
+        session.flush()
+        for index, sub in enumerate(session.scalars(select(Subtask).where(Subtask.task_id == task_id))):
+            sub.status = "done"
+            asset = MediaAsset(
+                media_id=task.media_id, download_id=download.id, video_index=index, path=path.name
+            )
+            session.add(asset)
+            session.flush()
+            session.add(
+                SubtaskAsset(subtask_id=sub.id, asset_id=asset.id, current=True, pending=False, preflight={})
+            )
+            session.add(
+                LibraryAsset(
+                    media_id=task.media_id,
+                    episode_id=sub.episode_id,
+                    part_key=sub.part_key,
+                    asset_id=asset.id,
+                )
+            )
+        session.flush()
+        asset_ids = set(session.scalars(select(LibraryAsset.id)))
+    service.edit(task_id, 1, selections=[(SeasonSelection(season=1, episodes=[2]), {}, season, {2})])
+    assert path.read_bytes() == b"keep this file"
+    assert service.list_tasks()[0]["completed"]
+    with db.session() as session:
+        assert set(session.scalars(select(LibraryAsset.id))) == asset_ids
+        assert session.get(Subtask, 1).status == "removed"
+    service.edit(task_id, 1, selections=[(SeasonSelection(season=1), {}, season, {1, 2})])
+    assert all(sub["status"] == "done" for sub in service.list_tasks()[0]["subtasks"])
+    service.edit(task_id, 1, selections=[(SeasonSelection(season=1, episodes=[2]), {}, season, {2})])
+    service.create_from_metadata(CreateTask(media_id="42", kind="tv", season=1), media, season, 1)
+    assert len(service.list_tasks()[0]["subtasks"]) == len(season.episodes)
+    assert service.list_tasks()[0]["completed"]

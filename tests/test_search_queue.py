@@ -317,3 +317,60 @@ def test_provider_order_api_permissions_validation_and_persistence(core):
         )
         assert client.put("/api/v1/providers/order", json=payload).status_code == 200
         assert client.get("/api/v1/status").json()["content_providers"] == payload["ids"]
+
+
+def test_complete_search_history_spans_groups_and_resets_only_for_a_new_search():
+    from lazarr.search import SearchProgress
+
+    progress = SearchProgress()
+    progress.begin()
+    progress.prepare_tasks([[1], [1], [2]])
+    progress.start_group([1])
+    for index in range(100):
+        progress.record("filtered", f"Отсеяно {index}")
+    progress.finish_group()
+    progress.start_group([1])
+    for stage in ("inspect", "resolve", "metadata", "matching", "download"):
+        progress.record(stage, stage)
+    progress.finish_group()
+    progress.start_group([2])
+    progress.record("search", "Другая задача")
+    progress.finish_group()
+    progress.record("finished", "Поиск завершён")
+    events = progress.tasks[1]["history"]
+    assert len(events) == 107
+    assert events[0]["stage"] == "prepare"
+    assert [event["message"] for event in events[1:101]] == [f"Отсеяно {i}" for i in range(100)]
+    assert [event["stage"] for event in events[-6:]] == [
+        "inspect",
+        "resolve",
+        "metadata",
+        "matching",
+        "download",
+        "finished",
+    ]
+    assert "Другая задача" not in [event["message"] for event in events]
+    assert len(progress.snapshot()["history"]) == 108
+    other_history = progress.tasks[2]["history"].copy()
+    progress.begin()
+    progress.prepare_tasks([[1]])
+    assert [event["stage"] for event in progress.tasks[1]["history"]] == ["prepare"]
+    assert len(progress.snapshot()["history"]) == 1
+    assert progress.tasks[2]["history"] == other_history
+
+
+def test_empty_search_and_interrupted_search_keep_terminal_events():
+    from lazarr.search import SearchProgress
+
+    progress = SearchProgress()
+    progress.begin()
+    progress.prepare_tasks([], extra_tasks=[1])
+    progress.record("finished", "Нет доступных для поиска эпизодов")
+    assert [event["stage"] for event in progress.tasks[1]["history"]] == ["prepare", "finished"]
+    progress.begin()
+    progress.prepare_tasks([[1]])
+    progress.start_group([1])
+    progress.record("search", "Запрос")
+    progress.finish_group(completed=False)
+    progress.record("interrupted", "Поиск прерван")
+    assert [event["stage"] for event in progress.tasks[1]["history"]] == ["prepare", "search", "interrupted"]

@@ -1,3 +1,4 @@
+from lazarr.search_runtime import current_engine, pinned
 from lazarr.notifications import queue_episode_notification
 from lazarr.selection import reject_reason, candidate_rank
 from lazarr.provider_utils import search_titles
@@ -82,10 +83,19 @@ class Worker:
         self.consumer_state = {}
         self.progress = SearchProgress()
 
-    async def evaluate(self, candidate, subtasks, *, allow_preference_mismatch=False, ignore_filters=False):
+    @pinned
+    async def evaluate(
+        self,
+        candidate,
+        subtasks,
+        *,
+        allow_preference_mismatch=False,
+        ignore_filters=False,
+        bypass_cooldown=False,
+    ):
         """Only TorrentEngine supplies the authoritative file list to Matcher."""
         self.progress.record("inspect", f"Чтение описания: {candidate.title}", candidate=candidate.title)
-        async with self.plugins.open(candidate.provider) as provider:
+        async with self.plugins.open(candidate.provider, bypass_cooldown=bypass_cooldown) as provider:
             detailed = await provider.inspect(candidate)
             reason = (
                 None
@@ -143,11 +153,12 @@ class Worker:
                 requests = [self.service.request_for(db, subtask) for subtask in subtasks]
             return await self._save_manual_candidate(requests, url)
 
+    @pinned
     async def _save_manual_candidate(self, requests, url):
         candidate = self.plugins.manual_candidate(url)
         try:
             detailed, metadata, report = await self.evaluate(
-                candidate, requests, allow_preference_mismatch=True, ignore_filters=True
+                candidate, requests, allow_preference_mismatch=True, ignore_filters=True, bypass_cooldown=True
             )
         except CandidateFiltered as exc:
             raise ValueError(str(exc)) from exc
@@ -230,7 +241,6 @@ class Worker:
                         list(set(db.scalars(select(Subtask.task_id).where(Subtask.id.in_(ids)))))
                         for ids in groups
                     ]
-                self.progress.prepare_tasks(task_groups)
                 with self.db.session() as db:
                     target_ids = list(
                         db.scalars(
@@ -240,8 +250,8 @@ class Worker:
                         )
                     )
                 grouped_ids = {identity for group in task_groups for identity in group}
+                self.progress.prepare_tasks(task_groups, set(target_ids) - grouped_ids)
                 for identity in set(target_ids) - grouped_ids:
-                    self.progress.tasks[identity] = SearchProgress().snapshot()
                     self.progress.tasks[identity].update(
                         state="finished", message="Нет доступных для поиска серий"
                     )
@@ -375,10 +385,16 @@ class Worker:
                 self.progress.finish_group(completed)
                 self.progress.value["groups_done"] = int(completed)
                 state = "error" if self.progress.value["errors"] else "finished"
-                self.progress.value.update(running=False, state=state)
+                self.progress.record(
+                    "finished" if completed else "interrupted",
+                    "Поиск завершён" if completed else "Поиск прерван",
+                    running=False,
+                    state=state,
+                )
                 task = self.progress.tasks[task_id]
                 task.update(running=False, state=state, message=self.progress.value["message"])
 
+    @pinned
     async def _run_group(self, ids, provider_filter=None, acquire=True):
         settings = self.service.settings()
         now = time.time()
@@ -696,9 +712,9 @@ class Worker:
                 select(Release).where(
                     Release.provider == candidate.provider,
                     Release.external_id == candidate.id,
-                    Release.revision == metadata.infohash,
                 )
             )
+            changed = release is not None and release.revision != metadata.infohash
             if not release:
                 release = Release(
                     provider=candidate.provider,
@@ -710,8 +726,30 @@ class Worker:
                 db.flush()
             else:
                 release.data = candidate.model_dump()
+            release.revision = metadata.infohash
+            release.files = [file.model_dump() for file in metadata.files]
+            evaluations = list(report.evaluations)
+            if changed:
+                # Reports describe the current torrent, while active Download plans stay immutable.
+                evaluated = {evaluation.subtask_id for evaluation in report.evaluations}
+                previous = list(
+                    db.scalars(
+                        select(Subtask)
+                        .join(CandidateDecision, CandidateDecision.subtask_id == Subtask.id)
+                        .where(CandidateDecision.release_id == release.id, Subtask.id.not_in(evaluated))
+                    )
+                )
+                if previous:
+                    evaluations.extend(
+                        self.matcher.evaluate(
+                            candidate,
+                            [self.service.request_for(db, sub) for sub in previous],
+                            metadata.files,
+                            metadata.infohash,
+                        ).evaluations
+                    )
             allowed = set()
-            for evaluation in report.evaluations:
+            for evaluation in evaluations:
                 decision = db.scalar(
                     select(CandidateDecision).where(
                         CandidateDecision.subtask_id == evaluation.subtask_id,
@@ -725,12 +763,17 @@ class Worker:
                         report=evaluation.model_dump(mode="json"),
                     )
                     db.add(decision)
-                decision.report = evaluation.model_dump(mode="json")
+                decision.report = {
+                    **evaluation.model_dump(mode="json"),
+                    "release_revision": metadata.infohash,
+                    "engine_version": current_engine().identity,
+                }
                 decision.updated_at = time.time()
                 if decision.action != "rejected":
                     allowed.add(evaluation.subtask_id)
             return release.id, allowed
 
+    @pinned
     async def choose(
         self,
         decision_id,
@@ -740,6 +783,7 @@ class Worker:
         track_indices=None,
         *,
         expected_subtask=None,
+        revision=None,
     ):
         async with self.selection_lock:
             with self.db.session() as db:
@@ -764,6 +808,14 @@ class Worker:
                 request = self.service.request_for(db, sub)
                 release = db.get(Release, decision.release_id)
                 release_id, infohash = release.id, release.revision
+                if revision is not None and revision != infohash:
+                    if not db.scalar(
+                        select(Download.id).where(
+                            Download.release_id == release.id, Download.infohash == revision
+                        )
+                    ):
+                        raise ValueError("Версия торрента не принадлежит раздаче")
+                    infohash = revision
                 candidate = Candidate.model_validate(release.data)
                 already_current = db.scalar(
                     select(SubtaskAsset.id)
@@ -834,6 +886,7 @@ class Worker:
                 db.get(CandidateDecision, decision_id).report = evaluation.model_dump(mode="json")
                 audit(db, user_id, "candidate.select", str(decision_id), {"override": True})
 
+    @pinned
     async def choose_all(
         self,
         decision_id,
@@ -1195,7 +1248,7 @@ class Worker:
                     )
                 ):
                     referenced_ids.add(sub.id)
-                    if not task.paused:
+                    if not task.paused and sub.status != "removed":
                         active_ids.add(sub.id)
                 active = plan.model_copy(
                     update={"bindings": [b for b in plan.bindings if b.subtask_id in active_ids]}

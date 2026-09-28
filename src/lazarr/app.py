@@ -153,6 +153,7 @@ class AccountEdit(BaseModel):
 
 
 class TaskEdit(BaseModel):
+    seasons: list[SeasonSelection] | None = Field(default=None, min_length=1, max_length=200)
     requirements: Requirements | None = None
     paused: bool | None = None
 
@@ -529,7 +530,18 @@ def create_app(config: RuntimeConfig | None = None):
     ):
         ctx = context(request)
         async with ctx.worker.lock:
-            ctx.service.edit(identity, user.id, requirements=payload.requirements, paused=payload.paused)
+            selections = (
+                await ctx.service.prepare_selections(identity, payload.seasons)
+                if payload.seasons is not None
+                else None
+            )
+            ctx.service.edit(
+                identity,
+                user.id,
+                requirements=payload.requirements,
+                paused=payload.paused,
+                selections=selections,
+            )
             await ctx.worker.sync_consumers()
         ctx.scheduler.wake.set()
         return {"ok": True}
@@ -685,32 +697,31 @@ def create_app(config: RuntimeConfig | None = None):
             decision = db.get(CandidateDecision, identity)
             if not decision:
                 raise HTTPException(404, "Кандидат не найден")
-            link = db.scalar(
-                select(SubtaskAsset)
-                .join(MediaAsset, SubtaskAsset.asset_id == MediaAsset.id)
-                .join(Download, MediaAsset.download_id == Download.id)
-                .where(
-                    SubtaskAsset.subtask_id == decision.subtask_id, Download.release_id == decision.release_id
-                )
-            )
-            if (
-                video_index is None
-                or link
-                and link.preflight.get("binding", {}).get("video_index") == video_index
-            ):
-                return link.preflight.get("binding") if link else None
-            # Another video may already belong to another episode or to the
-            # library after its task was removed. Use persisted bindings only.
+            from lazarr.release_files import remap_binding
+
+            release = db.get(Release, decision.release_id)
             bindings = []
             for model in (SubtaskAsset, LibraryAsset):
-                for selected in db.scalars(
-                    select(model)
+                query = (
+                    select(model, Download)
                     .join(MediaAsset, model.asset_id == MediaAsset.id)
                     .join(Download, MediaAsset.download_id == Download.id)
-                    .where(Download.release_id == decision.release_id, MediaAsset.video_index == video_index)
-                ):
+                    .where(Download.release_id == decision.release_id)
+                )
+                if model is SubtaskAsset:
+                    query = query.where(SubtaskAsset.current | SubtaskAsset.pending).order_by(
+                        SubtaskAsset.pending.desc()
+                    )
+                for selected, download in db.execute(query):
                     binding = selected.preflight.get("binding")
-                    if binding:
+                    if binding and download.infohash != release.revision:
+                        binding = remap_binding(binding, download.plan.get("files", []), release.files)
+                    if not binding:
+                        continue
+                    if video_index is None:
+                        if model is SubtaskAsset and selected.subtask_id == decision.subtask_id:
+                            return binding
+                    elif binding["video_index"] == video_index:
                         bindings.append(binding)
             if not bindings:
                 return None
@@ -974,6 +985,27 @@ def create_app(config: RuntimeConfig | None = None):
         ) as provider:
             return await provider.healthcheck()
 
+    @app.get("/api/v1/search-engine")
+    async def search_engine_status(request: Request, user=Depends(permission("providers"))):
+        return context(request).plugins.search_engine.status()
+
+    @app.post("/api/v1/search-engine/{action}")
+    async def change_search_engine(action: str, request: Request, user=Depends(permission("providers"))):
+        ctx = context(request)
+        if action not in {"update", "rollback"}:
+            raise HTTPException(404, "Unknown action")
+        try:
+            result = (
+                await ctx.plugins.search_engine.rollback()
+                if action == "rollback"
+                else await ctx.plugins.search_engine.update(ctx.service.settings().search_engine_repository)
+            )
+        except Exception as exc:
+            raise HTTPException(422, f"Движок не изменён: {exc}") from exc
+        with ctx.db.session() as db:
+            audit(db, user.id, f"search_engine.{action}", result["identity"])
+        return result
+
     @app.get("/api/v1/plugin-catalog")
     async def catalog(request: Request, user=Depends(permission("providers"))):
         ctx = context(request)
@@ -1050,4 +1082,7 @@ def create_app(config: RuntimeConfig | None = None):
 
     install_jellyfin_api(app, context)
 
+    from lazarr.season_mapping import register
+
+    register(app, context, authenticated, permission)
     return app

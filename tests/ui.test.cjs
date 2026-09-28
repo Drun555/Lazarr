@@ -230,7 +230,7 @@ async function setup(){
     return {ok:true,status:200,json:async()=>result};
   };
   // A single realm matches ordered classic defer scripts in the real document.
-  w.eval(fs.readFileSync('src/lazarr/static/language-picker.js','utf8')+'\n'+fs.readFileSync('src/lazarr/static/library.js','utf8')+'\n'+fs.readFileSync('src/lazarr/static/app.js','utf8')+'\nwindow.testCandidateDialog=candidateDialog;window.pollBackgroundTasks=pollBackgroundTasks;window.testOpenLibraryMedia=openLibraryMedia;window.testRenderLibraries=renderLibraries;window.testSchedulePoll=schedulePoll;window.testRefreshLibraryProgress=refreshLibraryProgress;');
+  w.eval(fs.readFileSync('src/lazarr/static/language-picker.js','utf8')+'\n'+fs.readFileSync('src/lazarr/static/library.js','utf8')+'\n'+fs.readFileSync('src/lazarr/static/app.js','utf8')+'\n'+fs.readFileSync('src/lazarr/static/season-mapping.js','utf8')+'\nwindow.testSeasonMappingDialog=seasonMappingDialog;window.testCandidateDialog=candidateDialog;window.pollBackgroundTasks=pollBackgroundTasks;window.testOpenLibraryMedia=openLibraryMedia;window.testRenderLibraries=renderLibraries;window.testSchedulePoll=schedulePoll;window.testRefreshLibraryProgress=refreshLibraryProgress;');
   await settle();await settle();
   return {dom,w,document:w.document,errors,calls,setChoice:(files,selection,bindings={})=>{choiceFiles=files;choiceSelection=selection;choiceBindings=bindings},setMetadata:value=>metadata=value,setActivity:value=>activity=value,setProviders:value=>providers=value,setTasks:value=>{tasks.splice(0,tasks.length,...value)},setTaskChoices:value=>taskChoices=value,setLibrary:(groups,detail)=>{libraries=groups;libraryDetail=detail},updateLibraryDetail:update=>update(libraryDetail)};
 }
@@ -313,11 +313,11 @@ test('episode deletion requires confirmation and clears only its selection',asyn
   }finally{dom.window.close();}
 });
 
-test('completed episode can edit its selected files with current mapping prefilled',async()=>{
+test('movie can edit its selected files with current mapping prefilled',async()=>{
   const {dom,w,document:d,errors,calls,setLibrary,setChoice}=await setup();
   try{
     setChoice([{index:0,path:'old.mkv'},{index:1,path:'new.mkv'},{index:2,path:'ru.srt'}],{video_index:0,tracks:[{file_index:2}]});
-    setLibrary([{id:'series',name:'Сериалы',items:[{id:2,title:'Show'}]}],{id:2,title:'Show',kind:'tv',metadata:{},episodes:[{id:1,season:1,episode:1,title:'Episode',statuses:['done'],subtasks:[{id:1,selected_candidate_id:88}],files:[]}]});
+    setLibrary([{id:'series',name:'Сериалы',items:[{id:2,title:'Show'}]}],{id:2,title:'Show',kind:'movie',metadata:{},episodes:[{id:1,season:null,episode:null,title:'Episode',statuses:['done'],subtasks:[{id:1,selected_candidate_id:88}],files:[]}]});
     d.querySelector('[data-tab=library]').click();await settle();await settle();
     d.querySelector('[data-library-media="2"]').click();await settle();await settle();
     d.querySelector('[data-map-files="88"]').click();await settle();await settle();
@@ -345,7 +345,7 @@ test('mapping sorts episodes and switches tracks using stored bindings, ignoring
       {index:4,path:'Show.S01E2.srt',episode_order:[1,2]},
       {index:5,path:'Show.S01E1.srt',episode_order:[1,1]},
     ],{video_index:2,tracks:[{file_index:5}]},{0:oldResponse,1:{video_index:1,tracks:[{file_index:3}]},2:{video_index:2,tracks:[{file_index:5}]}});
-    setLibrary([{id:'series',name:'Сериалы',items:[{id:2,title:'Show'}]}],{id:2,title:'Show',kind:'tv',metadata:{},episodes:[{id:1,season:1,episode:1,title:'Episode',subtasks:[{id:1,selected_candidate_id:88}],files:[]}]});
+    setLibrary([{id:'series',name:'Сериалы',items:[{id:2,title:'Show'}]}],{id:2,title:'Show',kind:'movie',metadata:{},episodes:[{id:1,season:null,episode:null,title:'Episode',subtasks:[{id:1,selected_candidate_id:88}],files:[]}]});
     d.querySelector('[data-tab=library]').click();await settle();await settle();
     d.querySelector('[data-library-media="2"]').click();await settle();await settle();
     d.querySelector('[data-map-files="88"]').click();await settle();await settle();
@@ -736,23 +736,19 @@ test('activity distinguishes actual checks, filtering, failures and delayed retr
   }finally{dom.window.close();}
 });
 
-test('one release can be selected for every matching episode in a task',async()=>{
-  const {dom,document:d,calls,errors,setTasks,setTaskChoices,setLibrary}=await setup();
+test('media task offers a descriptive pause button without task-wide release selection',async()=>{
+  const {dom,document:d,errors,setTasks,setLibrary}=await setup();
   try{
     const subtasks=Array.from({length:8},(_,index)=>({id:index+1,episode:index+1,title:`Эпизод ${index+1}`,status:'needs_selection',missing_subtitle_languages:[],error:null}));
     setTasks([{id:7,media_id:7,title:'Nathan for You',season:1,subtasks,requirements:{audio_languages:['ru'],subtitle_languages:[],min_resolution:720,max_resolution:1080},paused:false}]);
     setLibrary([{id:'series',name:'Сериалы',items:[{id:7,title:'Nathan for You',year:2013,taxonomy_known:true}]},{id:'movies',name:'Кино',items:[]},{id:'anime',name:'Аниме',items:[]}],{title:'Nathan for You',year:2013,metadata:{overview:'',genres:[]},task_count:1,last_search_at:1,episodes:subtasks.map(part=>({id:part.id,season:1,episode:part.episode,title:part.title,air_date:'2013-01-01',released:true,statuses:[part.status],subtasks:[{id:part.id,task_id:7,status:part.status}],files:[]}))});
-    setTaskChoices([{id:91,total:8,matched:8,candidate:{title:'Nathan For You S01 1080p',provider:'demo',url:'https://example.org/release',size:1024,seeds:10}}]);
     d.querySelector('[data-tab=library]').click();await settle();await settle();
     d.querySelector('[data-library-media="7"]').click();await settle();await settle();
-    const button=d.querySelector('[data-task-candidates="7"]');
-    assert.equal(button.textContent,'Выбрать для всех серий');
-    button.click();await settle();await settle();
-    assert.match(d.querySelector('#modal-body').textContent,/Сопоставлено по результатам проверки: 8 из 8/);
-    d.querySelector('[data-choose-all="91"]').click();await settle();await settle();
-    const call=calls.find(item=>item.url==='/api/v1/candidates/91/choice-all');
-    assert.equal(call.method,'POST');
-    assert.deepEqual(call.payload,{});
+    assert.equal(d.querySelector('#media-task [data-task-candidates]'),null);
+    const button=d.querySelector('#media-task [data-pause-task]');
+    assert.equal(button.textContent,'Приостановить задачу');
+    assert.match(button.title,/Файлы и прогресс сохранятся/);
+    assert.match(button.title,/Общие загрузки продолжатся/);
     assert.deepEqual(errors,[]);
   }finally{dom.window.close();}
 });
@@ -768,13 +764,15 @@ test('one release can be selected only for the expanded season',async()=>{
     setTasks([task]);
     setLibrary([{id:'series',name:'Сериалы',items:[{id:7,title:'Show'}]}],{id:7,title:'Show',kind:'tv',metadata:{overview:'',genres:[]},episodes:[
       {id:1,season:1,episode:1,title:'S1E1',released:true,subtasks:[{id:1,task_id:7}],files:[]},
-      {id:2,season:2,episode:1,title:'S2E1',released:true,subtasks:[{id:2,task_id:7}],files:[]},
+      {id:2,season:2,episode:1,title:'S2E1',released:true,subtasks:[{id:2,task_id:7,selected_candidate_id:91}],files:[]},
       {id:3,season:2,episode:2,title:'S2E2',released:true,subtasks:[{id:3,task_id:7}],files:[]}
     ]});
     setTaskChoices([{id:91,total:2,matched:2,candidate:{title:'Show S02',provider:'demo',url:'https://example.org/s02',size:1024,seeds:4}}]);
     d.querySelector('[data-tab=library]').click();await settle();await settle();
     d.querySelector('[data-library-media="7"]').click();await settle();await settle();
     const season=d.querySelector('[data-season="2"]');season.open=true;
+    assert.equal(season.querySelector('[data-season-mapping="7"]').textContent,'Сопоставить файлы');
+    assert.equal(season.querySelector('[data-map-files]'),null);
     const button=season.querySelector('[data-season-candidates="7"]');
     assert.equal(button.textContent,'Выбрать раздачу для сезона');
     button.click();await settle();await settle();
@@ -794,14 +792,13 @@ test('one release can be selected only for the expanded season',async()=>{
 });
 
 
-test('libraries switch categories, show details and delete media',async()=>{
+test('library sections show details and delete media',async()=>{
   const {dom,w,document:d,errors,calls,setLibrary,updateLibraryDetail}=await setup();
   try{
     const download={id:5,state:'downloading',progress:.42,eta:120,download_rate:2048,upload_rate:128,ratio:.1,seed_ratio:1,seeds:3,peers:4};
     setLibrary([{id:'series',name:'Сериалы',items:[]},{id:'movies',name:'Кино',items:[]},{id:'anime',name:'Аниме',items:[{id:2,title:'Re:Zero',year:2016,taxonomy_known:true,download:{progress:.42,download_rate:2048}}]}],{title:'Re:Zero',kind:'tv',year:2016,metadata:{overview:'Описание',original_title:'Original',genres:['Анимация']},task_count:2,last_search_at:1,episodes:[{id:1,season:1,episode:1,title:'Начало',overview:'',still:null,air_date:'2016-04-04',released:true,statuses:[],subtasks:[],last_search_at:null,files:[]},{id:14,season:2,episode:14,title:'Пари',overview:'Описание серии',still:'https://image.tmdb.org/t/p/w342/still.jpg',air_date:'2021-01-06',released:true,statuses:['downloading'],subtasks:[{id:11,task_id:7,status:'downloading'}],download,last_search_at:1,files:[{current:false,pending:true,verified:false,path:'episode.mkv',directory:'/downloads',resolution:1080,size:1024,tracks:[{kind:'audio',language:'ja',external:false}],release:{provider:'rutracker',title:'Selected release',url:'https://example.org/topic'},missing_subtitle_languages:['ru'],download_state:'downloading',download}]}]});
     d.querySelector('[data-tab=library]').click();await settle();await settle();
-    assert.equal(d.querySelectorAll('[data-library]').length,3);
-    d.querySelector('[data-library=anime]').click();
+    assert.equal(d.querySelectorAll('.library-section').length,3);
     assert.ok(d.querySelector('.library-poster-empty'));assert.equal(d.querySelector('.library-poster-frame img'),null);
     assert.equal(d.querySelector('.library-tile .progress').getAttribute('aria-valuenow'),'42.0');
     d.querySelector('[data-library-media="2"]').click();await settle();await settle();
@@ -814,7 +811,8 @@ test('libraries switch categories, show details and delete media',async()=>{
     const detail=d.querySelector('#library-detail-body').textContent;
     assert.match(detail,/Описание серии/);assert.match(detail,/Календарь выхода/);assert.match(detail,/14\. Пари/);
     assert.equal(d.querySelectorAll('.library-season').length,2);assert.match(d.querySelector('.library-season').textContent,/Сезон 1/);
-    assert.equal(d.querySelector('[data-season="2"]').open,true);assert.ok(d.querySelector('[data-season="1"]').classList.contains('is-unrequested'));assert.ok(d.querySelector('.episode-still-empty'));
+    assert.equal(d.querySelectorAll('.library-season[open]').length,0);assert.ok(d.querySelector('[data-season="1"]').classList.contains('is-unrequested'));assert.ok(d.querySelector('.episode-still-empty'));
+    d.querySelector('[data-season="2"]').open=true;
     assert.match(detail,/1080p/);assert.match(detail,/Японский/);assert.match(detail,/Selected release/);assert.match(detail,/Предварительные сведения/);
     assert.equal(d.querySelector('.episode-still').getAttribute('src'),'/api/v1/posters/tmdb/still.jpg');
     assert.equal(d.querySelector('.episode-download .progress').getAttribute('aria-valuenow'),'77.0');
@@ -822,6 +820,7 @@ test('libraries switch categories, show details and delete media',async()=>{
     updateLibraryDetail(item=>{item.episodes[1].download.progress=.55;item.episodes[1].files[0].download.progress=.55;});
     await w.testOpenLibraryMedia(2,true);
     assert.ok(d.querySelector('#library-detail-body'));
+    assert.equal(d.querySelector('[data-season="2"]').open,true);
     assert.equal(d.querySelector('.episode-still'),still);
     assert.equal(d.querySelector('.episode-download .progress').getAttribute('aria-valuenow'),'55.0');
     assert.equal(d.querySelector('[data-candidates="11"]').textContent,'Выбрать раздачу');
@@ -830,6 +829,8 @@ test('libraries switch categories, show details and delete media',async()=>{
     updateLibraryDetail(item=>{item.episodes[1].download.state='seeding';item.episodes[1].download.progress=.99;});
     await w.testOpenLibraryMedia(2,true);
     assert.equal(d.querySelector('[data-episode="14"] summary .progress'),null);
+    await w.testOpenLibraryMedia(2);
+    assert.equal(d.querySelectorAll('.library-season[open]').length,0);
     d.querySelector('#library-delete').click();
     assert.equal(d.querySelector('#modal').open,true);
     const form=d.querySelector('#delete-media-form');
@@ -870,9 +871,10 @@ test('silent library refresh keeps the tile grid class',async()=>{
   try{
     setLibrary([{id:'series',name:'Сериалы',items:[{id:1,title:'Первый',year:2020},{id:2,title:'Второй',year:2021}]}],{});
     d.querySelector('[data-tab=library]').click();await settle();await settle();
-    const grid=d.querySelector('#library-items');
+    const grid=d.querySelector('#library-items .library-grid');
     assert.equal(grid.classList.contains('library-grid'),true);
     w.testRenderLibraries(true);
+    assert.equal(d.querySelector('#library-items .library-grid'),grid);
     assert.equal(grid.classList.contains('library-grid'),true);
     assert.equal(grid.querySelectorAll('.library-tile').length,2);
     assert.deepEqual(errors,[]);
@@ -949,5 +951,270 @@ test('queued search shows its scheduled local time without internal ID or lane',
     assert.match(list.textContent,/Поиск запланирован на 10:45/);
     assert.doesNotMatch(list.textContent,/search-p|после паузы/);
     assert.equal(list.querySelector('.background-task-row .fine'),null);
+  }finally{dom.window.close();}
+});
+
+test('season mapping prefills files, moves smart groups, rejects wrong columns and preserves drafts when adding',async()=>{
+  const {dom,w,document:d,errors,calls}=await setup();
+  try{
+    const data={episodes:[{subtask_id:1,number:1,title:'Первый',release_id:7,binding:{video_index:0,tracks:[{file_index:1}]}},{subtask_id:2,number:2,title:'Второй',release_id:null,binding:null}],releases:[{id:7,title:'Раздача A',files:[
+      {index:0,path:'Pilot.mkv',kind:'video',related:[1]}, {index:1,path:'Pilot.ru.srt',kind:'subtitle',related:[]},
+      {index:2,path:'Finale.mkv',kind:'video',related:[3,4]}, {index:3,path:'Finale.ru.flac',kind:'audio',related:[]}, {index:4,path:'Finale.en.srt',kind:'subtitle',related:[]}
+    ]},{id:8,title:'Раздача B',files:[{index:0,path:'Other.ru.flac',kind:'audio',related:[]}]}]};
+    const original=w.fetch;
+    w.fetch=async(url,options={})=>{
+      if(!url.includes('/mapping'))return original(url,options);
+      const payload=options.body?JSON.parse(options.body):undefined;calls.push({url,method:options.method,payload});
+      if(url.endsWith('/episodes')){const row={subtask_id:3,number:payload.number,title:payload.title,release_id:null,binding:null};data.episodes.push(row);return {ok:true,status:200,json:async()=>row};}
+      return {ok:true,status:200,json:async()=>data};
+    };
+    await w.testSeasonMappingDialog(1,1);
+    const cell=(row,kind)=>d.querySelector(`[data-mapping-row="${row}"][data-mapping-kind="${kind}"]`);
+    assert.equal(d.querySelectorAll('.mapping-release').length,2);
+    assert.equal(d.querySelectorAll('.mapping-bank [data-mapping-file="7:0"]').length,0);
+    assert.equal(cell(1,'video').querySelector('[data-mapping-file]').dataset.mappingFile,'7:0');
+    input(w,d.querySelector('[data-mapping-title="1"]'),'Моё имя');
+    // Drag a video: its unique related audio and subtitle follow.
+    const drop=new w.Event('drop',{bubbles:true,cancelable:true});drop.dataTransfer={getData:()=> '7:2'};cell(2,'video').dispatchEvent(drop);
+    assert.equal(cell(2,'audio').querySelector('[data-mapping-file]').dataset.mappingFile,'7:3');
+    assert.equal(cell(2,'subtitle').querySelector('[data-mapping-file]').dataset.mappingFile,'7:4');
+    assert.equal(d.querySelector('[data-mapping-title="1"]').value,'Моё имя');
+    d.querySelector('[data-mapping-file="8:0"]').click();cell(2,'audio').click();
+    assert.match(d.querySelector('#mapping-feedback').textContent,/этой же раздачи/);
+    assert.equal(cell(2,'audio').querySelector('[data-mapping-file]').dataset.mappingFile,'7:3');
+    d.querySelector('[data-mapping-remove="7:2"]').click();
+    assert.equal(cell(2,'audio').querySelector('[data-mapping-file]'),null);
+    // Smart off leaves sidecars in the bank; click-to-place works too.
+    d.querySelector('#mapping-smart').click();d.querySelector('[data-mapping-file="7:2"]').click();cell(2,'video').click();
+    assert.equal(cell(2,'subtitle').querySelector('[data-mapping-file]'),null);
+    d.querySelector('#mapping-add-episode').click();
+    assert.equal(d.querySelectorAll('.mapping-table tbody tr:not(.mapping-add-row)').length,3);
+    assert.equal(d.querySelector('[data-mapping-title="-1"]').value,'Эпизод 3');
+    input(w,d.querySelector('[data-mapping-number="-1"]'),'4');
+    assert.equal(d.querySelector('[data-mapping-title="-1"]').value,'Эпизод 4');
+    input(w,d.querySelector('[data-mapping-title="-1"]'),'Бонус');
+    input(w,d.querySelector('[data-mapping-number="-1"]'),'5');
+    assert.equal(d.querySelector('[data-mapping-title="-1"]').value,'Бонус');
+    assert.equal(calls.some(call=>call.url.endsWith('/mapping/episodes')),false);
+    assert.equal(d.querySelector('[data-mapping-title="1"]').value,'Моё имя');
+    assert.equal(cell(2,'video').querySelector('[data-mapping-file]').dataset.mappingFile,'7:2');
+    input(w,d.querySelector('[data-mapping-number="1"]'),'6');
+    d.querySelector('#mapping-save').click();await settle();await settle();
+    const saved=calls.find(call=>call.method==='PUT'&&call.url.endsWith('/mapping')).payload.rows;
+    assert.equal(saved[2].subtask_id,3);assert.equal(saved[2].number,5);assert.equal(saved[2].title,'Бонус');
+    assert.equal(saved[0].number,6);assert.equal(saved[0].title,'Моё имя');assert.equal(saved[1].video_index,2);assert.deepEqual(saved[1].track_indices,[]);
+    assert.deepEqual(errors,[]);
+  }finally{dom.window.close();}
+});
+
+test('manual release form opens at the top and shows a spinner through errors and retry without losing new rows',async()=>{
+  const {dom,w,document:d,errors}=await setup();
+  try{
+    const data={episodes:[{subtask_id:1,number:1,title:'Первый',release_id:null,binding:null}],releases:[]};
+    const original=w.fetch;let finish;
+    w.fetch=async(url,options={})=>{
+      if(!url.includes('/mapping'))return original(url,options);
+      if(url.endsWith('/releases'))return new Promise(resolve=>{finish=resolve;});
+      return {ok:true,status:200,json:async()=>data};
+    };
+    await w.testSeasonMappingDialog(1,1);
+    assert.equal(d.querySelector('#mapping-add-release').hidden,true);
+    assert.match(d.querySelector('.mapping-smart').title,/автоматически.*аудиофайлы.*субтитры/);
+    assert.equal(d.querySelector('.mapping-placeholder').closest('td').classList.contains('mapping-drop-empty'),true);
+    d.querySelector('#mapping-add-episode').click();
+    d.querySelector('#mapping-toggle-release').click();
+    assert.equal(d.querySelector('#mapping-add-release').hidden,false);
+    assert.ok(d.querySelector('.mapping-bank #mapping-add-release'));
+    input(w,d.querySelector('#mapping-add-release input'),'https://nyaa.si/view/1');
+    const submit=()=>d.querySelector('#mapping-add-release').dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}));
+    submit();
+    assert.ok(d.querySelector('.mapping-spinner'));
+    assert.equal(d.querySelector('#mapping-add-release button').disabled,true);
+    finish({ok:false,status:422,json:async()=>({detail:'Trawl временно недоступен'})});await settle();await settle();
+    assert.equal(d.querySelector('.mapping-spinner'),null);
+    assert.match(d.querySelector('#mapping-add-release .form-error').textContent,/Trawl/);
+    assert.equal(d.querySelector('#mapping-add-release input').value,'https://nyaa.si/view/1');
+    assert.equal(d.querySelector('#mapping-add-release button').disabled,false);
+    submit();assert.ok(d.querySelector('.mapping-spinner'));
+    finish({ok:true,status:200,json:async()=>({ok:true})});await settle();await settle();
+    assert.equal(d.querySelector('.mapping-spinner'),null);
+    assert.equal(d.querySelector('[data-mapping-title="-1"]').value,'Эпизод 2');
+    assert.deepEqual(errors,[]);
+  }finally{dom.window.close();}
+});
+
+test('refreshing a familiar release remaps draft indices and sends its current revision',async()=>{
+  const {dom,w,document:d,errors,calls}=await setup();
+  try{
+    const original=w.fetch;let refreshed=false;
+    const snapshot=()=>({episodes:[{subtask_id:1,number:1,title:'Первый',release_id:7,binding:{video_index:refreshed?1:0,tracks:[]}}],releases:[{id:7,title:'Одна раздача',revision:refreshed?'new':'old',files:refreshed?[{index:0,path:'New.mkv',size:20,kind:'video',related:[]},{index:1,path:'Pilot.mkv',size:10,kind:'video',related:[]}]:[{index:0,path:'Pilot.mkv',size:10,kind:'video',related:[]}]}]});
+    w.fetch=async(url,options={})=>{
+      if(!url.includes('/mapping'))return original(url,options);
+      calls.push({url,method:options.method,payload:options.body?JSON.parse(options.body):undefined});
+      if(url.endsWith('/releases'))refreshed=true;
+      return {ok:true,status:200,json:async()=>snapshot()};
+    };
+    await w.testSeasonMappingDialog(1,1);
+    input(w,d.querySelector('[data-mapping-title="1"]'),'Моё имя');
+    d.querySelector('#mapping-toggle-release').click();
+    input(w,d.querySelector('#mapping-add-release input'),'https://nyaa.si/view/1');
+    d.querySelector('#mapping-add-release').dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}));await settle();await settle();
+    assert.equal(d.querySelectorAll('.mapping-release').length,1);
+    assert.equal(d.querySelector('[data-mapping-row="1"][data-mapping-kind="video"] [data-mapping-file]').dataset.mappingFile,'7:1');
+    assert.equal(d.querySelector('[data-mapping-title="1"]').value,'Моё имя');
+    d.querySelector('#mapping-save').click();await settle();await settle();
+    const payload=calls.find(call=>call.method==='PUT').payload;
+    assert.equal(payload.rows[0].video_index,1);assert.deepEqual(payload.revisions,{'7':'new'});
+    assert.deepEqual(errors,[]);
+  }finally{dom.window.close();}
+});
+
+test('library displays ordered sections and navigation resets details, including pending responses',async()=>{
+  const {dom,w,document:d,errors,setLibrary}=await setup();
+  try{
+    const detail={id:2,title:'Show',kind:'tv',metadata:{},episodes:[]};
+    setLibrary([{id:'series',name:'Сериалы',items:[{id:2,title:'Show'}]},{id:'movies',name:'Кино',items:[]},{id:'anime',name:'Аниме',items:[{id:3,title:'Anime'}]}],detail);
+    const navigate=async tab=>{d.querySelector(`[data-tab="${tab}"]`).click();await settle();await settle();};
+    await navigate('library');
+    assert.deepEqual([...d.querySelectorAll('.library-section h3')].map(n=>n.textContent),['Аниме · 1','Фильмы · 0','Сериалы · 1']);
+    assert.equal(d.querySelectorAll('#library-items .library-tile').length,2);
+    assert.equal(d.querySelector('[data-library]'),null);
+    assert.match(d.querySelectorAll('.library-section')[1].textContent,/пока нет произведений/);
+    d.querySelector('[data-library-media="2"]').click();await settle();await settle();
+    assert.equal(d.querySelector('#library-detail').hidden,false);
+    await navigate('settings');await navigate('library');
+    assert.equal(d.querySelector('#library-detail').hidden,true);
+    assert.equal(d.querySelector('#library-overview').hidden,false);
+    assert.equal(d.querySelector('#all-tasks-control').hidden,false);
+    const fetch=w.fetch;let release;
+    w.fetch=(url,options)=>url==='/api/v1/libraries/media/2'?new Promise(resolve=>{release=()=>resolve({ok:true,status:200,json:async()=>detail});}):fetch(url,options);
+    d.querySelector('[data-library-media="2"]').click();await settle();
+    await navigate('library');release();await settle();await settle();
+    assert.equal(d.querySelector('#library-detail').hidden,true);
+    assert.equal(d.querySelector('#library-detail-body').textContent,'');
+    assert.equal(d.querySelector('#library-overview').hidden,false);
+    assert.deepEqual(errors,[]);
+  }finally{dom.window.close();}
+});
+
+test('media task edits inline, keeps draft across refresh and saves seasons with requirements',async()=>{
+  const {dom,w,document:d,calls,errors,setTasks,setLibrary}=await setup();
+  try{
+    const task={id:7,media_id:2,title:'Show',kind:'tv',seasons:[{season:1,whole_season:false}],subtasks:[{id:1,season:1,episode:2,status:'queued'}],requirements:{audio_languages:['ja'],subtitle_languages:['ru'],min_resolution:720,max_resolution:2160,keyword:''},paused:false};
+    setTasks([task]);setLibrary([{id:'series',name:'Сериалы',items:[{id:2,title:'Show'}]}],{id:2,title:'Show',kind:'tv',metadata:{seasons:[{number:1,title:'Сезон 1',episode_count:2},{number:2,title:'Сезон 2',episode_count:2}]},episodes:[],task});
+    d.querySelector('[data-tab=library]').click();await settle();await settle();
+    d.querySelector('[data-library-media="2"]').click();await settle();await settle();
+    assert.ok(d.querySelector('#media-task summary [data-delete-task]'));
+    assert.equal(d.querySelector('#media-task .task-actions [data-edit-task]'),null);
+    d.querySelector('[data-edit-media-task]').click();
+    assert.equal(d.querySelector('#modal').open,false);
+    const form=d.querySelector('#inline-task-form');
+    assert.equal(form.querySelector('[data-inline-season] input').value,'2');
+    form.querySelector('[name=min_resolution]').value='1080';
+    form.querySelector('[data-inline-season] select').value='2';
+    form.querySelector('[data-inline-season] input').value='1-2';
+    await w.testOpenLibraryMedia(2,true);
+    assert.equal(d.querySelector('#inline-task-form'),form);
+    assert.equal(form.querySelector('[name=min_resolution]').value,'1080');
+    form.dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}));await settle();await settle();
+    const saved=calls.find(call=>call.url==='/api/v1/tasks/7'&&call.method==='PATCH');
+    assert.deepEqual(saved.payload.seasons,[{season:2,episodes:[1,2]}]);
+    assert.equal(saved.payload.requirements.min_resolution,1080);
+    assert.deepEqual(saved.payload.requirements.audio_languages,['ja']);
+    assert.deepEqual(saved.payload.requirements.subtitle_languages,['ru']);
+    assert.equal(d.querySelector('#inline-task-form'),null);
+    d.querySelector('[data-edit-media-task]').click();
+    d.querySelector('[data-cancel-inline-task]').click();
+    assert.equal(d.querySelector('#inline-task-form'),null);
+    assert.equal(d.querySelector('#media-task dl').hidden,false);
+    assert.deepEqual(errors,[]);
+  }finally{dom.window.close();}
+});
+
+test('mapping bug report keeps the draft and puts only the summary in the GitHub URL',async()=>{
+  const {dom,w,document:d,errors}=await setup();
+  try{
+    const data={episodes:[{subtask_id:1,number:1,title:'Первый',release_id:null,binding:null}],releases:[{id:7,title:'Раздача',revision:'hash',files:[]}]};
+    const report={schema_version:1,release:{title:'Раздача',url:'https://example.org/topic?t=7',provider:'nyaa',provider_name:'Nyaa',description_source:'live',description_base64:'ZXhhbXBsZQ==',files:[{path:'video.mkv'}]},task:{media:{title:'Сериал'},requests:[]},evaluation:{}};
+    const original=w.fetch;let finish;
+    w.fetch=async(url,options={})=>{
+      if(url.endsWith('/report'))return new Promise(resolve=>{finish=()=>resolve({ok:true,status:200,json:async()=>report});});
+      if(url.endsWith('/mapping'))return {ok:true,status:200,json:async()=>data};
+      return original(url,options);
+    };
+    let downloaded;
+    w.URL.createObjectURL=blob=>{downloaded=blob;return 'blob:test-report'};
+    w.URL.revokeObjectURL=()=>{};
+    await w.testSeasonMappingDialog(1,1);
+    input(w,d.querySelector('[data-mapping-title="1"]'),'Мой черновик');
+    d.querySelector('[data-mapping-report="7"]').click();
+    assert.ok(d.querySelector('[data-mapping-report] .mapping-spinner'));
+    assert.equal(d.querySelector('#mapping-report-dialog'),null);
+    finish();await settle();
+    const dialog=d.querySelector('#mapping-report-dialog');
+    assert.ok(dialog.open);
+    input(w,dialog.querySelector('textarea'),'Видео должно относиться ко второй серии');
+    const link=new URL(dialog.querySelector('#mapping-report-issue').href);
+    assert.equal(link.origin,'https://github.com');
+    assert.equal(link.pathname,'/Drun555/lazarr-search-engine/issues/new');
+    const body=link.searchParams.get('body');
+    assert.match(body,/^## Комментарий\nВидео должно/);
+    assert.match(body,/https:\/\/example.org\/topic\?t=7/);
+    assert.match(body,/Nyaa/);
+    assert.doesNotMatch(body,/video.mkv|ZXhhbXBsZQ|requests|Сериал/);
+    const download=dialog.querySelector('#mapping-report-download');
+    download.addEventListener('click',event=>event.preventDefault());
+    download.click();
+    const text=await new Promise(resolve=>{const reader=new w.FileReader();reader.onload=()=>resolve(reader.result);reader.readAsText(downloaded)});
+    const attachment=JSON.parse(text);
+    assert.equal(attachment.task.media.title,'Сериал');
+    assert.equal(attachment.editor_draft.episodes[0].title,'Мой черновик');
+    assert.equal(attachment.release.files[0].path,'video.mkv');
+    dialog.querySelector('[data-report-close]').click();
+    dialog.dispatchEvent(new w.Event('close'));
+    assert.equal(d.querySelector('#modal').open,true);
+    assert.equal(d.querySelector('[data-mapping-title="1"]').value,'Мой черновик');
+    assert.deepEqual(errors,[]);
+  }finally{dom.window.close();}
+});
+
+test('episode candidate report downloads without a mapping draft and never selects the release',async()=>{
+  const {dom,w,document:d,errors}=await setup();
+  try{
+    const original=w.fetch;const requests=[];let downloaded;
+    w.fetch=async(url,options={})=>{
+      requests.push(url);
+      if(url==='/api/v1/subtasks/1/candidates')return {ok:true,status:200,json:async()=>[{id:7,candidate:{title:'Release',url:'https://example.org/7',provider:'nyaa'},report:{criteria:[]}}]};
+      if(url==='/api/v1/candidates/7/report?scope=episode')return {ok:true,status:200,json:async()=>({release:{title:'Release',url:'https://example.org/7',provider:'nyaa',provider_name:'Nyaa',description_source:'cache'},task:{requests:[{episode:1}]}})};
+      return original(url,options);
+    };
+    w.URL.createObjectURL=blob=>{downloaded=blob;return 'blob:report'};w.URL.revokeObjectURL=()=>{};
+    await w.testCandidateDialog(1,false);
+    d.querySelector('[data-candidate-report="7"]').click();await settle();
+    assert.ok(d.querySelector('#mapping-report-dialog').open);
+    const link=d.querySelector('#mapping-report-download');link.addEventListener('click',event=>event.preventDefault());link.click();
+    const text=await new Promise(resolve=>{const reader=new w.FileReader();reader.onload=()=>resolve(reader.result);reader.readAsText(downloaded)});
+    assert.equal(JSON.parse(text).editor_draft,undefined);
+    assert.equal(JSON.parse(text).task.requests[0].episode,1);
+    assert.equal(requests.some(url=>url.includes('/choice')),false);
+    assert.deepEqual(errors,[]);
+  }finally{dom.window.close();}
+});
+
+test('search flow issue is clearly labelled and keeps its report downloadable without logs',async()=>{
+  const {dom,w,document:d,errors}=await setup();
+  try{
+    const original=w.fetch;
+    w.fetch=async(url,options={})=>url==='/api/v1/tasks/7/search/report'?{ok:true,status:200,json:async()=>({issue_type:'search_flow',task:{media:{title:'Example'},requests:[]},search:{stage:'search'}})}:original(url,options);
+    d.body.insertAdjacentHTML('beforeend','<details class="task-search-log"><summary>Ход поиска<button type="button" data-search-report="7">Жук</button></summary></details>');
+    const details=d.querySelector('.task-search-log');details.querySelector('button').click();await settle();
+    assert.equal(details.open,false);
+    const dialog=d.querySelector('#mapping-report-dialog');assert.ok(dialog.open);
+    const url=new URL(dialog.querySelector('#mapping-report-issue').href);
+    assert.match(url.searchParams.get('title'),/^Некорректный ход поиска:/);
+    assert.match(url.searchParams.get('body'),/Issue относится именно к некорректному ходу поиска раздач/);
+    assert.match(url.searchParams.get('body'),/^## Комментарий/);
+    assert.equal(dialog.querySelector('#mapping-report-download').download,'lazarr-search-flow-report.json');
+    assert.deepEqual(errors,[]);
   }finally{dom.window.close();}
 });

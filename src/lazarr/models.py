@@ -145,11 +145,12 @@ class Subtask(Base):
 
 class Release(Base):
     __tablename__ = "releases"
-    __table_args__ = (UniqueConstraint("provider", "external_id", "revision"),)
+    __table_args__ = (Index("uq_releases_source", "provider", "external_id", unique=True),)
     id: Mapped[int] = mapped_column(primary_key=True)
     provider: Mapped[str]
     external_id: Mapped[str]
     revision: Mapped[str] = mapped_column(default="")
+    files: Mapped[list] = mapped_column(JSON, default=list, server_default="[]")
     data: Mapped[dict] = mapped_column(JSON)
 
 

@@ -53,6 +53,9 @@ class Settings(BaseModel):
     search_start: str = "00:00"
     seed_ratio: float | None = Field(default=1.0, ge=0, le=10000)
     plugin_repository: str = ""
+    search_engine_repository: str = (
+        "https://raw.githubusercontent.com/Drun555/lazarr-search-engine/main/catalog.json"
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -82,7 +85,7 @@ class Settings(BaseModel):
             raise ValueError("Use HH:MM")
         return value
 
-    @field_validator("plugin_repository")
+    @field_validator("plugin_repository", "search_engine_repository")
     @classmethod
     def valid_repository(cls, value):
         if value and not value.startswith("https://"):

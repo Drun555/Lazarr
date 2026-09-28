@@ -16,6 +16,7 @@
   --surface-low: color-mix(in srgb, #1a1c23 96%, var(--accent));
   --surface-high: color-mix(in srgb, #2a2c34 94%, var(--accent));
   --outline: #81838e;
+  --focus-ring: color-mix(in srgb, var(--accent) 45%, var(--line));
   --shadow: 0 12px 32px rgba(0, 0, 0, .14);
 }
 [data-accent="green"] { --accent: #a6d9b3; --on-accent: #173424; }
@@ -28,7 +29,7 @@
 html { scroll-behavior: smooth; }
 body { background: radial-gradient(circle at 85% 0%, color-mix(in srgb, var(--accent) 13%, var(--bg)) 0, transparent 34%), var(--bg); color: var(--text); font-size: 14px; }
 button, input, select { transition: background-color .2s, border-color .2s, box-shadow .2s, transform .2s; }
-button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible { outline: 1px solid var(--focus-ring); outline-offset: 2px; }
 h1 { font-size: clamp(32px, 4vw, 48px); font-weight: 700; letter-spacing: -.05em; line-height: 1.08; }
 h2 { font-size: 22px; font-weight: 700; letter-spacing: -.035em; }
 h3 { font-weight: 650; }
@@ -125,7 +126,7 @@ dialog::backdrop { background: #10111799; backdrop-filter: blur(3px); }
 .theme-color-options input { position: absolute; width: 100%; height: 100%; min-height: 0; margin: 0; opacity: 0; cursor: pointer; }
 .theme-swatch { display: block; width: 32px; height: 32px; border-radius: 50%; background: var(--swatch-color); box-shadow: inset 0 0 0 1px #ffffff30; pointer-events: none; }
 .theme-color-options input:checked + .theme-swatch { outline: 2px solid var(--swatch-color); outline-offset: 4px; }
-.theme-color-options input:focus-visible + .theme-swatch { outline: 3px solid var(--text); outline-offset: 5px; }
+.theme-color-options input:focus-visible + .theme-swatch { outline: 1px solid var(--focus-ring); outline-offset: 2px; }
 .theme-swatch[data-color="purple"] { --swatch-color: #c3b8ff; }
 .theme-swatch[data-color="green"] { --swatch-color: #a6d9b3; }
 .theme-swatch[data-color="cyan"] { --swatch-color: #9bd8e8; }
@@ -150,7 +151,7 @@ dialog::backdrop { background: #10111799; backdrop-filter: blur(3px); }
 .provider-expand[aria-expanded="true"] .provider-chevron { margin-top: 6px; transform: rotate(225deg); }
 .provider-drag-handle { display: grid; place-items: center; width: 26px; min-height: 42px; flex: none; color: var(--muted); font-size: 20px; letter-spacing: -7px; padding-right: 7px; cursor: grab; user-select: none; }
 .provider-drag-handle:active { cursor: grabbing; }
-.provider-drag-handle:focus-visible { outline: 2px solid var(--accent); border-radius: 8px; }
+.provider-drag-handle:focus-visible { outline: 1px solid var(--focus-ring); border-radius: 8px; }
 .provider-accordion.is-dragging { opacity: .5; }
 .provider-accordion.drop-before { box-shadow: inset 0 3px var(--accent); }
 .provider-accordion.drop-after { box-shadow: inset 0 -3px var(--accent); }
@@ -168,7 +169,6 @@ input[role="switch"]:checked::before { transform: translateX(18px); background: 
 .language-pill button { color: var(--on-primary-container); }
 .language-options { border-color: var(--line); border-radius: 14px; background: var(--panel); box-shadow: 0 16px 32px #0006; }
 .language-options button:hover, .language-options button[aria-selected=true] { background: var(--primary-container); }
-.library-nav .active { background: var(--accent); color: var(--on-accent); }
 .library-grid { grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); grid-auto-rows: 1fr; align-items: stretch; }
 .library-tile { min-width: 0; width: 100%; height: 100%; padding: 10px; border: 1px solid var(--line); border-radius: 22px; background: var(--panel); box-shadow: var(--shadow); overflow-wrap: anywhere; }
 .library-tile:hover { border-color: var(--accent); transform: none; }
