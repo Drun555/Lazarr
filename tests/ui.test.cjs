@@ -188,6 +188,7 @@ async function setup(){
     const payload=options.body?JSON.parse(options.body):undefined;calls.push({url,method:options.method,payload});
     let result;
     if(url==='/api/v1/settings')result={defaults,jellyfin,prefer_full_subtitles:true,theme_color:'purple',movie_path:'/tmp/movies',series_path:'/tmp/series',search_start:'00:00',seed_ratio:1,plugin_repository:''};
+    else if(url==='/api/v1/storage')result={roots:[{source:'/downloads/source',user:'/downloads/user'}],links:12};
     else if(url==='/api/v1/status')result=status();
     else if(url==='/api/v1/telegram')result={enabled:true,token_configured:true,bot_username:'test_bot',error:''};
     else if(url==='/api/v1/telegram/users')result=telegramUsers;
@@ -1216,5 +1217,17 @@ test('search flow issue is clearly labelled and keeps its report downloadable wi
     assert.match(url.searchParams.get('body'),/^## Комментарий/);
     assert.equal(dialog.querySelector('#mapping-report-download').download,'lazarr-search-flow-report.json');
     assert.deepEqual(errors,[]);
+  }finally{dom.window.close();}
+});
+
+test('storage status reports paths and an unavailable status does not block settings',async()=>{
+  const {dom,w,document:d}=await setup();
+  try {
+    assert.match(d.querySelector('#storage-status').textContent,/downloads\/user/);
+    const original=w.fetch;
+    w.fetch=async(url,options)=>url==='/api/v1/storage'?{ok:false,status:503,json:async()=>({detail:'disk unavailable'})}:original(url,options);
+    d.querySelector('[data-tab="settings"]').click();await settle();await settle();
+    assert.match(d.querySelector('#storage-status').textContent,/disk unavailable/);
+    assert.equal(d.querySelector('[name="prefer_full_subtitles"]').checked,true);
   }finally{dom.window.close();}
 });

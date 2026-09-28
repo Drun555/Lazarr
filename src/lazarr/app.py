@@ -826,6 +826,13 @@ def create_app(config: RuntimeConfig | None = None):
     async def settings(request: Request, user=Depends(permission("settings"))):
         return context(request).service.settings()
 
+    @app.get("/api/v1/storage")
+    async def storage(request: Request, user=Depends(permission("settings"))):
+        from lazarr.storage import describe
+
+        ctx = context(request)
+        return await asyncio.to_thread(describe, ctx.db, ctx.service.settings())
+
     @app.get("/api/v1/telegram")
     async def telegram_settings(request: Request, user=Depends(permission("settings"))):
         return context(request).telegram.describe()

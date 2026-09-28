@@ -43,6 +43,7 @@ from lazarr.sdk import (
 from lazarr.security import audit
 from lazarr.torrent import probe_file
 from lazarr.subtitle_language import detect_subtitle_language
+from lazarr.storage import source_directory, migrate_sources, reconcile, check_links
 
 log = logging.getLogger(__name__)
 
@@ -80,6 +81,8 @@ class Worker:
         self.probe_cache = {}
         self.last_checkpoint = 0
         self.last_restore = 0
+        self.storage_prepared = False
+        self.checked_storage_roots = set()
         self.consumer_state = {}
         self.progress = SearchProgress()
 
@@ -1068,6 +1071,8 @@ class Worker:
 
     async def submit(self, release_id, metadata, plan, reports, override=False):
         async with self.poll_lock, self.download_lock:
+            if not await self.prepare_storage():
+                raise ValueError("Сначала устраните ошибку миграции хранилища в настройках")
             with self.db.session() as db:
                 for job in db.scalars(select(ConfigEntry).where(ConfigEntry.key.like("cleanup.%"))):
                     if any(Path(p).name == plan.infohash for p in job.value["directories"]) or any(
@@ -1111,7 +1116,7 @@ class Worker:
                     download = Download(
                         infohash=plan.infohash,
                         release_id=release_id,
-                        save_path=str(Path(root).absolute() / plan.infohash),
+                        save_path=str(source_directory(root, plan.infohash)),
                         torrent_file=str(self.config.data_dir / "torrents" / f"{plan.infohash}.torrent"),
                         plan=plan.model_dump(),
                         seed_ratio=settings.seed_ratio,
@@ -1179,7 +1184,11 @@ class Worker:
             self.probe_cache.clear()
             await asyncio.to_thread(cleanup, self.db)
             await self.restore(reset_leases=False, skip_hash=plan.infohash)
-            if not self.cleanup_blocks(plan.infohash):
+            if self.storage_prepared and not self.cleanup_blocks(plan.infohash):
+                user_root = Path(path).parent.parent / "user"
+                if user_root not in self.checked_storage_roots:
+                    await asyncio.to_thread(check_links, user_root, self.db)
+                    self.checked_storage_roots.add(user_root)
                 await asyncio.to_thread(self.engine.add, metadata.torrent, path, plan, paused)
 
     def cleanup_blocks(self, infohash):
@@ -1190,7 +1199,19 @@ class Worker:
                 for job in db.scalars(select(ConfigEntry).where(ConfigEntry.key.like("cleanup.%")))
             )
 
+    async def prepare_storage(self):
+        if not self.storage_prepared:
+            try:
+                await asyncio.to_thread(migrate_sources, self.db)
+            except (OSError, ValueError):
+                log.exception("Storage migration deferred; torrent restoration paused")
+                return False
+            self.storage_prepared = True
+        return True
+
     async def restore(self, reset_leases=True, skip_hash=None):
+        if not await self.prepare_storage():
+            return
         if self.engine is None:
             return
         if reset_leases:
@@ -1217,6 +1238,10 @@ class Worker:
             if infohash == skip_hash or self.engine.contains(infohash) or self.cleanup_blocks(infohash):
                 continue
             try:
+                user_root = Path(save_path).parent.parent / "user"
+                if user_root not in self.checked_storage_roots:
+                    await asyncio.to_thread(check_links, user_root, self.db)
+                    self.checked_storage_roots.add(user_root)
                 await asyncio.to_thread(
                     self.engine.add,
                     Path(torrent_file).read_bytes(),
@@ -1286,8 +1311,9 @@ class Worker:
         async with self.poll_lock:
             if time.time() - self.last_restore > 30:
                 async with self.download_lock:
-                    await asyncio.to_thread(cleanup, self.db)
-                    await self.restore(reset_leases=False)
+                    if await self.prepare_storage():
+                        await asyncio.to_thread(cleanup, self.db)
+                        await self.restore(reset_leases=False)
                 self.last_restore = time.time()
             await self._poll()
 
@@ -1544,4 +1570,5 @@ class Worker:
                 library_asset.preflight = dict(link.preflight)
                 library_asset.verification = dict(link.verification)
         if state["complete"]:
+            await asyncio.to_thread(reconcile, self.db)
             await self.sync_consumers()

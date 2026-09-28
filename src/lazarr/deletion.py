@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 from uuid import uuid4
 from sqlalchemy import delete, select
+from lazarr.storage import migration_pending
 from lazarr.models import (
     Task,
     TaskSeason,
@@ -40,6 +41,16 @@ def managed_directory(download):
 
 
 def cleanup(db):
+    from lazarr.storage import reconcile
+
+    # Remove published links before deleting any original files. On failure retry both.
+    try:
+        reconcile(db)
+    except (OSError, ValueError):
+        import logging
+
+        logging.getLogger(__name__).exception("Cannot reconcile user library; cleanup deferred")
+        return True
     pending = False
     with db.session() as session:
         jobs = [
@@ -90,6 +101,8 @@ async def delete_selection(worker, identity, user_id, *, media_id=None):
     from lazarr.replacement import retire_selections
 
     async with worker.lock, worker.poll_lock, worker.download_lock:
+        if migration_pending(worker.db):
+            raise ValueError("Сначала устраните ошибку миграции хранилища в настройках")
         with worker.db.session() as db:
             published = []
             if media_id is None:
@@ -149,6 +162,8 @@ async def delete_season(worker, media_id, number, user_id):
     from lazarr.replacement import retire_selections
 
     async with worker.lock, worker.poll_lock, worker.download_lock:
+        if migration_pending(worker.db):
+            raise ValueError("Сначала устраните ошибку миграции хранилища в настройках")
         detail = LibraryService(worker.db, worker.plugins, worker.service).detail(media_id)
         if not detail or detail["kind"] != "tv":
             raise ValueError("Сериал не найден")
@@ -219,6 +234,8 @@ async def delete_season(worker, media_id, number, user_id):
 
 async def delete_task(worker, identity, user_id, delete_media=False):
     async with worker.lock, worker.poll_lock, worker.download_lock:
+        if migration_pending(worker.db):
+            raise ValueError("Сначала устраните ошибку миграции хранилища в настройках")
         with worker.db.session() as db:
             task = db.get(Task, identity)
             if task is None:
@@ -300,6 +317,8 @@ async def delete_task(worker, identity, user_id, delete_media=False):
 async def delete_media(worker, identity, user_id, delete_files=False):
     """Remove a shared Media and all of its tasks, preserving files by default."""
     async with worker.lock, worker.poll_lock, worker.download_lock:
+        if migration_pending(worker.db):
+            raise ValueError("Сначала устраните ошибку миграции хранилища в настройках")
         with worker.db.session() as db:
             media = db.get(Media, identity)
             if media is None:

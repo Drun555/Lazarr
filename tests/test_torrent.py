@@ -49,7 +49,9 @@ def test_priority_order_and_boundary_pieces():
 
 
 @pytest.mark.swarm
-def test_local_swarm_selective_download_and_resume(tmp_path):
+@pytest.mark.parametrize("relocate", [False, True])
+def test_local_swarm_selective_download_and_resume(tmp_path, relocate):
+    download_root = tmp_path / "download"
     source = tmp_path / "seed"
     source.mkdir()
     # Deliberately reverse torrent file order relative to episode order.
@@ -96,7 +98,7 @@ def test_local_swarm_selective_download_and_resume(tmp_path):
                 FileBinding(subtask_id=2, video_index=0, video_path=paths[0], episode_order=2),
             ],
         )
-        engine.add(data, str(tmp_path / "download"), plan)
+        engine.add(data, str(download_root), plan)
         deadline = time.monotonic() + 30
         while not seed_handle.status().is_seeding and time.monotonic() < deadline:
             time.sleep(0.05)
@@ -120,8 +122,13 @@ def test_local_swarm_selective_download_and_resume(tmp_path):
                 # A checkpoint may capture the temporary priority guard.
                 engine.handles[metadata.infohash].set_flags(lt.torrent_flags.upload_mode)
                 engine.close()
+                if relocate:
+                    destination = tmp_path / "source" / metadata.infohash
+                    destination.parent.mkdir()
+                    download_root.rename(destination)
+                    download_root = destination
                 engine = LibtorrentEngine(tmp_path / "state", "127.0.0.1:0", local_only=True)
-                engine.add(data, str(tmp_path / "download"), plan)
+                engine.add(data, str(download_root), plan)
                 engine.handles[metadata.infohash].set_download_limit(512 * 1024)
                 engine.connect_peer(metadata.infohash, ("127.0.0.1", seed.listen_port()))
                 restarted = True
@@ -139,7 +146,7 @@ def test_local_swarm_selective_download_and_resume(tmp_path):
         for path in paths[:3]:
             assert (
                 hashlib.sha256((source / path).read_bytes()).digest()
-                == hashlib.sha256((tmp_path / "download" / path).read_bytes()).digest()
+                == hashlib.sha256((download_root / path).read_bytes()).digest()
             )
         # Unselected bytes may share one boundary piece, but this file must not be selected.
         assert engine.handles[metadata.infohash].get_file_priorities()[3] == 0
@@ -148,7 +155,7 @@ def test_local_swarm_selective_download_and_resume(tmp_path):
         assert (engine.root / f"{metadata.infohash}.resume").exists()
         restored = LibtorrentEngine(tmp_path / "state", "127.0.0.1:0", local_only=True)
         try:
-            restored.add(data, str(tmp_path / "download"), plan, paused=True)
+            restored.add(data, str(download_root), plan, paused=True)
             limit = time.monotonic() + 5
             while time.monotonic() < limit:
                 snapshot = restored.snapshot(metadata.infohash)
@@ -160,7 +167,7 @@ def test_local_swarm_selective_download_and_resume(tmp_path):
             restored.remove(metadata.infohash)
             assert not restored.contains(metadata.infohash)
             assert not (restored.root / f"{metadata.infohash}.resume").exists()
-            assert (tmp_path / "download" / paths[0]).exists()
+            assert (download_root / paths[0]).exists()
         finally:
             restored.close()
     finally:
