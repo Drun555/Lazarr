@@ -233,6 +233,8 @@ class AuditEvent(Base):
     created_at: Mapped[float] = mapped_column(default=time.time)
 
 
+# Archived client state: retain schema mappings for existing databases and migrations.
+# No runtime APIs read or modify these tables.
 class PlaybackProgress(Base):
     __tablename__ = "playback_progress"
     __table_args__ = (UniqueConstraint("user_id", "item_id"),)

@@ -21,9 +21,6 @@ from lazarr.models import (
     Media,
     Season,
     Episode,
-    PlaybackProgress,
-    PlaybackSession,
-    VideoPlaylist,
 )
 from lazarr.security import audit
 
@@ -386,33 +383,6 @@ async def delete_media(worker, identity, user_id, delete_files=False):
             if task_ids:
                 db.execute(delete(Task).where(Task.id.in_(task_ids)))
             season_ids = set(db.scalars(select(Season.id).where(Season.media_id == identity)))
-            episode_ids = set(db.scalars(select(Episode.id).where(Episode.season_id.in_(season_ids))))
-            from lazarr.jellyfin import object_id
-
-            playback_ids = {object_id("media", identity)} | {
-                object_id("episode", episode_id) for episode_id in episode_ids
-            }
-            playback_ids.update(object_id("asset", asset_id) for asset_id in asset_ids)
-            # Public season numbers may differ from provider numbers (anime numbering).
-            season_prefix = object_id("season", identity)[:-8]
-            playback_ids.update(
-                db.scalars(
-                    select(PlaybackProgress.item_id).where(PlaybackProgress.item_id.startswith(season_prefix))
-                )
-            )
-            playback_ids.update(
-                object_id("season", identity, season.number)
-                for season in db.scalars(select(Season).where(Season.media_id == identity))
-            )
-            playback_ids.update(
-                db.scalars(select(PlaybackSession.source_id).where(PlaybackSession.item_id.in_(playback_ids)))
-            )
-            db.execute(delete(PlaybackProgress).where(PlaybackProgress.item_id.in_(playback_ids)))
-            db.execute(delete(PlaybackSession).where(PlaybackSession.item_id.in_(playback_ids)))
-            for playlist in db.scalars(select(VideoPlaylist)):
-                playlist.entries = [
-                    entry for entry in playlist.entries if entry["item_id"] not in playback_ids
-                ]
             if season_ids:
                 db.execute(delete(Episode).where(Episode.season_id.in_(season_ids)))
                 db.execute(delete(Season).where(Season.id.in_(season_ids)))

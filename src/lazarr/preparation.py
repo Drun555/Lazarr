@@ -40,7 +40,7 @@ def subtitle_candidates(ctx):
 
 
 def prepare_subtitles(ctx, asset_id):
-    from lazarr.jellyfin import playable_path
+    from lazarr.storage import playable_path
 
     with ctx.db.session() as db:
         asset = db.get(MediaAsset, asset_id)
@@ -94,7 +94,11 @@ class MediaPreparation:
         self.tasks = []
 
     def start(self):
-        self.tasks = [asyncio.create_task(self._metadata_loop()), asyncio.create_task(self._subtitle_loop())]
+        self.tasks = [
+            asyncio.create_task(self._metadata_loop()),
+            asyncio.create_task(self._subtitle_loop()),
+            asyncio.create_task(self._export_loop()),
+        ]
 
     async def close(self):
         for task in self.tasks:
@@ -133,3 +137,17 @@ class MediaPreparation:
             except Exception:
                 log.exception("Subtitle preparation failed; retrying next cycle")
             await asyncio.sleep(60)
+
+    async def _export_loop(self):
+        from lazarr.library_metadata import sync_artwork
+        from lazarr.storage import reconcile
+
+        while True:
+            try:
+                await asyncio.to_thread(reconcile, self.ctx.db)
+                await sync_artwork(self.ctx)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("Library metadata export failed; retrying next cycle")
+            await asyncio.sleep(30)

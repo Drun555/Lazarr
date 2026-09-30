@@ -8,7 +8,7 @@
   <Privileged>false</Privileged>
   <Support>https://github.com/Drun555/Lazarr/issues</Support>
   <Project>https://github.com/Drun555/Lazarr</Project>
-  <Overview>Lightweight media manager with metadata search, per-episode matching, direct playback and an integrated libtorrent download engine.</Overview>
+  <Overview>Lightweight media manager with metadata search, per-episode matching, local NFO/artwork export for media servers and an integrated libtorrent download engine.</Overview>
   <Category>MediaApp:Video MediaServer:Other</Category>
   <WebUI>http://[IP]:[PORT:8000]/</WebUI>
   <TemplateURL>https://raw.githubusercontent.com/Drun555/Lazarr/main/unraid/lazarr.xml</TemplateURL>

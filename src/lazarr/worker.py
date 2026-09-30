@@ -85,6 +85,9 @@ class Worker:
         self.checked_storage_roots = set()
         self.consumer_state = {}
         self.progress = SearchProgress()
+        self.search_section = None
+        self.search_section_tasks = set()
+        self.search_section_cancelled = False
 
     @pinned
     async def evaluate(
@@ -238,6 +241,46 @@ class Worker:
             groups.setdefault(key, []).append(sub_id)
         return list(groups.values())
 
+    def cancel_media_search(self, task_id):
+        """Cancel just the active media section, leaving the scheduler alive."""
+        if task_id in self.search_section_tasks and self.search_section is not None:
+            if not self.search_section_cancelled:
+                self.search_section_cancelled = True
+                self.search_section.cancel()
+
+    async def run_search_section(self, ids, **kwargs):
+        with self.db.session() as db:
+            active = list(
+                db.execute(
+                    select(Subtask.id, Task.id)
+                    .join(Task, Subtask.task_id == Task.id)
+                    .where(
+                        Subtask.id.in_(ids),
+                        Task.paused.is_(False) if kwargs.get("acquire", True) else True,
+                    )
+                )
+            )
+        if not active:
+            return False
+        self.search_section_tasks = {task_id for _, task_id in active}
+        self.search_section_cancelled = False
+        section = self.search_section = asyncio.create_task(
+            self._run_group([identity for identity, _ in active], **kwargs)
+        )
+        try:
+            await section
+            return True
+        except asyncio.CancelledError:
+            # Shutdown/outer cancellation must still propagate to the scheduler.
+            if not self.search_section_cancelled or asyncio.current_task().cancelling():
+                raise
+            self.progress.record("interrupted", "Поиск медиа приостановлен")
+            return False
+        finally:
+            self.search_section = None
+            self.search_section_tasks = set()
+            self.search_section_cancelled = False
+
     async def run_due(self, task_ids=None, force=False, provider_filter=None):
         if self.lock.locked() or self.engine is None:
             return False
@@ -270,17 +313,20 @@ class Worker:
                     self.progress.tasks[identity].update(
                         state="finished", message="Нет доступных для поиска серий"
                     )
+                interrupted_groups = 0
                 for ids, identities in zip(groups, task_groups):
                     self.progress.start_group(identities)
                     completed = False
                     try:
-                        await self._run_group(ids, provider_filter=provider_filter)
-                        completed = True
+                        completed = await self.run_search_section(ids, provider_filter=provider_filter)
                     finally:
                         self.progress.finish_group(completed)
+                    if not completed:
+                        interrupted_groups += 1
                     self.progress.value["groups_done"] += 1
                 unavailable = (
                     bool(groups)
+                    and interrupted_groups < len(groups)
                     and not self.progress.value["search_requests"]
                     and not self.progress.value["candidates_checked"]
                     and not self.progress.value.get("satisfied")
@@ -387,7 +433,8 @@ class Worker:
             self.progress.start_group([task_id])
             completed = False
             try:
-                await self._run_group([subtask_id], acquire=False)
+                if not await self.run_search_section([subtask_id], acquire=False):
+                    return
                 if (
                     not self.progress.value["search_requests"]
                     and not self.progress.value["candidates_checked"]

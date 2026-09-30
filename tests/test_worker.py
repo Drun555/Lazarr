@@ -1407,3 +1407,76 @@ async def test_named_season_with_bare_tv_tag_reaches_files(core, media, season, 
         assert decision.report["result"] == "MATCH"
         assert decision.report["score"] == 140
         assert session.scalar(select(SubtaskAsset)) is not None
+
+
+async def test_pause_cancels_only_current_media_and_skips_its_remaining_seasons(
+    core, media, season, worker_setup, monkeypatch
+):
+    from lazarr.models import Task
+
+    _, db, _, service = core
+    worker, _, provider = worker_setup
+    first = service.create_from_metadata(CreateTask(media_id="42", kind="tv", season=1), media, season, 1)
+    service.create_from_metadata(
+        CreateTask(media_id="42", kind="tv", season=2), media, season.model_copy(update={"number": 2}), 1
+    )
+    other = media.model_copy(update={"id": "43", "title": "Other Show"})
+    second = service.create_from_metadata(CreateTask(media_id="43", kind="tv", season=1), other, season, 1)
+    started, cancelled = asyncio.Event(), asyncio.Event()
+    searched = []
+
+    async def search(self, query, cursor=None):
+        searched.append((query.media.id, query.season))
+        if query.media.id == "42":
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+        return SearchPage(items=[])
+
+    monkeypatch.setattr(provider, "search", search)
+    running = asyncio.create_task(worker.run_due(force=True))
+    try:
+        await asyncio.wait_for(started.wait(), 2)
+        assert worker.lock.locked()
+        service.edit(first, 1, paused=True)
+        worker.cancel_media_search(first)
+        await asyncio.wait_for(running, 3)
+        assert cancelled.is_set()
+        assert ("42", 2) not in searched
+        assert any(identity == "43" for identity, _ in searched)
+        assert worker.progress.tasks[second]["running"] is False
+        with db.session() as session:
+            assert session.get(Task, first).paused
+            assert all(sub.lease_until == 0 for sub in session.scalars(select(Subtask)))
+    finally:
+        if not running.done():
+            running.cancel()
+        await asyncio.gather(running, return_exceptions=True)
+
+
+async def test_search_section_propagates_scheduler_cancellation(
+    core, media, season, worker_setup, monkeypatch
+):
+    _, _, _, service = core
+    worker, _, _ = worker_setup
+    service.create_from_metadata(CreateTask(media_id="42", kind="tv", season=1), media, season, 1)
+    started, stopped = asyncio.Event(), asyncio.Event()
+
+    async def group(*args, **kwargs):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            stopped.set()
+
+    monkeypatch.setattr(worker, "_run_group", group)
+    running = asyncio.create_task(worker.run_due(force=True))
+    await asyncio.wait_for(started.wait(), 2)
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+    assert stopped.is_set()
+    assert worker.search_section is None
+    assert not worker.lock.locked()

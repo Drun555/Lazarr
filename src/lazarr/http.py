@@ -1,39 +1,6 @@
-"""HTTP response lifecycle and security headers."""
+"""HTTP security headers."""
 
-import asyncio
 from starlette.datastructures import MutableHeaders
-from starlette.responses import FileResponse as StarletteFileResponse
-
-
-class FileResponse(StarletteFileResponse):
-    """Stop reading a media file as soon as its client disconnects."""
-
-    # Amortize worker-thread handoffs for high-bitrate media. Awaiting each
-    # send still applies backpressure, including while a player is paused.
-    chunk_size = 1024 * 1024
-
-    async def __call__(self, scope, receive, send):
-        if scope["type"] != "http":
-            return await super().__call__(scope, receive, send)
-
-        async def disconnected():
-            while True:
-                if (await receive())["type"] == "http.disconnect":
-                    return
-
-        response = asyncio.create_task(super().__call__(scope, receive, send))
-        listener = asyncio.create_task(disconnected())
-        try:
-            done, _ = await asyncio.wait((response, listener), return_when=asyncio.FIRST_COMPLETED)
-            for task in done:
-                task.result()
-        finally:
-            # Edge cancellation lets FileResponse await file.close() while
-            # unwinding, unlike a cancelled AnyIO scope that cancels close too.
-            for task in (response, listener):
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(response, listener, return_exceptions=True)
 
 
 class SecurityHeadersMiddleware:

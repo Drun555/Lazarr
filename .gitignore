@@ -11,6 +11,8 @@ build/
 dist/
 data/
 downloads/
+Downloads/
 .env
 
 node_modules/
+.agents/skills/lazarr-development/SKILL.md

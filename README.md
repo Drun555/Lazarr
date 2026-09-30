@@ -17,17 +17,19 @@
 Откройте [localhost:8000](http://localhost:8000), создайте аккаунт и пройдите настройку. Не забудьте добавить в закладки.
 
 
-## Клиенты, которые вроде работают:
+## Медиатека и просмотр
 
-- Android TV: [Fladder](https://github.com/DonutWare/Fladder) / [Wholphin](https://github.com/damontecres/Wholphin)
-- Android / Windows: [Fladder](https://github.com/DonutWare/Fladder)
-- Apple: [Infuse](https://firecore.com/infuse)
+Lazarr ищет, скачивает и проверяет медиа, раскладывает фильмы, сериалы и аниме,
+сохраняет описания в NFO и изображения рядом с видео. Для просмотра подключите
+отдельный Jellyfin Server к этой библиотеке. Клиенты подключаются к Jellyfin;
+Lazarr больше не предоставляет Jellyfin API.
 
-Загрузки сохраняются в %USERPROFILE%\Downloads\Lazarr.
+Загрузки сохраняются в папку `Downloads` рядом с `compose.yaml`.
 
 ### Структура скачанных файлов
 
 Оригиналы раздач хранятся в `downloads/source`, а человеческая структура фильмов,
-сезонов и эпизодов с относительными симлинками — в `downloads/user`. Старая
+сезонов и эпизодов с относительными симлинками — в `downloads/user/Movies`,
+`downloads/user/Series` и `downloads/user/Anime`. Старая
 структура мигрирует автоматически при запуске. Подробности восстановления,
 удаления и настройки Docker Desktop/WSL2: [хранение загрузок](docs/download-storage.md).

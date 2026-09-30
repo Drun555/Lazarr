@@ -174,7 +174,6 @@ async function setup(){
   w.HTMLDialogElement.prototype.showModal=function(){this.open=true};
   w.HTMLDialogElement.prototype.close=function(){this.open=false};
   const defaults={audio_languages:['ru'],subtitle_languages:[],min_resolution:720,max_resolution:1080,keyword:''};
-  const jellyfin={audio_languages:['ja','ru'],subtitle_languages:['en','ru']};
   let activity={running:false,state:'idle',pending_requests:0,history:[]};
   const status=()=>({engine_available:true,content_providers:['demo'],search:activity});
   const tasks=[];
@@ -187,7 +186,7 @@ async function setup(){
   w.fetch=async(url,options={})=>{
     const payload=options.body?JSON.parse(options.body):undefined;calls.push({url,method:options.method,payload});
     let result;
-    if(url==='/api/v1/settings')result={defaults,jellyfin,prefer_full_subtitles:true,theme_color:'purple',movie_path:'/tmp/movies',series_path:'/tmp/series',search_start:'00:00',seed_ratio:1,plugin_repository:''};
+    if(url==='/api/v1/settings')result={defaults,prefer_full_subtitles:true,theme_color:'purple',movie_path:'/tmp/movies',series_path:'/tmp/series',search_start:'00:00',seed_ratio:1,plugin_repository:''};
     else if(url==='/api/v1/storage')result={roots:[{source:'/downloads/source',user:'/downloads/user'}],links:12};
     else if(url==='/api/v1/status')result=status();
     else if(url==='/api/v1/telegram')result={enabled:true,token_configured:true,bot_username:'test_bot',error:''};
@@ -456,24 +455,6 @@ test('accent presets preview immediately and save with settings',async()=>{
     await settle();await settle();
     const saved=calls.find(c=>c.url==='/api/v1/settings'&&c.method==='PUT');
     assert.equal(saved.payload.theme_color,'green');
-    assert.deepEqual(errors,[]);
-  }finally{dom.window.close();}
-});
-
-test('Jellyfin language priorities save independently of task defaults',async()=>{
-  const {dom,w,document:d,calls,errors}=await setup();
-  try{
-    d.querySelector('[data-tab=settings]').click();await settle();await settle();
-    const audio=d.querySelector('[data-language-picker=jellyfin_audio_languages]');
-    const subtitles=d.querySelector('[data-language-picker=jellyfin_subtitle_languages]');
-    assert.deepEqual([...audio.querySelectorAll('input[type=hidden]')].map(i=>i.value),['ja','ru']);
-    assert.deepEqual([...subtitles.querySelectorAll('input[type=hidden]')].map(i=>i.value),['en','ru']);
-    audio.querySelector('[data-remove-language=ja]').click();
-    d.querySelector('#settings-form').dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}));
-    await settle();await settle();
-    const saved=calls.find(c=>c.url==='/api/v1/settings'&&c.method==='PUT');
-    assert.deepEqual(saved.payload.jellyfin,{audio_languages:['ru'],subtitle_languages:['en','ru']});
-    assert.deepEqual(saved.payload.defaults.audio_languages,['ru']);
     assert.deepEqual(errors,[]);
   }finally{dom.window.close();}
 });
@@ -754,7 +735,7 @@ test('media task offers a descriptive pause button without task-wide release sel
   }finally{dom.window.close();}
 });
 
-test('one release can be selected only for the expanded season',async()=>{
+test('existing release picker adds zero-match releases and removal clears all assigned files',async()=>{
   const {dom,w,document:d,calls,errors,setTasks,setTaskChoices,setLibrary}=await setup();
   try{
     const task={id:7,media_id:7,title:'Show',seasons:[{season:1},{season:2}],subtasks:[
@@ -768,26 +749,42 @@ test('one release can be selected only for the expanded season',async()=>{
       {id:2,season:2,episode:1,title:'S2E1',released:true,subtasks:[{id:2,task_id:7,selected_candidate_id:91}],files:[]},
       {id:3,season:2,episode:2,title:'S2E2',released:true,subtasks:[{id:3,task_id:7}],files:[]}
     ]});
-    setTaskChoices([{id:91,total:2,matched:2,candidate:{title:'Show S02',provider:'demo',url:'https://example.org/s02',size:1024,seeds:4}}]);
+    setTaskChoices([{id:91,release_id:9,total:2,matched:0,candidate:{title:'Show S02',provider:'demo',url:'https://example.org/s02',size:1024,seeds:4}}]);
     d.querySelector('[data-tab=library]').click();await settle();await settle();
     d.querySelector('[data-library-media="7"]').click();await settle();await settle();
     const season=d.querySelector('[data-season="2"]');season.open=true;
     assert.equal(season.querySelector('[data-season-mapping="7"]').textContent,'Сопоставить файлы');
     assert.equal(season.querySelector('[data-map-files]'),null);
-    const button=season.querySelector('[data-season-candidates="7"]');
-    assert.equal(button.textContent,'Выбрать раздачу для сезона');
-    button.click();await settle();await settle();
-    assert.equal(calls.some(call=>call.url==='/api/v1/tasks/7/seasons/2/candidates'),true);
-    assert.match(d.querySelector('#modal-title').textContent,/сезона 2/);
-    assert.match(d.querySelector('#modal-body').textContent,/2 из 2/);
-    const manual=d.querySelector('#manual-candidate-form');
-    manual.elements.url.value='https://nyaa.si/view/322';
-    manual.dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}));await settle();await settle();
-    assert.deepEqual(calls.find(call=>call.url==='/api/v1/tasks/7/seasons/2/candidates/manual').payload,{url:'https://nyaa.si/view/322'});
-    d.querySelector('[data-choose-season="91"]').click();await settle();await settle();
-    const call=calls.find(item=>item.url==='/api/v1/tasks/7/seasons/2/candidates/91/choice');
-    assert.equal(call.method,'POST');assert.deepEqual(call.payload,{});
-    assert.equal(calls.some(item=>item.url==='/api/v1/candidates/91/choice-all'),false);
+    assert.equal(season.querySelector('[data-season-candidates]'),null);
+    const original=w.fetch;
+    const mapping={episodes:[{subtask_id:2,number:1,title:'S2E1',release_id:null,binding:null}],releases:[]};
+    w.fetch=async(url,options={})=>{
+      if(!url.includes('/mapping'))return original(url,options);
+      const payload=options.body?JSON.parse(options.body):null;calls.push({url,method:options.method,payload});
+      if(url.endsWith('/releases')){mapping.releases=[{id:9,title:'Show S02',revision:'r1',files:[{index:0,path:'Zero.mkv',kind:'video',related:[1]},{index:1,path:'Zero.flac',kind:'audio',related:[]}]}];return {ok:true,status:200,json:async()=>({release_id:9})};}
+      return {ok:true,status:200,json:async()=>mapping};
+    };
+    season.querySelector('[data-season-mapping]').click();await settle();await settle();
+    input(w,d.querySelector('#mapping-season-title'),'Черновик');
+    d.querySelector('#mapping-existing-release').click();await settle();await settle();
+    assert.ok(d.querySelector('#mapping-release-picker'));
+    assert.match(d.querySelector('#mapping-release-picker').textContent,/0 из 2/);
+    assert.equal(d.querySelector('[data-mapping-candidate="91"] button:last-child').disabled,false);
+    d.querySelector('[data-mapping-candidate="91"]').click();await settle();await settle();
+    assert.deepEqual(calls.find(call=>call.url.endsWith('/mapping/releases')).payload,{candidate_id:91});
+    assert.equal(d.querySelector('#mapping-season-title').value,'Черновик');
+    d.querySelector('[data-mapping-file="9:0"]').click();d.querySelector('[data-mapping-episode="2"]').click();
+    assert.equal(d.querySelectorAll('.mapping-table [data-mapping-file]').length,2);
+    d.querySelector('[data-mapping-remove-release="9"]').click();
+    assert.equal(d.querySelector('.mapping-release'),null);
+    assert.equal(d.querySelector('.mapping-table [data-mapping-file]'),null);
+    d.querySelector('#mapping-save').click();await settle();await settle();
+    const saved=calls.find(call=>call.method==='PUT'&&call.url.endsWith('/mapping')).payload;
+    assert.deepEqual(saved.pool_release_ids,[]);
+    assert.equal(saved.rows[0].release_id,null);
+    assert.equal(saved.rows[0].video_index,null);
+    assert.deepEqual(saved.rows[0].track_indices,[]);
+    assert.equal(calls.some(call=>call.url.includes('/choice')),false);
     assert.deepEqual(errors,[]);
   }finally{dom.window.close();}
 });
@@ -905,13 +902,15 @@ test('download a missing season extends the media task without opening search',a
   const {dom,document:d,errors,calls,setTasks,setLibrary}=await setup();
   try{
     setTasks([{id:7,media_id:2,title:'Show',season:1,canonical_season:1,subtasks:[],requirements:{audio_languages:['ru'],subtitle_languages:[],min_resolution:720,max_resolution:1080},paused:false}]);
-    const metadata={provider:'tmdb',id:'42',kind:'tv',title:'Show',year:2020,overview:'Описание',genres:[],seasons:[{number:1,title:'Сезон 1',episode_count:8},{number:2,title:'Сезон 2',episode_count:10},{number:3,title:'Сезон 3',episode_count:6}],episode_numbering:{}};
+    const metadata={provider:'tmdb',id:'42',kind:'tv',title:'Show',year:2020,overview:'Описание',genres:[],seasons:[{number:1,title:'Сезон 1',episode_count:8},{number:2,title:'Каменный океан',episode_count:10},{number:3,title:'Сезон 3',episode_count:6}],episode_numbering:{}};
     setLibrary([{id:'series',name:'Сериалы',items:[{id:2,title:'Show',year:2020,taxonomy_known:true}]},{id:'movies',name:'Кино',items:[]},{id:'anime',name:'Аниме',items:[]}],{id:2,title:'Show',kind:'tv',year:2020,metadata,seasons:metadata.seasons,task_count:1,last_search_at:1,episodes:[{id:1,season:1,episode:1,title:'Первая',air_date:'2020-01-01',released:true,statuses:['queued'],subtasks:[{id:1,task_id:7,status:'queued'}],files:[]}]});
     d.querySelector('[data-tab=library]').click();await settle();await settle();
     d.querySelector('[data-library-media="2"]').click();await settle();await settle();
     assert.equal(d.querySelectorAll('.library-season').length,3);
     assert.equal(d.querySelectorAll('.library-season.is-unrequested').length,2);
     assert.equal(d.querySelector('[data-season="2"]').open,false);
+    assert.match(d.querySelector('[data-season="2"] summary strong').textContent,/Сезон 2 · Каменный океан/);
+    assert.equal(d.querySelector('[data-season="1"] summary strong').textContent,'Сезон 1');
     d.querySelector('[data-download-season="3"]').click();await settle();await settle();
     assert.equal(d.querySelector('#tab-search').hidden,true);
     assert.equal(d.querySelector('#selection').hidden,true);
@@ -955,6 +954,70 @@ test('queued search shows its scheduled local time without internal ID or lane',
   }finally{dom.window.close();}
 });
 
+test('season mapping removes draft rows, returns files and defers deletion until save',async()=>{
+  const {dom,w,document:d,calls,errors}=await setup();
+  try{
+    const data={episodes:[{subtask_id:1,number:1,title:'Первый',release_id:7,binding:{video_index:0,tracks:[]}}],releases:[{id:7,title:'Раздача',files:[{index:0,path:'One.mkv',kind:'video',related:[]}]}]};
+    const original=w.fetch;
+    w.fetch=async(url,options={})=>{
+      if(!url.includes('/mapping'))return original(url,options);
+      calls.push({url,method:options.method,payload:options.body?JSON.parse(options.body):null});
+      return {ok:true,status:200,json:async()=>data};
+    };
+    await w.testSeasonMappingDialog(1,1);
+    d.querySelector('#mapping-add-episode').click();
+    d.querySelector('[data-mapping-delete-episode="-1"]').click();
+    d.querySelector('[data-mapping-delete-episode="1"]').click();
+    assert.equal(d.querySelector('[data-mapping-row]'),null);
+    assert.ok(d.querySelector('.mapping-bank [data-mapping-file="7:0"]'));
+    assert.equal(calls.filter(call=>call.method==='PUT'||call.method==='POST').length,0);
+    w.prompt=()=> 'https://nyaa.si/view/1';
+    d.querySelector('#mapping-toggle-release').click();
+    await settle();await settle();
+    assert.equal(d.querySelector('[data-mapping-row]'),null);
+    d.querySelector('#mapping-save').click();await settle();await settle();
+    const saved=calls.find(call=>call.method==='PUT').payload;
+    assert.deepEqual(saved.deleted_subtask_ids,[1]);
+    assert.deepEqual(saved.rows,[]);
+    assert.deepEqual(errors,[]);
+  }finally{dom.window.close();}
+});
+
+test('season mapping picker filters occupied video rows and allows multiple tracks',async()=>{
+  const {dom,w,document:d,errors}=await setup();
+  try{
+    const data={episodes:[{subtask_id:1,number:1,title:'Первый',release_id:7,binding:{video_index:0,tracks:[]}},{subtask_id:2,number:2,title:'Второй',release_id:null,binding:null}],releases:[{id:7,title:'Раздача',files:[
+      {index:0,path:'One.mkv',kind:'video',related:[]},{index:1,path:'Two.mkv',kind:'video',related:[2]},
+      {index:2,path:'Two.flac',kind:'audio',related:[]},{index:3,path:'Extra.flac',kind:'audio',related:[]},
+      {index:4,path:'Three.mkv',kind:'video',related:[]}
+    ]}]};
+    const original=w.fetch;
+    w.fetch=async(url,options)=>url.endsWith('/mapping')?{ok:true,status:200,json:async()=>data}:original(url,options);
+    await w.testSeasonMappingDialog(1,1);
+    const clickFile=key=>d.querySelector(`.mapping-bank [data-mapping-file="${key}"]`).click();
+    clickFile('7:1');
+    assert.deepEqual([...d.querySelectorAll('[data-mapping-episode]')].map(x=>x.dataset.mappingEpisode),['2']);
+    d.querySelector('[data-mapping-episode="2"]').click();
+    assert.ok(d.querySelector('[data-mapping-row="2"][data-mapping-kind="audio"] [data-mapping-file="7:2"]'));
+    clickFile('7:4');
+    assert.match(d.querySelector('#mapping-episode-picker').textContent,/Все серии уже заняты/);
+    d.querySelector('[data-mapping-row="1"] [data-mapping-remove]').click();
+    clickFile('7:4');
+    assert.deepEqual([...d.querySelectorAll('[data-mapping-episode]')].map(x=>x.dataset.mappingEpisode),['1']);
+    clickFile('7:3');
+    assert.deepEqual([...d.querySelectorAll('[data-mapping-episode]')].map(x=>x.dataset.mappingEpisode),['2']);
+    d.querySelector('[data-mapping-episode="2"]').click();
+    assert.equal(d.querySelectorAll('[data-mapping-row="2"][data-mapping-kind="audio"] [data-mapping-file]').length,2);
+    clickFile('7:4');
+    d.querySelector('#mapping-episode-picker button').dispatchEvent(new w.KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}));
+    assert.equal(d.querySelector('#mapping-episode-picker'),null);
+    assert.equal(d.activeElement.dataset.mappingFile,'7:4');
+    clickFile('7:4');clickFile('7:4');
+    assert.equal(d.querySelector('#mapping-episode-picker'),null);
+    assert.deepEqual(errors,[]);
+  }finally{dom.window.close();}
+});
+
 test('season mapping prefills files, moves smart groups, rejects wrong columns and preserves drafts when adding',async()=>{
   const {dom,w,document:d,errors,calls}=await setup();
   try{
@@ -975,6 +1038,7 @@ test('season mapping prefills files, moves smart groups, rejects wrong columns a
     assert.equal(d.querySelectorAll('.mapping-bank [data-mapping-file="7:0"]').length,0);
     assert.equal(cell(1,'video').querySelector('[data-mapping-file]').dataset.mappingFile,'7:0');
     input(w,d.querySelector('[data-mapping-title="1"]'),'Моё имя');
+    input(w,d.querySelector('#mapping-season-title'),'Мой сезон');
     // Drag a video: its unique related audio and subtitle follow.
     const drop=new w.Event('drop',{bubbles:true,cancelable:true});drop.dataTransfer={getData:()=> '7:2'};cell(2,'video').dispatchEvent(drop);
     assert.equal(cell(2,'audio').querySelector('[data-mapping-file]').dataset.mappingFile,'7:3');
@@ -999,8 +1063,10 @@ test('season mapping prefills files, moves smart groups, rejects wrong columns a
     assert.equal(calls.some(call=>call.url.endsWith('/mapping/episodes')),false);
     assert.equal(d.querySelector('[data-mapping-title="1"]').value,'Моё имя');
     assert.equal(cell(2,'video').querySelector('[data-mapping-file]').dataset.mappingFile,'7:2');
+    assert.equal(d.querySelector('#mapping-season-title').value,'Мой сезон');
     input(w,d.querySelector('[data-mapping-number="1"]'),'6');
     d.querySelector('#mapping-save').click();await settle();await settle();
+    assert.equal(calls.find(call=>call.method==='PUT'&&call.url.endsWith('/mapping')).payload.season_title,'Мой сезон');
     const saved=calls.find(call=>call.method==='PUT'&&call.url.endsWith('/mapping')).payload.rows;
     assert.equal(saved[2].subtask_id,3);assert.equal(saved[2].number,5);assert.equal(saved[2].title,'Бонус');
     assert.equal(saved[0].number,6);assert.equal(saved[0].title,'Моё имя');assert.equal(saved[1].video_index,2);assert.deepEqual(saved[1].track_indices,[]);
@@ -1008,7 +1074,7 @@ test('season mapping prefills files, moves smart groups, rejects wrong columns a
   }finally{dom.window.close();}
 });
 
-test('manual release form opens at the top and shows a spinner through errors and retry without losing new rows',async()=>{
+test('manual release prompt supports cancellation and retry without losing new rows',async()=>{
   const {dom,w,document:d,errors}=await setup();
   try{
     const data={episodes:[{subtask_id:1,number:1,title:'Первый',release_id:null,binding:null}],releases:[]};
@@ -1019,24 +1085,23 @@ test('manual release form opens at the top and shows a spinner through errors an
       return {ok:true,status:200,json:async()=>data};
     };
     await w.testSeasonMappingDialog(1,1);
-    assert.equal(d.querySelector('#mapping-add-release').hidden,true);
+    assert.equal(d.querySelector('#mapping-add-release'),null);
+    w.prompt=()=>null;d.querySelector('#mapping-toggle-release').click();
+    assert.equal(finish,undefined);
     assert.match(d.querySelector('.mapping-smart').title,/автоматически.*аудиофайлы.*субтитры/);
     assert.equal(d.querySelector('.mapping-placeholder').closest('td').classList.contains('mapping-drop-empty'),true);
     d.querySelector('#mapping-add-episode').click();
-    d.querySelector('#mapping-toggle-release').click();
-    assert.equal(d.querySelector('#mapping-add-release').hidden,false);
-    assert.ok(d.querySelector('.mapping-bank #mapping-add-release'));
-    input(w,d.querySelector('#mapping-add-release input'),'https://nyaa.si/view/1');
-    const submit=()=>d.querySelector('#mapping-add-release').dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}));
-    submit();
+    w.prompt=(message,value)=>{assert.match(message,/URL/);return 'https://nyaa.si/view/1';};
+    const submit=async()=>{d.querySelector('#mapping-toggle-release').click();await settle();};
+    await submit();
     assert.ok(d.querySelector('.mapping-spinner'));
-    assert.equal(d.querySelector('#mapping-add-release button').disabled,true);
+    assert.equal(d.querySelector('#mapping-toggle-release').disabled,true);
     finish({ok:false,status:422,json:async()=>({detail:'Trawl временно недоступен'})});await settle();await settle();
     assert.equal(d.querySelector('.mapping-spinner'),null);
-    assert.match(d.querySelector('#mapping-add-release .form-error').textContent,/Trawl/);
-    assert.equal(d.querySelector('#mapping-add-release input').value,'https://nyaa.si/view/1');
-    assert.equal(d.querySelector('#mapping-add-release button').disabled,false);
-    submit();assert.ok(d.querySelector('.mapping-spinner'));
+    assert.match(d.querySelector('#mapping-feedback').textContent,/Trawl/);
+    w.prompt=(message,value)=>{assert.equal(value,'https://nyaa.si/view/1');return value;};
+    assert.equal(d.querySelector('#mapping-toggle-release').disabled,false);
+    await submit();assert.ok(d.querySelector('.mapping-spinner'));
     finish({ok:true,status:200,json:async()=>({ok:true})});await settle();await settle();
     assert.equal(d.querySelector('.mapping-spinner'),null);
     assert.equal(d.querySelector('[data-mapping-title="-1"]').value,'Эпизод 2');
@@ -1057,9 +1122,8 @@ test('refreshing a familiar release remaps draft indices and sends its current r
     };
     await w.testSeasonMappingDialog(1,1);
     input(w,d.querySelector('[data-mapping-title="1"]'),'Моё имя');
-    d.querySelector('#mapping-toggle-release').click();
-    input(w,d.querySelector('#mapping-add-release input'),'https://nyaa.si/view/1');
-    d.querySelector('#mapping-add-release').dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}));await settle();await settle();
+    w.prompt=()=> 'https://nyaa.si/view/1';
+    d.querySelector('#mapping-toggle-release').click();await settle();await settle();
     assert.equal(d.querySelectorAll('.mapping-release').length,1);
     assert.equal(d.querySelector('[data-mapping-row="1"][data-mapping-kind="video"] [data-mapping-file]').dataset.mappingFile,'7:1');
     assert.equal(d.querySelector('[data-mapping-title="1"]').value,'Моё имя');
@@ -1250,6 +1314,33 @@ test('scored recommendation explains stages and opens mapping even from pending 
     d.querySelector('[data-choose="5"]').click();await settle();await settle();
     assert.ok(d.querySelector('#mapping-form'));
     assert.ok(!calls.some(c=>/\/choice$/.test(c.url)));
+    assert.deepEqual(errors,[]);
+  }finally{dom.window.close();}
+});
+
+test('special placement is fourth column only in specials and saves dependent selectors',async()=>{
+  const {dom,w,document:d,calls,errors}=await setup();
+  try{
+    const data={episodes:[{subtask_id:1,number:1,title:'Спецэпизод',release_id:null,binding:null,special_position:{mode:'auto',position:{airsafter_season:1},automatic:{airsafter_season:1}}}],releases:[],placement_seasons:[{number:1,episodes:[{number:1},{number:2}]},{number:2,episodes:[{number:1}]}]};
+    const original=w.fetch;
+    w.fetch=async(url,options={})=>{
+      if(!url.includes('/mapping'))return original(url,options);
+      calls.push({url,method:options.method,payload:options.body?JSON.parse(options.body):null});
+      return {ok:true,status:200,json:async()=>data};
+    };
+    await w.testSeasonMappingDialog(1,0);
+    assert.equal(d.querySelectorAll('.mapping-table th')[3].textContent,'Порядок показа');
+    assert.match(d.querySelector('.mapping-position').textContent,/После сезона 1/);
+    const change=(field,value)=>{const select=d.querySelector(`[data-position-field="${field}"]`);select.value=value;select.dispatchEvent(new w.Event('change',{bubbles:true}));};
+    change('kind','before');assert.equal(d.querySelectorAll('.mapping-position select').length,2);
+    change('kind','episode');assert.equal(d.querySelectorAll('.mapping-position select').length,3);
+    change('episode','');assert.equal(d.querySelectorAll('.mapping-position select').length,3);
+    d.querySelector('#mapping-save').click();assert.match(d.querySelector('#mapping-feedback').textContent,/Выберите сезон/);
+    change('episode','2');change('season','2');assert.equal(d.querySelector('[data-position-field=episode]').value,'1');
+    change('season','1');change('episode','2');
+    d.querySelector('#mapping-save').click();await settle();await settle();
+    assert.deepEqual(calls.find(call=>call.method==='PUT').payload.rows[0].special_position,{mode:'manual',airsbefore_season:1,airsbefore_episode:2});
+    await w.testSeasonMappingDialog(1,1);assert.equal(d.querySelector('.mapping-position'),null);
     assert.deepEqual(errors,[]);
   }finally{dom.window.close();}
 });

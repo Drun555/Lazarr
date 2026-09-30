@@ -248,3 +248,148 @@ def test_storage_status_is_authenticated_and_reports_errors(core):
         assert status["migration_error"] == "Source volume unavailable"
         assert Path(status["roots"][0]["source"]).name == "source"
         assert Path(status["roots"][0]["user"]).name == "user"
+
+
+async def test_nfo_updates_without_touching_video_and_unchanged_files(core, media, season, worker_setup):
+    from xml.etree import ElementTree as ET
+    from lazarr.models import Media
+
+    media.overview = "Plot <one> & two"
+    media.people = [{"Name": "Actor", "Type": "Actor", "Role": "Hero"}]
+    media.community_rating = 8.5
+    _, source, user = await completed_library(core, media, season, worker_setup)
+    show = next(user.rglob("tvshow.nfo"))
+    parsed = ET.parse(show)
+    assert parsed.findtext("plot") == "Plot <one> & two"
+    assert parsed.findtext("actor/role") == "Hero"
+    assert parsed.findtext("ratings/rating/value") == "8.5"
+    assert parsed.find("uniqueid[@type='tmdb']").text == "42"
+    episode = next(user.rglob("*S01E01*.nfo"))
+    assert ET.parse(episode).findtext("episode") == "1"
+    stamp = show.stat().st_mtime_ns
+    reconcile(core[1])
+    assert show.stat().st_mtime_ns == stamp
+    with core[1].session() as db:
+        row = db.scalar(select(Media))
+        row.metadata_json = {**row.metadata_json, "overview": "New plot"}
+    reconcile(core[1])
+    assert ET.parse(show).findtext("plot") == "New plot"
+    assert (source / "Show.S01E01.1080p.mkv").read_bytes() == b"episode 1"
+
+
+async def test_anime_reclassification_and_numbering_move_owned_files(core, media, season, worker_setup):
+    from xml.etree import ElementTree as ET
+    from lazarr.models import Media
+
+    _, source, user = await completed_library(core, media, season, worker_setup)
+    old = next(user.rglob("tvshow.nfo")).parent
+    foreign = old / "notes.txt"
+    foreign.write_text("keep")
+    with core[1].session() as db:
+        row = db.scalar(select(Media))
+        row.metadata_json = {
+            **row.metadata_json,
+            "genre_ids": [16],
+            "original_language": "ja",
+            "episode_numbering": {"1:1": [{"season": 2, "episode": 14}]},
+        }
+    reconcile(core[1])
+    assert not list((user / "Series").rglob("*.mkv"))
+    assert not list((user / "Series").rglob("*.nfo"))
+    assert foreign.read_text() == "keep"
+    episode = next((user / "Anime").rglob("*S02E14*.nfo"))
+    assert ET.parse(episode).findtext("season") == "2"
+    assert ET.parse(episode).findtext("episode") == "14"
+    assert ET.parse(episode.parent / "season.nfo").findtext("seasonnumber") == "2"
+    assert episode.with_suffix(".mkv").read_bytes() == b"episode 1"
+    assert (source / "Show.S01E01.1080p.mkv").is_file()
+
+
+async def test_sidecar_cleanup_preserves_foreign_metadata(core, media, season, worker_setup):
+    from lazarr.deletion import delete_selection
+
+    worker, _, user = await completed_library(core, media, season, worker_setup)
+    episode = next(user.rglob("*S01E01*.nfo"))
+    with core[1].session() as db:
+        row = db.get(ConfigEntry, MANIFEST)
+        row.value = {"entries": [e for e in row.value["entries"] if e["path"] != str(episode)]}
+    episode.write_text("foreign NFO")
+    reconcile(core[1])
+    assert episode.read_text() == "foreign NFO"
+    await delete_selection(worker, 1, 1)
+    assert episode.read_text() == "foreign NFO"
+    assert next(user.rglob("*S01E02*.nfo")).is_file()
+
+
+async def test_owned_metadata_symlink_never_overwrites_target(core, media, season, worker_setup, tmp_path):
+    _, _, user = await completed_library(core, media, season, worker_setup)
+    nfo = next(user.rglob("tvshow.nfo"))
+    nfo.unlink()
+    foreign = tmp_path / "private"
+    foreign.write_text("untouched")
+    nfo.symlink_to(foreign)
+    with pytest.raises(ValueError, match="symlink"):
+        reconcile(core[1])
+    assert foreign.read_text() == "untouched"
+
+
+async def test_artwork_cache_failure_and_deletion_during_fetch(core, media, season, worker_setup):
+    import httpx
+    from types import SimpleNamespace
+    from lazarr.library_metadata import sync_artwork
+    from lazarr.models import Media
+
+    media.poster = "https://image.tmdb.org/t/p/w342/example.jpg"
+    _, _, user = await completed_library(core, media, season, worker_setup)
+    image = next(user.rglob("tvshow.nfo")).parent / "poster.jpg"
+    jpeg = b"\xff\xd8\xfftest"
+    calls = []
+
+    def transport(request):
+        calls.append(request.url)
+        return httpx.Response(200, headers={"content-type": "image/jpeg"}, content=jpeg)
+
+    ctx = SimpleNamespace(db=core[1], config=core[0], poster_transport=httpx.MockTransport(transport))
+    await sync_artwork(ctx)
+    assert image.read_bytes() == jpeg
+    stamp = image.stat().st_mtime_ns
+    await sync_artwork(ctx)
+    assert len(calls) == 1 and image.stat().st_mtime_ns == stamp
+    with core[1].session() as db:
+        row = db.scalar(select(Media))
+        row.metadata_json = {**row.metadata_json, "poster": "https://image.tmdb.org/t/p/w342/new.jpg"}
+    reconcile(core[1])
+    ctx.poster_transport = httpx.MockTransport(lambda _: httpx.Response(503))
+    await sync_artwork(ctx)
+    assert image.read_bytes() == jpeg
+    with core[1].session() as db:
+        assert db.get(ConfigEntry, "storage.status").value["metadata_errors"]
+
+    def delete_during_fetch(request):
+        with core[1].session() as db:
+            row = db.scalar(select(Media))
+            row.metadata_json = {**row.metadata_json, "poster": None}
+        reconcile(core[1])
+        return httpx.Response(200, headers={"content-type": "image/jpeg"}, content=jpeg)
+
+    ctx.poster_transport = httpx.MockTransport(delete_during_fetch)
+    await sync_artwork(ctx)
+    assert not image.exists()
+
+
+def test_movie_nfo_and_anime_movie_stays_in_movies():
+    from lazarr.library_metadata import media_nfo
+    from lazarr.library import library_kind
+    from lazarr.models import Media
+
+    movie = Media(
+        provider="tmdb",
+        external_id="10",
+        kind="movie",
+        title="Movie",
+        year=2020,
+        metadata_json={"genre_ids": [16], "original_language": "ja", "collection": "Collection"},
+    )
+    assert library_kind(movie) == "movies"
+    nfo = media_nfo(movie)
+    assert nfo.tag == "movie" and nfo.findtext("set/name") == "Collection"

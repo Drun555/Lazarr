@@ -211,3 +211,115 @@ def test_delete_api_requires_auth_and_csrf(core, media, season):
         )
         assert client.request("DELETE", url, json={"delete_media": False}).status_code == 200
         assert client.get("/api/v1/tasks").json() == []
+
+
+def test_jellyfin_api_removed_and_legacy_settings_ignored(core):
+    from lazarr.config import Settings
+
+    settings = Settings.model_validate({"jellyfin": {"audio_languages": ["ja"]}})
+    assert "jellyfin" not in settings.model_dump()
+    with TestClient(create_app(core[0])) as client:
+        for route in ("/System/Info/Public", "/Items", "/Users/Me", "/Shows/NextUp", "/Videos/1/stream"):
+            assert client.get(route).status_code == 404
+        assert client.post("/Users/AuthenticateByName", json={}).status_code == 404
+        login(client)
+        assert "jellyfin" not in client.get("/api/v1/settings").json()
+        assert "settings-jellyfin" not in client.get("/").text
+
+
+def test_create_special_season_fetches_dictionary_season_catalog(core, monkeypatch):
+    from lazarr.models import ConfigEntry
+    from lazarr.sdk import EpisodeInfo, MetadataItem, SeasonInfo
+
+    config, db, _, _ = core
+    item = MetadataItem(
+        id="46195",
+        kind="tv",
+        title="Specials regression",
+        seasons=[{"number": n, "episode_count": 1} for n in (0, 1, 2)],
+    )
+    calls = []
+
+    async def get_media(self, kind, media_id):
+        return item
+
+    async def get_season(self, media_id, number):
+        calls.append(number)
+        return SeasonInfo(
+            number=number,
+            episodes=[
+                EpisodeInfo(
+                    id=str(number + 10),
+                    number=1,
+                    title=f"Episode {number}",
+                    air_date={0: "2020-06-01", 1: "2020-01-01", 2: "2021-01-01"}[number],
+                )
+            ],
+        )
+
+    with TestClient(create_app(config)) as client:
+        login(client)
+        ctx = client.app.state.ctx
+        monkeypatch.setattr(ctx.plugins.classes["tmdb"], "get_media", get_media)
+        monkeypatch.setattr(ctx.plugins.classes["tmdb"], "get_season", get_season)
+        response = client.post(
+            "/api/v1/tasks",
+            json={
+                "provider": "tmdb",
+                "media_id": "46195",
+                "kind": "tv",
+                "requirements": {
+                    "audio_languages": ["ja"],
+                    "subtitle_languages": ["ru"],
+                    "min_resolution": 1080,
+                    "max_resolution": 1080,
+                    "keyword": "",
+                },
+                "seasons": [{"season": 0, "episodes": None}],
+            },
+        )
+        assert response.status_code == 201, response.text
+        assert calls == [0, 1, 2]
+        task_id = response.json()["id"]
+        mapping = client.get(f"/api/v1/tasks/{task_id}/seasons/0/mapping")
+        assert mapping.status_code == 200, mapping.text
+        assert mapping.json()["episodes"][0]["special_position"]["position"] == {"airsafter_season": 1}
+        assert [s["number"] for s in mapping.json()["placement_seasons"]] == [1, 2]
+        # Only specials are scheduled; other seasons were fetched solely for their dates.
+        tasks = client.get("/api/v1/tasks").json()
+        assert len(tasks[0]["subtasks"]) == 1
+        with db.session() as session:
+            session.get(ConfigEntry, "special_catalog.1").value = {"updated": 0, "seasons": []}
+        refreshed = client.get(f"/api/v1/tasks/{task_id}/seasons/0/mapping")
+        assert refreshed.status_code == 200, refreshed.text
+        assert refreshed.json()["episodes"][0]["special_position"]["position"] == {"airsafter_season": 1}
+        assert calls == [0, 1, 2, 1, 2]
+
+
+def test_task_pause_does_not_wait_for_search_lock(core, media, season, monkeypatch):
+    from unittest.mock import AsyncMock, Mock
+    from lazarr.models import Task
+
+    config, db, _, service = core
+    identity = service.create_from_metadata(CreateTask(media_id="42", kind="tv", season=1), media, season, 1)
+    with TestClient(create_app(config)) as client:
+        login(client)
+        worker = client.app.state.ctx.worker
+
+        class BusySearchLock:
+            async def __aenter__(self):
+                raise AssertionError("Pause must not acquire the search lock")
+
+            async def __aexit__(self, *args):
+                pass
+
+        monkeypatch.setattr(worker, "lock", BusySearchLock())
+        monkeypatch.setattr(worker, "cancel_media_search", Mock())
+        monkeypatch.setattr(worker, "sync_consumers", AsyncMock())
+        for paused in (True, False):
+            response = client.patch(f"/api/v1/tasks/{identity}", json={"paused": paused})
+            assert response.status_code == 200, response.text
+            with db.session() as session:
+                assert session.get(Task, identity).paused is paused
+        worker.cancel_media_search.assert_called_once_with(identity)
+        assert worker.sync_consumers.await_count == 2

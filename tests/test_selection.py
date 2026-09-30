@@ -152,9 +152,9 @@ async def test_worker_filters_before_inspect_and_resolve_and_orders_candidates(
         1,
     )
     await worker.run_due()
-    assert inspected == resolved == ["2", "1"]
+    assert inspected == resolved == ["2", "1", "3"]
     p = worker.progress.snapshot()
-    assert p["candidates_found"] == 4 and p["candidates_filtered"] == 2 and p["candidates_checked"] == 2
+    assert p["candidates_found"] == 4 and p["candidates_filtered"] == 1 and p["candidates_checked"] == 3
     assert len(engine.plans) == 1
 
 

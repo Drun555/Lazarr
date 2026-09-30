@@ -1,7 +1,7 @@
 # Windows: install and start Docker Desktop (Linux containers), then run
 # docker compose up -d
 # Open http://localhost:8000
-# Downloads: %USERPROFILE%\Downloads\Lazarr (Загрузки\Lazarr).
+# Downloads: ./Downloads next to compose.yaml.
 name: lazarr
 
 services:
@@ -27,7 +27,7 @@ services:
       - lazarr-data:/data
       - lazarr-plugins:/plugins
       - type: bind
-        source: ${LAZARR_DOWNLOADS:-${USERPROFILE:-${HOME:-.}}/Downloads/Lazarr}
+        source: ${LAZARR_DOWNLOADS:-./Downloads}
         target: /downloads
         bind:
           create_host_path: true

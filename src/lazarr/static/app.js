@@ -10,6 +10,7 @@ const csrf = () => $('meta[name="csrf-token"]').content;
 const applyThemeColor = color => { document.documentElement.dataset.accent=color||'purple'; };
 document.addEventListener('change',event=>{if(event.target.matches('input[name="theme_color"]'))applyThemeColor(event.target.value);});
 const state = {tab:'search', settings:null, selected:null, tasks:[], generation:0, expanded:new Set()};
+const pendingTaskPauses = new Set();
 const statuses = {removed:'Удалено · выберите раздачу', queued:'В очереди', searching:'Поиск', starting:'Начало скачивания', downloading:'Скачивание', ready:'Готово к просмотру', done:'Готово', waiting_release:'Ожидание выхода', paused:'На паузе', error:'Ошибка', needs_selection:'Требуется выбор', seeding:'На раздаче', stopped:'Остановлено', replaced:'Заменено'};
 const statusPill = status => `<span class="pill ${esc(status)}">${esc(statuses[status] || status)}</span>`;
 const bytes = value => { if (!value) return '0 Б'; const units=['Б','КиБ','МиБ','ГиБ','ТиБ']; const power=Math.min(4,Math.floor(Math.log(value)/Math.log(1024))); return `${(value/1024**power).toFixed(power>1?1:0)} ${units[power]}`; };
@@ -23,11 +24,27 @@ async function api(path, method='GET', payload) {
   if (!response.ok) { const detail=result.detail; throw new Error(Array.isArray(detail)?detail.map(e=>e.msg).join('; '):detail || 'Не удалось выполнить запрос'); }
   return result;
 }
-async function submitForm(form, callback) { const button=$('button[type="submit"]',form); const error=$('.form-error',form); if(error)error.textContent=''; if(button)button.disabled=true; try { await callback(); } catch(exc) { if(error)error.textContent=exc.message; else toast(exc.message,true); } finally { if(button)button.disabled=false; } }
+function buttonBusy(button,busy){
+  if(!button)return;
+  button.disabled=busy;
+  if(busy){button.setAttribute('aria-busy','true');if(!button.querySelector('.mapping-spinner'))button.insertAdjacentHTML('afterbegin','<span class="mapping-spinner" aria-hidden="true"></span> ');}
+  else{button.removeAttribute('aria-busy');button.querySelector('.mapping-spinner')?.remove();}
+}
+async function submitForm(form, callback) {
+  if(form.dataset.submitting)return;
+  form.dataset.submitting='true';
+  const button=$('button[type="submit"]',form),error=$('.form-error',form);
+  const spinner=['task-form','manual-candidate-form'].includes(form.id);
+  if(error)error.textContent='';
+  if(spinner)buttonBusy(button,true);else if(button)button.disabled=true;
+  try{await callback();}
+  catch(exc){if(error)error.textContent=exc.message;else toast(exc.message,true);}
+  finally{delete form.dataset.submitting;if(spinner)buttonBusy(button,false);else if(button)button.disabled=false;}
+}
 function openModal(title, content) { $('#modal-title').textContent=title; $('#modal-body').innerHTML=content; if(!$('#modal').open)$('#modal').showModal(); }
 
 const backgroundTaskNames={'next-up':'NextUp · следующий эпизод','library-detail':'Подготовка карточки','trickplay':'Trickplay · превью перемотки','chapter':'Thumbnail · кадр главы','image':'Обработка изображения','subtitle':'Извлечение субтитров','subtitle-interval':'Подготовка субтитров','attachment':'Извлечение вложения','probe':'Анализ медиа'};
-Object.assign(backgroundTaskNames,{'catalog':'Каталог','latest':'Последние добавления','item-detail':'Карточка Jellyfin','search':'Поиск раздач','metadata-refresh':'Обновление метаданных'});
+Object.assign(backgroundTaskNames,{'catalog':'Каталог','latest':'Последние добавления','search':'Поиск раздач','metadata-refresh':'Обновление метаданных'});
 let backgroundTasksTimer,backgroundTasksRequest;
 function renderProcessIndicator(items,downloads,selection){
   const active=items.filter(i=>['running','queued'].includes(i.state)),loading=downloads.filter(d=>['starting','downloading'].includes(d.state));
@@ -186,10 +203,10 @@ async function loadStorage() {
   const node=$('#storage-status');if(!node)return;
   try {
     const storage=await api('/storage');
-    node.textContent=[...storage.roots.map(r=>`Оригиналы: ${r.source}. Медиатека: ${r.user}.`),`Ссылок: ${storage.links}.`,storage.migration_error,storage.links_error,storage.capability_error,...(storage.warnings||[])].filter(Boolean).join(' \n');
+    node.textContent=[...storage.roots.map(r=>`Оригиналы: ${r.source}. Медиатека: ${r.user}.`),`Ссылок: ${storage.links}.`,storage.migration_error,storage.links_error,storage.capability_error,...(storage.warnings||[]),...(storage.metadata_errors||[])].filter(Boolean).join(' \n');
   } catch(error) { node.textContent=`Не удалось проверить хранилище: ${error.message}`; }
 }
-async function loadSettings() { loadStorage(); state.settings=await api('/settings'); applyThemeColor(state.settings.theme_color); const form=$('#settings-form'); $('#settings-requirements').innerHTML=requirementFields(state.settings.defaults,'default_'); $('#settings-jellyfin').innerHTML=languagePicker('jellyfin_audio_languages','Приоритет аудио',state.settings.jellyfin.audio_languages)+languagePicker('jellyfin_subtitle_languages','Приоритет субтитров',state.settings.jellyfin.subtitle_languages); for(const [key,value] of Object.entries(state.settings)){const field=form.elements[key];if(key==='defaults'||key==='jellyfin'||!field)continue;if(field.type==='checkbox')field.checked=Boolean(value);else field.value=value??'';} }
+async function loadSettings() { loadStorage(); state.settings=await api('/settings'); applyThemeColor(state.settings.theme_color); const form=$('#settings-form'); $('#settings-requirements').innerHTML=requirementFields(state.settings.defaults,'default_'); for(const [key,value] of Object.entries(state.settings)){const field=form.elements[key];if(key==='defaults'||!field)continue;if(field.type==='checkbox')field.checked=Boolean(value);else field.value=value??'';} }
 async function reorderProvider(source,target,after) {
   const ids=state.providers.filter(p=>p.kind==='content').map(p=>p.id),original=[...ids];
   if(source===target||!ids.includes(source)||!ids.includes(target))return;
@@ -436,7 +453,14 @@ document.addEventListener('click', async event=>{ const button=event.target.clos
   else if(button.dataset.mediaId)await selectMedia(button);
   else if(button.dataset.expand){const id=Number(button.dataset.expand);state.expanded.has(id)?state.expanded.delete(id):state.expanded.add(id);await refreshTasks();}
   else if(button.dataset.runTask){button.disabled=true;try{await api(`/tasks/${button.dataset.runTask}/search`,'POST',{});await refreshLibraryView();}finally{button.disabled=false;}}
-  else if(button.dataset.pauseTask){await api(`/tasks/${button.dataset.pauseTask}`,'PATCH',{paused:button.dataset.paused!=='true'});await refreshTasks();await refreshLibraryView();}
+  else if(button.dataset.pauseTask){
+    const id=button.dataset.pauseTask;
+    if(pendingTaskPauses.has(id))return;
+    pendingTaskPauses.add(id);button.disabled=true;button.setAttribute('aria-busy','true');
+    button.insertAdjacentHTML('afterbegin','<span class="mapping-spinner" aria-hidden="true"></span> ');
+    try{await api(`/tasks/${id}`,'PATCH',{paused:button.dataset.paused!=='true'});await refreshTasks();await refreshLibraryView();}
+    finally{pendingTaskPauses.delete(id);$$('[data-pause-task]').filter(node=>node.dataset.pauseTask===id).forEach(node=>{node.disabled=false;node.removeAttribute('aria-busy');node.querySelector('.mapping-spinner')?.remove();});}
+  }
   else if(button.dataset.deleteTask){const task=state.tasks.find(t=>t.id===Number(button.dataset.deleteTask));openModal('Удаление задачи',`<form id="delete-task-form" data-task="${task.id}" class="stack"><p>${esc(task.title)}</p><label class="check"><input type="checkbox" role="switch" name="delete_media">Удалить также медиа и связанные загрузки</label><p class="fine">Общие загрузки, нужные другим задачам, сохранятся. Удаление файлов необратимо.</p><div class="form-footer"><p class="form-error"></p><button type="submit" class="primary">Удалить задачу</button></div></form>`);}
   else if(button.dataset.editTask){const task=state.tasks.find(t=>t.id===Number(button.dataset.editTask));openModal('Требования задачи',`<form id="edit-task-form" data-task="${task.id}">${requirementFields(task.requirements)}<p class="fine">Новые требования применяются к ещё не скачанным сериям. Готовые файлы сохраняются.</p><div class="form-footer"><p class="form-error"></p><button class="primary" type="submit">Сохранить</button></div></form>`);}
   else if(button.dataset.searchAlternatives){button.disabled=true;button.textContent='Поиск раздач…';try{await api(`/subtasks/${button.dataset.searchAlternatives}/candidates/search`,'POST',{});await candidateDialog(Number(button.dataset.searchAlternatives));}finally{button.disabled=false;button.textContent='Найти другие раздачи';}}
@@ -479,7 +503,7 @@ document.addEventListener('submit', event=>{const form=event.target;if(!(form in
   if(form.id==='setup-form'){await api('/setup','POST',Object.fromEntries(data));location.assign('/onboarding');}
   else if(form.id==='login-form'){await api('/session','POST',Object.fromEntries(data));location.assign('/');}
   else if(form.id==='task-form'){if(!state.selected)throw new Error('Выберите произведение');const payload={provider:state.selected.provider,media_id:state.selected.id,kind:state.selected.kind,requirements:readRequirements(form)};if(state.selected.kind==='tv')payload.seasons=taskSeasonSelections();await api('/tasks','POST',payload);$('#selection').hidden=true;$('#search-results').innerHTML='';$('#media-search').value='';state.selected=null;toast('Задача создана. Поиск поставлен в очередь.');await refreshTasks();await switchTab('library');}
-  else if(form.id==='settings-form'){const payload={...state.settings,defaults:readRequirements(form,'default_'),jellyfin:{audio_languages:selectedLanguages(form,'jellyfin_audio_languages'),subtitle_languages:selectedLanguages(form,'jellyfin_subtitle_languages')}};for(const key of ['movie_path','series_path','search_start','plugin_repository','search_engine_repository'])payload[key]=String(data.get(key));payload.theme_color=String(data.get('theme_color')||'purple');payload.seed_ratio=String(data.get('seed_ratio')).trim()===''?null:Number(data.get('seed_ratio'));payload.prefer_full_subtitles=data.get('prefer_full_subtitles')==='on';await api('/settings','PUT',payload);state.settings=payload;await loadStorage();toast('Настройки сохранены');}
+  else if(form.id==='settings-form'){const payload={...state.settings,defaults:readRequirements(form,'default_')};for(const key of ['movie_path','series_path','search_start','plugin_repository','search_engine_repository'])payload[key]=String(data.get(key));payload.theme_color=String(data.get('theme_color')||'purple');payload.seed_ratio=String(data.get('seed_ratio')).trim()===''?null:Number(data.get('seed_ratio'));payload.prefer_full_subtitles=data.get('prefer_full_subtitles')==='on';await api('/settings','PUT',payload);state.settings=payload;await loadStorage();toast('Настройки сохранены');}
   else if(form.id==='account-form'){await api('/accounts','POST',Object.fromEntries(data));form.reset();toast('Аккаунт создан');await loadAccounts();}
   else if(form.id==='delete-task-form'){const result=await api(`/tasks/${form.dataset.task}`,'DELETE',{delete_media:data.get('delete_media')==='on'});$('#modal').close();await refreshTasks();await refreshDownloads();await refreshLibraryView();toast(result.cleanup_pending?'Задача удалена. Очистка файлов будет повторена автоматически.':'Задача удалена');}
   else if(form.id==='inline-task-form'){

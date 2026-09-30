@@ -21,7 +21,7 @@ def storage_root(configured):
     # Preserve existing movie/series settings while consolidating their common root.
     return (
         path.parent
-        if path.name.casefold() in {"movies", "series", "source"} and not path.is_mount()
+        if path.name.casefold() in {"movies", "series", "anime", "source"} and not path.is_mount()
         else path
     )
 
@@ -124,6 +124,10 @@ def _migrate_sources(database):
 
 
 def desired_links(db, warnings):
+    from lazarr.library import library_kind
+    from lazarr.library_metadata import sidecars
+    from lazarr.specials import catalog_for, placement
+
     result, winners, names = {}, set(), set()
     rows = db.execute(
         select(LibraryAsset, MediaAsset, Download, Media)
@@ -144,7 +148,10 @@ def desired_links(db, warnings):
             raise ValueError(f"Unsafe source directory: {source}")
         root = source.parent.parent / "user"
         title = component(media.title + (f" ({media.year})" if media.year else ""))
-        directory = root / ("Movies" if media.kind == "movie" else "Series") / title
+        directory = (
+            root / {"movies": "Movies", "series": "Series", "anime": "Anime"}[library_kind(media)] / title
+        )
+        episode = season = number = None
         stem = title
         if library.episode_id:
             episode = db.get(Episode, library.episode_id)
@@ -184,6 +191,13 @@ def desired_links(db, warnings):
                     stem + "." + suffix + "." + component(Path(track["path"]).suffix.lstrip("."), 12),
                 )
             )
+        position = (
+            placement(db, episode, catalog_for(db, media.id))["position"]
+            if episode and season.number == 0
+            else None
+        )
+        for entry in sidecars(media, episode, season, number, directory, stem, root, position):
+            result.setdefault(entry["path"].casefold(), entry)
         for relative, filename in files:
             target = source / relative
             if not target.resolve().is_relative_to(source.resolve()) or not target.is_file():
@@ -200,7 +214,11 @@ def remove_link(entry):
     path, root = Path(entry["path"]), Path(entry["root"])
     if not path.is_relative_to(root) or path.parent.resolve() != path.parent:
         raise ValueError(f"Unsafe library link: {path}")
-    if path.is_symlink():
+    if "target" not in entry:
+        if path.is_symlink():
+            raise ValueError(f"Metadata path is a symlink: {path}")
+        path.unlink(missing_ok=True)
+    elif path.is_symlink():
         path.unlink()  # Never unlink the target, even if the user changed the link.
     elif path.exists():
         raise FileExistsError(f"A regular file occupies a managed link: {path}")
@@ -238,6 +256,11 @@ def _reconcile(database):
             remove_link(entry)
         owned = {e["path"] for e in previous}
         for entry in desired:
+            if "content" in entry:
+                write_sidecar(entry, entry["content"].encode("utf-8"))
+                continue
+            if "image" in entry:
+                continue
             path, target = Path(entry["path"]), Path(entry["target"])
             real_directory(path.parent)
             relative = os.path.relpath(target, path.parent)
@@ -302,7 +325,10 @@ def describe(database, settings):
         roots = sorted({str(storage_root(p)) for p in (settings.movie_path, settings.series_path)})
         return {
             "roots": [{"source": str(Path(p) / "source"), "user": str(Path(p) / "user")} for p in roots],
-            "links": len(manifest.value.get("entries", [])) if manifest else 0,
+            "links": sum("target" in e for e in manifest.value.get("entries", [])) if manifest else 0,
+            "metadata_files": sum("target" not in e for e in manifest.value.get("entries", []))
+            if manifest
+            else 0,
             **(state.value if state else {}),
         }
 
@@ -312,3 +338,33 @@ def migration_pending(database):
         return (
             db.scalar(select(ConfigEntry.key).where(ConfigEntry.key.startswith("storage.move."))) is not None
         )
+
+
+def playable_path(download, relative):
+    if not isinstance(relative, str) or not relative:
+        return None
+    root = Path(download.save_path).resolve()
+    path = (root / relative).resolve()
+    if not path.is_relative_to(root) or not path.is_file():
+        return None
+    return path
+
+
+def write_sidecar(entry, content):
+    path, root = Path(entry["path"]), Path(entry["root"])
+    if not path.is_relative_to(root):
+        raise ValueError(f"Unsafe metadata path: {path}")
+    real_directory(path.parent)
+    if path.is_symlink():
+        raise ValueError(f"Metadata path is a symlink: {path}")
+    if path.is_file() and path.read_bytes() == content:
+        return
+    temporary = path.with_name(".lazarr-metadata-" + uuid4().hex)
+    try:
+        with temporary.open("xb") as output:
+            output.write(content)
+            output.flush()
+            os.fsync(output.fileno())
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)

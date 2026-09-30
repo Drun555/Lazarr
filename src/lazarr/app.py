@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
 from fastapi import FastAPI, Depends, HTTPException, Request, Query
+from fastapi import BackgroundTasks as ResponseBackgroundTasks
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -526,9 +527,21 @@ def create_app(config: RuntimeConfig | None = None):
 
     @app.patch("/api/v1/tasks/{identity}")
     async def edit_task(
-        identity: int, payload: TaskEdit, request: Request, user=Depends(permission("tasks"))
+        identity: int,
+        payload: TaskEdit,
+        request: Request,
+        background_tasks: ResponseBackgroundTasks,
+        user=Depends(permission("tasks")),
     ):
         ctx = context(request)
+        if payload.paused is not None and payload.requirements is None and payload.seasons is None:
+            # Saving pause must not wait for the search lock held by network requests.
+            ctx.service.edit(identity, user.id, paused=payload.paused)
+            if payload.paused:
+                ctx.worker.cancel_media_search(identity)
+            ctx.scheduler.wake.set()
+            background_tasks.add_task(ctx.worker.sync_consumers)
+            return {"ok": True}
         async with ctx.worker.lock:
             selections = (
                 await ctx.service.prepare_selections(identity, payload.seasons)
@@ -1084,10 +1097,6 @@ def create_app(config: RuntimeConfig | None = None):
             audit(db, user.id, f"download.{payload.action}", str(identity))
         await ctx.worker.sync_consumers()
         return {"ok": True}
-
-    from lazarr.jellyfin import install_jellyfin_api
-
-    install_jellyfin_api(app, context)
 
     from lazarr.season_mapping import register
 

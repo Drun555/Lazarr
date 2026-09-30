@@ -101,6 +101,17 @@ def test_season_editor_bindings_validation_titles_and_manual_episodes(core, medi
             assert client.post(path + "/releases", json={"url": "https://nyaa.si/view/1"}).status_code == 200
             ctx.worker.add_manual_task_candidate.assert_awaited_once_with(1, "https://nyaa.si/view/1", 1)
             assert len(client.get(path).json()["releases"]) == 1
+            # Zero-match candidates can be added without selecting any episodes.
+            response = client.post(path + "/releases", json={"candidate_id": 1})
+            assert response.status_code == 200, response.text
+            assert response.json()["release_id"] == release_id
+            ctx.worker.add_manual_task_candidate.assert_awaited_once()
+            assert client.post(path + "/releases", json={"candidate_id": 99999}).status_code == 422
+            assert client.put(path, json={"rows": [], "pool_release_ids": [99999]}).status_code == 422
+            assert client.put(path, json={"rows": [], "pool_release_ids": []}).status_code == 200
+            assert client.get(path).json()["hidden_release_ids"] == [release_id]
+            assert client.post(path + "/releases", json={"candidate_id": 1}).status_code == 200
+            assert client.get(path).json()["hidden_release_ids"] == []
             ctx.worker.choose = AsyncMock()
             # Every row is checked before any selection is changed.
             valid = {"subtask_id": 1, "title": "My pilot", "release_id": release_id, "video_index": 2}
@@ -224,3 +235,112 @@ def test_episode_numbers_swap_and_survive_metadata_refresh(core, media, season):
         saved = {row["subtask_id"]: row["number"] for row in client.get(path).json()["episodes"]}
         assert saved[rows[0]["subtask_id"]] == 2
         assert saved[rows[1]["subtask_id"]] == 1
+
+
+def test_season_title_survives_refresh_and_is_exposed_in_library(core, media, season):
+    config, db, _, service = core
+    season.title = "Название TMDB"
+    service.create_from_metadata(CreateTask(media_id="42", kind="tv", season=1), media, season, 1)
+    with TestClient(create_app(config)) as client:
+        login(client)
+        path = "/api/v1/tasks/1/seasons/1/mapping"
+        assert client.get(path).json()["season_title"] == "Название TMDB"
+        assert client.put(path, json={"rows": [], "season_title": "x" * 501}).status_code == 422
+        response = client.put(path, json={"rows": [], "season_title": "  Моё название  "})
+        assert response.status_code == 200, response.text
+        with db.session() as session:
+            service._upsert_season(session, 1, season)
+        assert client.get(path).json()["season_title"] == "Моё название"
+        detail = client.get("/api/v1/libraries/media/1").json()
+        assert next(item for item in detail["seasons"] if item["number"] == 1)["title"] == "Моё название"
+        # Older clients that omit the field must preserve the saved title.
+        assert client.put(path, json={"rows": []}).status_code == 200
+        assert client.get(path).json()["season_title"] == "Моё название"
+        assert client.put(path, json={"rows": [], "season_title": ""}).status_code == 200
+        with db.session() as session:
+            service._upsert_season(session, 1, season)
+        assert client.get(path).json()["season_title"] == ""
+
+
+def test_deleted_episodes_stay_deleted_and_can_be_added_again(core, media, season):
+    config, db, _, service = core
+    service.create_from_metadata(CreateTask(media_id="42", kind="tv", season=1), media, season, 1)
+    with TestClient(create_app(config)) as client:
+        login(client)
+        path = "/api/v1/tasks/1/seasons/1/mapping"
+        original = client.get(path).json()["episodes"]
+        ids = [row["subtask_id"] for row in original]
+        assert client.put(path, json={"rows": [], "deleted_subtask_ids": [99999]}).status_code == 422
+        assert client.get(path).json()["episodes"] == original
+        response = client.put(path, json={"rows": [], "deleted_subtask_ids": ids})
+        assert response.status_code == 200, response.text
+        # Retrying after a lost response is harmless, including for an empty season.
+        assert client.put(path, json={"rows": [], "deleted_subtask_ids": ids}).status_code == 200
+        with db.session() as session:
+            service._upsert_season(session, 1, season)
+        assert client.get(path).json()["episodes"] == []
+        assert client.get("/api/v1/libraries/media/1").json()["episodes"] == []
+        response = client.post(path + "/episodes", json={"number": 1, "title": "Возвращённая серия"})
+        assert response.status_code == 200, response.text
+        assert response.json()["subtask_id"] == ids[0]
+        assert len(client.get(path).json()["episodes"]) == 1
+        assert len(client.get("/api/v1/libraries/media/1").json()["episodes"]) == 1
+
+
+def test_special_positions_auto_manual_reset_and_validation(core, media, season):
+    import time
+    from lazarr.models import Season
+
+    config, db, _, service = core
+    service.create_from_metadata(CreateTask(media_id="42", kind="tv", season=1), media, season, 1)
+    with db.session() as session:
+        session.get(Season, 1).number = 0
+        session.get(Episode, 1).air_date = "2020-01-04"
+        session.add(
+            ConfigEntry(
+                key="special_catalog.1",
+                value={
+                    "updated": time.time(),
+                    "seasons": [
+                        {
+                            "number": 1,
+                            "episodes": [
+                                {"number": 1, "air_date": "2020-01-01"},
+                                {"number": 2, "air_date": "2020-01-08"},
+                            ],
+                        }
+                    ],
+                },
+            )
+        )
+    with TestClient(create_app(config)) as client:
+        login(client)
+        path = "/api/v1/tasks/1/seasons/0/mapping"
+        data = client.get(path).json()
+        row = data["episodes"][0]
+        assert row["special_position"]["position"] == {"airsbefore_season": 1, "airsbefore_episode": 2}
+        payload = {
+            "subtask_id": row["subtask_id"],
+            "title": row["title"],
+            "special_position": {"mode": "manual", "airsafter_season": 1},
+        }
+        assert client.put(path, json={"rows": [payload]}).status_code == 200
+        assert client.get(path).json()["episodes"][0]["special_position"]["position"] == {
+            "airsafter_season": 1
+        }
+        payload["special_position"] = {"mode": "manual", "airsbefore_season": 1, "airsbefore_episode": 99}
+        assert client.put(path, json={"rows": [payload]}).status_code == 422
+        payload["special_position"] = {"mode": "manual", "airsbefore_season": 1, "airsafter_season": 1}
+        assert client.put(path, json={"rows": [payload]}).status_code == 422
+        payload["special_position"] = {"mode": "manual"}
+        assert client.put(path, json={"rows": [payload]}).status_code == 200
+        assert client.get(path).json()["episodes"][0]["special_position"]["position"] == {}
+        payload["special_position"] = {"mode": "auto"}
+        assert client.put(path, json={"rows": [payload]}).status_code == 200
+        assert client.get(path).json()["episodes"][0]["special_position"]["position"] == {
+            "airsbefore_season": 1,
+            "airsbefore_episode": 2,
+        }
+        with db.session() as session:
+            session.get(Season, 1).number = 1
+        assert client.put(path.replace("/0/", "/1/"), json={"rows": [payload]}).status_code == 422

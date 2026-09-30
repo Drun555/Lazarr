@@ -1,48 +1,7 @@
-import asyncio
-
-import anyio
-import pytest
 from fastapi import FastAPI
+from fastapi.responses import FileResponse
 from fastapi.testclient import TestClient
-
-from lazarr.http import FileResponse, SecurityHeadersMiddleware
-
-
-@pytest.mark.parametrize("range_header", [None, "bytes=0-", "bytes=0-1048575,2097152-"])
-def test_disconnected_stream_stops_reading_and_closes_file(tmp_path, monkeypatch, range_header):
-    path = tmp_path / "video.mkv"
-    path.write_bytes(b"v" * (8 * 1024 * 1024))
-    reads, opened = [], []
-    original = anyio.AsyncFile.read
-
-    async def tracked_read(file, size=-1):
-        opened.append(file)
-        data = await original(file, size)
-        reads.append(len(data))
-        return data
-
-    monkeypatch.setattr(anyio.AsyncFile, "read", tracked_read)
-
-    async def scenario():
-        disconnected = asyncio.Event()
-
-        async def receive():
-            await disconnected.wait()
-            return {"type": "http.disconnect"}
-
-        async def send(message):
-            # Like Uvicorn, sends after disconnection can return without error.
-            if message["type"] == "http.response.body" and reads:
-                disconnected.set()
-            await anyio.lowlevel.checkpoint()
-
-        headers = [(b"range", range_header.encode())] if range_header else []
-        scope = {"type": "http", "method": "GET", "path": "/video", "headers": headers}
-        await asyncio.wait_for(SecurityHeadersMiddleware(FileResponse(path))(scope, receive, send), 2)
-
-    asyncio.run(scenario())
-    assert 0 < sum(reads) <= 2 * FileResponse.chunk_size
-    assert all(file.closed for file in opened)
+from lazarr.http import SecurityHeadersMiddleware
 
 
 def test_completed_stream_ranges_head_and_security_headers(tmp_path):

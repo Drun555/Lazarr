@@ -126,9 +126,12 @@ class TaskService:
                     season_infos[canonical.season] = await provider.get_season(
                         payload.media_id, canonical.season
                     )
-        return self.create_from_metadata(payload, item, list(season_infos.values()), user_id)
+            from lazarr.specials import fetch_catalog
 
-    def create_from_metadata(self, payload, item, season_info, user_id):
+            catalog = await fetch_catalog(provider, item) if 0 in season_infos else None
+        return self.create_from_metadata(payload, item, list(season_infos.values()), user_id, catalog)
+
+    def create_from_metadata(self, payload, item, season_info, user_id, special_catalog=None):
         selections = payload.selections()
         infos = season_info if isinstance(season_info, list) else [season_info] if season_info else []
         infos = {info.number: info for info in infos}
@@ -171,6 +174,10 @@ class TaskService:
             else:
                 media.metadata_json = item.model_dump()
                 media.title, media.year = item.title, item.year
+            if special_catalog is not None:
+                from lazarr.specials import save_catalog
+
+                save_catalog(db, media.id, special_catalog)
             task = db.scalar(select(Task).where(Task.media_id == media.id))
             if task is None:
                 task = Task(
@@ -204,6 +211,8 @@ class TaskService:
                     membership.numbering = numbering
                 for episode in db.scalars(select(Episode).where(Episode.season_id == season.id)):
                     requested = canonical.episodes is None or episode.number in canonical.episodes
+                    if db.get(ConfigEntry, f"episode_deleted.{episode.id}"):
+                        continue
                     if episode.id in existing and requested:
                         sub = db.scalar(
                             select(Subtask).where(
@@ -251,7 +260,9 @@ class TaskService:
             season = Season(media_id=media_id, number=info.number, title=info.title)
             db.add(season)
             db.flush()
-        season.title, season.refreshed_at = info.title, time.time()
+        override = db.get(ConfigEntry, f"season_title.{season.id}") if season.id else None
+        season.title = override.value["title"] if override else info.title
+        season.refreshed_at = time.time()
         episodes = list(db.scalars(select(Episode).where(Episode.season_id == season.id)))
         by_original_number = {}
         occupied = {episode.number for episode in episodes}
@@ -304,10 +315,17 @@ class TaskService:
             try:
                 async with self.plugins.open(provider_id) as provider:
                     info = await provider.get_season(external_id, number)
-                    item = await provider.get_media("tv", external_id) if has_numbering else None
+                    item = (
+                        await provider.get_media("tv", external_id) if has_numbering or number == 0 else None
+                    )
+                    from lazarr.specials import fetch_catalog, save_catalog
+
+                    catalog = await fetch_catalog(provider, item) if number == 0 else None
                 with self.db.session() as db:
                     season = db.get(Season, season_id)
                     self._upsert_season(db, season.media_id, info)
+                    if catalog is not None:
+                        save_catalog(db, season.media_id, catalog)
                     if item:
                         db.get(Media, season.media_id).metadata_json = item.model_dump()
                     for membership in db.scalars(
@@ -338,6 +356,8 @@ class TaskService:
                             membership.numbering = numbering
                             allowed = set(selection.episodes)
                         for episode in db.scalars(select(Episode).where(Episode.season_id == season_id)):
+                            if db.get(ConfigEntry, f"episode_deleted.{episode.id}"):
+                                continue
                             if episode.id not in existing and (allowed is None or episode.number in allowed):
                                 db.add(
                                     Subtask(
@@ -604,6 +624,12 @@ class TaskService:
                     raise ValueError("Выбранные сезоны содержат одни и те же серии")
                 occupied.update(parts)
                 resolved.append((selection, numbering, info, numbers))
+            if any(info.number == 0 for _, _, info, _ in resolved):
+                from lazarr.specials import fetch_catalog, save_catalog
+
+                catalog = await fetch_catalog(provider, item)
+                with self.db.session() as db:
+                    save_catalog(db, media.id, catalog)
         return resolved
 
     def _replace_selections(self, db, task, selections):
@@ -629,6 +655,7 @@ class TaskService:
                 )
             )
         existing = list(db.scalars(select(Subtask).where(Subtask.task_id == task.id)))
+        wanted = {identity for identity in wanted if not db.get(ConfigEntry, f"episode_deleted.{identity}")}
         for sub in existing:
             if sub.episode_id in wanted:
                 wanted.remove(sub.episode_id)

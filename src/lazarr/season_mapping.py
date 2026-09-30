@@ -7,6 +7,8 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 
 from lazarr.search_runtime import engine_call, pinned
+from lazarr.specials import catalog_for, placement, refresh_catalog
+from typing import Literal
 
 from lazarr.models import (
     CandidateDecision,
@@ -33,7 +35,7 @@ def related_files(files, bindings=()):
     return engine_call("associations", "related_files", files, bindings)
 
 
-def scope(db, task_id, season_number):
+def scope(db, task_id, season_number, *, include_deleted=False):
     task = db.get(Task, task_id)
     season = (
         db.scalar(select(Season).where(Season.media_id == task.media_id, Season.number == season_number))
@@ -50,8 +52,12 @@ def scope(db, task_id, season_number):
             .order_by(Episode.number)
         )
     )
-    if not rows:
-        raise HTTPException(404, "В сезоне нет сабтасок")
+    if not include_deleted:
+        rows = [
+            (sub, episode)
+            for sub, episode in rows
+            if not db.get(ConfigEntry, f"episode_deleted.{episode.id}")
+        ]
     return task, season, rows
 
 
@@ -73,7 +79,15 @@ class EpisodeInput(BaseModel):
     title: str = Field(min_length=1, max_length=500)
 
 
+class SpecialPosition(BaseModel):
+    mode: Literal["auto", "manual"] = "auto"
+    airsbefore_season: int | None = Field(default=None, ge=1, le=10000)
+    airsafter_season: int | None = Field(default=None, ge=1, le=10000)
+    airsbefore_episode: int | None = Field(default=None, ge=1, le=10000)
+
+
 class MappingRow(BaseModel):
+    special_position: SpecialPosition | None = None
     subtask_id: int
     number: int | None = Field(default=None, ge=1, le=10000)
     title: str = Field(min_length=1, max_length=500)
@@ -83,12 +97,16 @@ class MappingRow(BaseModel):
 
 
 class MappingInput(BaseModel):
+    pool_release_ids: list[int] | None = Field(default=None, max_length=10000)
+    deleted_subtask_ids: list[int] = Field(default_factory=list, max_length=10000)
+    season_title: str | None = Field(default=None, max_length=500)
     revisions: dict[int, str] = Field(default_factory=dict)
     rows: list[MappingRow] = Field(max_length=10000)
 
 
 class ReleaseInput(BaseModel):
-    url: str = Field(min_length=1, max_length=2048)
+    url: str | None = Field(default=None, min_length=1, max_length=2048)
+    candidate_id: int | None = Field(default=None, ge=1)
 
 
 def register(app, context, authenticated, permission):
@@ -96,9 +114,17 @@ def register(app, context, authenticated, permission):
     @pinned
     async def get_mapping(task_id: int, season_number: int, request: Request, user=Depends(authenticated)):
         ctx = context(request)
+        if season_number == 0:
+            with ctx.db.session() as db:
+                task, _, _ = scope(db, task_id, season_number)
+                media_id = task.media_id
+            await refresh_catalog(ctx.service, media_id)
         with ctx.db.session() as db:
-            task, _, rows = scope(db, task_id, season_number)
+            task, season, rows = scope(db, task_id, season_number)
+            catalog = catalog_for(db, task.media_id) if season_number == 0 else []
+            season_title = season.title
             saved = db.get(ConfigEntry, releases_key(task, season_number))
+            hidden_release_ids = saved.value.get("hidden_releases", []) if saved else []
             release_ids = set(saved.value.get("releases", []) if saved else [])
             episodes = []
             snapshots = {}
@@ -135,6 +161,11 @@ def register(app, context, authenticated, permission):
                         "title": episode.title,
                         "release_id": release_id if binding else None,
                         "binding": binding,
+                        **(
+                            {"special_position": placement(db, episode, catalog)}
+                            if season_number == 0
+                            else {}
+                        ),
                     }
                 )
             releases = [db.get(Release, identity) for identity in sorted(release_ids)]
@@ -181,7 +212,13 @@ def register(app, context, authenticated, permission):
                     ],
                 }
             )
-        return {"episodes": episodes, "releases": result}
+        return {
+            "season_title": season_title,
+            "placement_seasons": catalog,
+            "episodes": episodes,
+            "releases": result,
+            "hidden_release_ids": hidden_release_ids,
+        }
 
     @app.post("/api/v1/tasks/{task_id}/seasons/{season_number}/mapping/releases")
     async def add_release(
@@ -196,19 +233,38 @@ def register(app, context, authenticated, permission):
             task, _, _ = scope(db, task_id, season_number)
         if ctx.engine is None:
             raise HTTPException(503, ctx.engine_error)
-        decision_id = await ctx.worker.add_manual_task_candidate(task_id, payload.url, season_number)
+        if (payload.url is None) == (payload.candidate_id is None):
+            raise ValueError("Укажите URL или существующую раздачу")
+        if payload.candidate_id is not None:
+            with ctx.db.session() as db:
+                _, _, rows = scope(db, task_id, season_number, include_deleted=True)
+                decision = db.get(CandidateDecision, payload.candidate_id)
+                if not decision or decision.subtask_id not in {sub.id for sub, _ in rows}:
+                    raise ValueError("Раздача не принадлежит сезону")
+                release = db.get(Release, decision.release_id)
+            await inspect(ctx, release)
+            decision_id = payload.candidate_id
+        else:
+            decision_id = await ctx.worker.add_manual_task_candidate(task_id, payload.url, season_number)
         with ctx.db.session() as db:
             decision = db.get(CandidateDecision, decision_id)
             key = releases_key(task, season_number)
             entry = db.get(ConfigEntry, key)
             ids = entry.value.get("releases", []) if entry else []
-            value = {"releases": sorted(set(ids + [decision.release_id]))}
+            value = {
+                "releases": sorted(set(ids + [decision.release_id])),
+                "hidden_releases": [
+                    identity
+                    for identity in (entry.value.get("hidden_releases", []) if entry else [])
+                    if identity != decision.release_id
+                ],
+            }
             if entry:
                 entry.value = value
             else:
                 db.add(ConfigEntry(key=key, value=value))
             audit(db, user.id, "season_mapping.release", str(task_id), {"season": season_number, **value})
-        return {"ok": True}
+        return {"ok": True, "release_id": decision.release_id}
 
     @app.post("/api/v1/tasks/{task_id}/seasons/{season_number}/mapping/releases/{release_id}/report")
     @pinned
@@ -405,8 +461,17 @@ def register(app, context, authenticated, permission):
                     entry.value = {"title": episode.title}
                 else:
                     db.add(ConfigEntry(key=key, value={"title": episode.title}))
-                sub = Subtask(task_id=task_id, episode_id=episode.id, part_key=f"episode:{episode.id}")
-                db.add(sub)
+                deleted = db.get(ConfigEntry, f"episode_deleted.{episode.id}")
+                if deleted:
+                    db.delete(deleted)
+                sub = db.scalar(
+                    select(Subtask).where(Subtask.task_id == task_id, Subtask.episode_id == episode.id)
+                )
+                if sub:
+                    sub.status = "queued"
+                else:
+                    sub = Subtask(task_id=task_id, episode_id=episode.id, part_key=f"episode:{episode.id}")
+                    db.add(sub)
                 db.flush()
                 audit(db, user.id, "season_mapping.episode", str(sub.id))
                 result = {"subtask_id": sub.id, "number": episode.number, "title": episode.title}
@@ -424,7 +489,16 @@ def register(app, context, authenticated, permission):
         ctx = context(request)
         snapshot = await get_mapping(task_id, season_number, request, user)
         existing = {row["subtask_id"]: row for row in snapshot["episodes"]}
+        deleted_ids = set(payload.deleted_subtask_ids)
+        with ctx.db.session() as db:
+            _, _, all_rows = scope(db, task_id, season_number, include_deleted=True)
+            if not deleted_ids <= {sub.id for sub, _ in all_rows}:
+                raise ValueError("Удаляемая серия не принадлежит сезону")
+        if deleted_ids & {row.subtask_id for row in payload.rows}:
+            raise ValueError("Нельзя одновременно сохранить и удалить серию")
         releases = {release["id"]: release for release in snapshot["releases"]}
+        if payload.pool_release_ids is not None and not set(payload.pool_release_ids) <= releases.keys():
+            raise ValueError("Раздача не принадлежит редактору сезона")
         if any(
             identity not in releases or releases[identity]["revision"] != revision
             for identity, revision in payload.revisions.items()
@@ -438,6 +512,25 @@ def register(app, context, authenticated, permission):
             if row.subtask_id not in existing or row.subtask_id in seen:
                 raise ValueError("Серия не принадлежит сезону или указана дважды")
             seen.add(row.subtask_id)
+            position = row.special_position
+            if position is not None:
+                if season_number != 0:
+                    raise ValueError("Порядок показа доступен только для спецматериалов")
+                if position.airsbefore_season and position.airsafter_season:
+                    raise ValueError("Выберите только одну позицию спецэпизода")
+                if position.airsbefore_episode and not position.airsbefore_season:
+                    raise ValueError("Для позиции перед эпизодом укажите сезон")
+                if position.mode == "manual":
+                    target = position.airsbefore_season or position.airsafter_season
+                    target_season = next(
+                        (s for s in snapshot["placement_seasons"] if s["number"] == target), None
+                    )
+                    if target and target_season is None:
+                        raise ValueError("Выбран неизвестный сезон")
+                    if position.airsbefore_episode and position.airsbefore_episode not in {
+                        e["number"] for e in target_season["episodes"]
+                    }:
+                        raise ValueError("Выбран неизвестный эпизод")
             if not row.title.strip():
                 raise ValueError("Укажите имя эпизода")
             if row.video_index is None:
@@ -464,6 +557,14 @@ def register(app, context, authenticated, permission):
             numbers = [changes.get(episode.id, episode.number) for episode in season_episodes]
             if len(numbers) != len(set(numbers)):
                 raise ValueError("Номера эпизодов в сезоне должны быть уникальными")
+            if payload.season_title is not None and payload.season_title.strip() != season.title:
+                season.title = payload.season_title.strip()
+                title_key = f"season_title.{season.id}"
+                title_entry = db.get(ConfigEntry, title_key)
+                if title_entry:
+                    title_entry.value = {"title": season.title}
+                else:
+                    db.add(ConfigEntry(key=title_key, value={"title": season.title}))
             # Temporary numbers allow swaps without violating the unique season/number key.
             temporary = min([0, *(episode.number for episode in season_episodes)]) - 1
             for episode in season_episodes:
@@ -481,7 +582,12 @@ def register(app, context, authenticated, permission):
                     episode.number = changes[episode.id]
             key = releases_key(task, season_number)
             entry = db.get(ConfigEntry, key)
-            value = {"releases": sorted(releases)}
+            pool_ids = (
+                set(payload.pool_release_ids)
+                if payload.pool_release_ids is not None
+                else set(releases) - set(snapshot["hidden_release_ids"])
+            )
+            value = {"releases": sorted(pool_ids), "hidden_releases": sorted(set(releases) - pool_ids)}
             if entry:
                 entry.value = value
             else:
@@ -551,6 +657,18 @@ def register(app, context, authenticated, permission):
                 with ctx.db.session() as db:
                     sub = db.get(Subtask, row.subtask_id)
                     episode = db.get(Episode, sub.episode_id)
+                    if row.special_position is not None:
+                        key = f"special_position.{episode.id}"
+                        entry = db.get(ConfigEntry, key)
+                        if row.special_position.mode == "auto":
+                            if entry:
+                                db.delete(entry)
+                        else:
+                            value = row.special_position.model_dump(exclude={"mode"}, exclude_none=True)
+                            if entry:
+                                entry.value = value
+                            else:
+                                db.add(ConfigEntry(key=key, value=value))
                     if episode.title != row.title.strip():
                         episode.title = row.title.strip()
                         key = f"episode_title.{episode.id}"
@@ -561,9 +679,29 @@ def register(app, context, authenticated, permission):
                             db.add(ConfigEntry(key=key, value={"title": episode.title}))
                     audit(db, user.id, "season_mapping.save", str(row.subtask_id))
                 completed.append(row.subtask_id)
+            # Assign returned files first, then retire the deleted rows using shared-file protection.
+            from lazarr.deletion import delete_selection
+
+            for identity in deleted_ids:
+                with ctx.db.session() as db:
+                    sub = db.get(Subtask, identity)
+                    if db.get(ConfigEntry, f"episode_deleted.{sub.episode_id}"):
+                        continue
+                await delete_selection(ctx.worker, identity, user.id)
+                with ctx.db.session() as db:
+                    sub = db.get(Subtask, identity)
+                    db.add(
+                        ConfigEntry(
+                            key=f"episode_deleted.{sub.episode_id}", value={"episode_id": sub.episode_id}
+                        )
+                    )
+                    audit(db, user.id, "season_mapping.delete_episode", str(identity))
         except Exception as exc:
             raise ValueError(
                 f"Сохранено серий: {len(completed)}. {exc}. Повторите сохранение для оставшихся изменений."
             ) from exc
+        from lazarr.storage import reconcile
+
+        await asyncio.to_thread(reconcile, ctx.db)
         ctx.scheduler.discard_satisfied()
         return {"ok": True}

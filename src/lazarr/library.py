@@ -244,6 +244,13 @@ class LibraryService:
             if episode_id is not None:
                 episode_query = episode_query.where(Episode.id == episode_id)
             episodes = list(db.scalars(episode_query))
+            deleted_episodes = {
+                entry.value["episode_id"]
+                for entry in db.scalars(
+                    select(ConfigEntry).where(ConfigEntry.key.startswith("episode_deleted."))
+                )
+            }
+            episodes = [episode for episode in episodes if episode.id not in deleted_episodes]
             tasks = {t.id: t for t in db.scalars(select(Task).where(Task.media_id == identity))}
             sub_query = select(Subtask).where(Subtask.task_id.in_(tasks))
             if episode_id is not None:
@@ -259,9 +266,16 @@ class LibraryService:
                 .where(include_versions)
                 .where(LibraryAsset.episode_id == episode_id if episode_id is not None else True)
             ):
-                from lazarr.jellyfin_resources import is_extra
-
-                if is_extra(link.part_key):
+                if link.part_key.split(":")[0] in {
+                    "trailer",
+                    "extra",
+                    "special",
+                    "behindthescenes",
+                    "deleted",
+                    "featurette",
+                    "intro",
+                    "theme",
+                }:
                     continue
                 stored_versions.setdefault(link.episode_id, []).append(
                     self._version(link, asset, download, release, current=True, pending=False)
@@ -378,10 +392,15 @@ class LibraryService:
                     }
                 )
             parts.sort(key=lambda p: (p["season"] or 0, p["episode"] or 0))
+            season_info = {item["number"]: dict(item) for item in media.metadata_json.get("seasons", [])}
+            for season in seasons.values():
+                info = season_info.setdefault(season.number, {"number": season.number})
+                if season.title or db.get(ConfigEntry, f"season_title.{season.id}"):
+                    info["title"] = season.title
             return {
                 **self.tile(media),
                 "metadata": media.metadata_json,
-                "seasons": media.metadata_json.get("seasons", []),
+                "seasons": [season_info[number] for number in sorted(season_info)],
                 "episodes": parts,
                 "last_search_at": max((s.last_search_at or 0 for s in subs), default=0) or None,
                 "task_count": len(tasks),

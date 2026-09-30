@@ -1,6 +1,7 @@
 """Synchronous libtorrent boundary. Call from a thread, never the HTTP event loop."""
 
 import json
+import logging
 import subprocess
 import tempfile
 import threading
@@ -8,10 +9,17 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
+from urllib.parse import urlsplit
 from lazarr.sdk import DownloadSource, DownloadPlan, TorrentFile, safe_relative_path
 from lazarr.plugins import atomic_write
 
 MiB = 1024 * 1024
+log = logging.getLogger(__name__)
+# Bitmagnet's default bootstrap list: internal/dhtcrawler/config.go.
+DHT_BOOTSTRAP_NODES = (
+    "router.utorrent.com:6881,router.bittorrent.com:6881,dht.transmissionbt.com:6881,"
+    "dht.aelitis.com:6881,router.silotis.us:6881,dht.libtorrent.org:25401"
+)
 
 
 @dataclass
@@ -104,6 +112,7 @@ class LibtorrentEngine:
         self.lt = lt
         self.root = data_dir / "torrent_state"
         self.root.mkdir(parents=True, exist_ok=True)
+        self.local_only = local_only
         self.lock = threading.RLock()
         settings = {
             "listen_interfaces": listen,
@@ -113,11 +122,21 @@ class LibtorrentEngine:
                 | lt.alert.category_t.status_notification
             ),
             "enable_dht": not local_only,
+            "dht_bootstrap_nodes": "" if local_only else DHT_BOOTSTRAP_NODES,
             "enable_lsd": not local_only,
             "enable_upnp": False,
             "enable_natpmp": False,
         }
-        self.session = lt.session(settings)
+        params = lt.session_params()
+        state = self.root / "session.state"
+        if not local_only and state.exists():
+            try:
+                params = lt.read_session_params(state.read_bytes(), lt.save_state_flags_t.save_dht_state)
+            except Exception:
+                log.warning("Cannot restore DHT state; bootstrapping a new routing table")
+        # Restore discovery state, never old ports, rate limits or network settings.
+        params.settings = settings
+        self.session = lt.session(params)
         self.handles, self.plans, self.applied = {}, {}, {}
         self.pending_pieces = set()
         self.priority_upload_mode = set()
@@ -164,7 +183,12 @@ class LibtorrentEngine:
         # A separate session fetches metadata only; it cannot stall ongoing downloads.
         with tempfile.TemporaryDirectory(prefix="lazarr-metadata-") as directory:
             session = lt.session(
-                {"listen_interfaces": "0.0.0.0:0", "enable_upnp": False, "enable_natpmp": False}
+                {
+                    "listen_interfaces": "0.0.0.0:0",
+                    "enable_upnp": False,
+                    "enable_natpmp": False,
+                    "dht_bootstrap_nodes": DHT_BOOTSTRAP_NODES,
+                }
             )
             params = lt.parse_magnet_uri(source.magnet)
             params.save_path = directory
@@ -208,6 +232,9 @@ class LibtorrentEngine:
                     lt.read_resume_data(resume.read_bytes()) if resume.exists() else lt.add_torrent_params()
                 )
             except Exception:
+                log.warning(
+                    "Cannot restore torrent resume data for %s; checking existing files", metadata.infohash
+                )
                 params = lt.add_torrent_params()
             params.ti = lt.torrent_info(lt.bdecode(torrent))
             if counters:
@@ -369,6 +396,7 @@ class LibtorrentEngine:
                 else None,
                 "seeds": status.num_seeds,
                 "peers": status.num_peers,
+                "discovery": self._discovery(handle, status),
                 "paused": bool(status.paused),
                 "engine_state": str(status.state),
                 "upload_only": bool(handle.flags() & self.lt.torrent_flags.upload_mode),
@@ -379,6 +407,38 @@ class LibtorrentEngine:
                 "files": progress,
                 "error": status.errc.message() if status.errc.value() else None,
             }
+
+    def _discovery(self, handle, status):
+        # Never expose tracker URLs, passkeys, peer IPs or arbitrary tracker messages.
+        trackers = []
+        for tracker in handle.trackers():
+            try:
+                host = urlsplit(tracker["url"]).hostname
+            except ValueError:
+                host = None
+            error = tracker.get("last_error") or {}
+            trackers.append(
+                {
+                    "host": host,
+                    "verified": bool(tracker.get("verified")),
+                    "failures": tracker.get("fails", 0),
+                    "error_code": error.get("value", 0),
+                    "error_category": error.get("category", ""),
+                }
+            )
+
+        def known_count(value):
+            # libtorrent uses both -1 and a 24-bit sentinel for unknown counts.
+            return value if 0 <= value < 0xFFFFFF else None
+
+        return {
+            "known_peers": status.list_peers,
+            "known_seeds": status.list_seeds,
+            "connection_candidates": status.connect_candidates,
+            "tracker_seeds": known_count(status.num_complete),
+            "tracker_leechers": known_count(status.num_incomplete),
+            "trackers": trackers,
+        }
 
     def remove(self, infohash):
         with self.lock:
@@ -417,6 +477,16 @@ class LibtorrentEngine:
     def checkpoint(self):
         with self.lock:
             self._alerts()
+            if not self.local_only:
+                try:
+                    state = self.session.save_state(self.lt.save_state_flags_t.save_dht_state)
+                    routing = state.get(b"dht state", {})
+                    path = self.root / "session.state"
+                    # A restart while offline must not erase the last useful table.
+                    if routing.get(b"nodes") or routing.get(b"nodes6") or not path.exists():
+                        atomic_write(path, self.lt.bencode(state))
+                except Exception:
+                    log.warning("Cannot save DHT state; next startup will bootstrap a new routing table")
             for infohash, handle in self.handles.items():
                 if infohash in self.removing or not handle.is_valid():
                     continue
