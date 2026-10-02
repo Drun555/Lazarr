@@ -1698,6 +1698,7 @@ class Worker:
                     db.add(library_asset)
                 library_asset.preflight = dict(link.preflight)
                 library_asset.verification = dict(link.verification)
+        # Publish buffered, verified files as soon as they are playable.
+        await asyncio.to_thread(reconcile, self.db)
         if state["complete"]:
-            await asyncio.to_thread(reconcile, self.db)
             await self.sync_consumers()

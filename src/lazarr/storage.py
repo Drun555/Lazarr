@@ -9,7 +9,18 @@ import unicodedata
 from uuid import uuid4
 
 from sqlalchemy import select
-from lazarr.models import ConfigEntry, Download, Episode, LibraryAsset, Media, MediaAsset, Season
+from lazarr.models import (
+    ConfigEntry,
+    Download,
+    Episode,
+    LibraryAsset,
+    Media,
+    MediaAsset,
+    Season,
+    Subtask,
+    SubtaskAsset,
+    Task,
+)
 
 log = logging.getLogger(__name__)
 _lock = threading.RLock()
@@ -129,16 +140,44 @@ def desired_links(db, warnings):
     from lazarr.specials import catalog_for, placement
 
     result, winners, names = {}, set(), set()
-    rows = db.execute(
-        select(LibraryAsset, MediaAsset, Download, Media)
-        .join(MediaAsset, LibraryAsset.asset_id == MediaAsset.id)
-        .join(Download, MediaAsset.download_id == Download.id)
-        .join(Media, LibraryAsset.media_id == Media.id)
-        .order_by(LibraryAsset.created_at, LibraryAsset.id)
+    rows = list(
+        db.execute(
+            select(LibraryAsset, MediaAsset, Download, Media)
+            .join(MediaAsset, LibraryAsset.asset_id == MediaAsset.id)
+            .join(Download, MediaAsset.download_id == Download.id)
+            .join(Media, LibraryAsset.media_id == Media.id)
+            .order_by(LibraryAsset.created_at, LibraryAsset.id)
+        )
     )
+    rows = [row for row in rows if row[0].verification.get("complete")]
+    # Buffered files remain pending downloads, not completed library assets.
+    # Derive their exports from the live selection so removal/replacement also
+    # removes these temporary publications. Completed versions take precedence.
+    for link, asset, download, media, sub in db.execute(
+        select(SubtaskAsset, MediaAsset, Download, Media, Subtask)
+        .join(MediaAsset, SubtaskAsset.asset_id == MediaAsset.id)
+        .join(Download, MediaAsset.download_id == Download.id)
+        .join(Subtask, SubtaskAsset.subtask_id == Subtask.id)
+        .join(Task, Subtask.task_id == Task.id)
+        .join(Media, Task.media_id == Media.id)
+        .where(SubtaskAsset.pending.is_(True), Subtask.status == "ready")
+        .order_by(SubtaskAsset.id)
+    ):
+        rows.append(
+            (
+                LibraryAsset(
+                    part_key=sub.part_key,
+                    episode_id=sub.episode_id,
+                    preflight=link.preflight,
+                ),
+                asset,
+                download,
+                media,
+            )
+        )
     for library, asset, download, media in rows:
         identity = (media.id, library.part_key)
-        if identity in winners or not library.verification.get("complete"):
+        if identity in winners:
             continue
         winners.add(identity)  # First published version wins, even if temporarily unavailable.
         source = Path(download.save_path)
