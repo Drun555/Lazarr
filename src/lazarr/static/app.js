@@ -45,6 +45,7 @@ function openModal(title, content) { $('#modal-title').textContent=title; $('#mo
 
 const backgroundTaskNames={'next-up':'NextUp · следующий эпизод','library-detail':'Подготовка карточки','trickplay':'Trickplay · превью перемотки','chapter':'Thumbnail · кадр главы','image':'Обработка изображения','subtitle':'Извлечение субтитров','subtitle-interval':'Подготовка субтитров','attachment':'Извлечение вложения','probe':'Анализ медиа'};
 Object.assign(backgroundTaskNames,{'catalog':'Каталог','latest':'Последние добавления','search':'Поиск раздач','metadata-refresh':'Обновление метаданных'});
+backgroundTaskNames['season-mapping']='Применение сопоставления';
 let backgroundTasksTimer,backgroundTasksRequest;
 function renderProcessIndicator(items,downloads,selection){
   const active=items.filter(i=>['running','queued'].includes(i.state)),loading=downloads.filter(d=>['starting','downloading'].includes(d.state));
@@ -79,9 +80,15 @@ function renderBackgroundTasks(items,downloads=[],selection=[]){
     const elapsed=item.started_at?Math.max(0,Math.round((item.finished_at||Date.now()/1000)-item.started_at)):0;
     const planned=item.kind==='search'&&item.state==='queued'&&Number(item.next_attempt_at)>0;
     const detail=planned?'Поиск запланирован на '+new Date(item.next_attempt_at*1000).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit',hour12:false}):item.detail;
-    return `<div class="background-task-row"><span class="background-task-dot ${esc(item.state)}" aria-hidden="true"></span><div><strong>${esc(backgroundTaskNames[item.kind]||item.kind)}</strong>${detail?`<p class="background-task-detail">${esc(detail)}</p>`:''}${item.kind==='search'?'':`<p class="fine">${esc(item.id.slice(0,8))} · ${item.lane==='catalog'?'Каталог':item.lane==='metadata'?'Метаданные':item.lane==='search'?'Поиск':'Медиа'}${item.started_at?` · ${elapsed} с`:''}</p>`}</div><span class="pill">${labels[item.state]}</span></div>`;
+    return `<div class="background-task-row"><span class="background-task-dot ${esc(item.state)}" aria-hidden="true"></span><div><strong>${esc(backgroundTaskNames[item.kind]||item.kind)}</strong>${detail?`<p class="background-task-detail">${esc(detail)}</p>`:''}${item.kind==='season-mapping'?`<p class="fine">Сезон ${item.season_number} · ${item.completed??0}/${item.total??0}</p>${item.state==='failed'?`<button type="button" class="ghost" data-mapping-retry="${esc(item.id)}">Повторить сохранённый план</button>`:''}`:''}${item.kind==='search'?'':`<p class="fine">${esc(item.id.slice(0,8))} · ${item.lane==='catalog'?'Каталог':item.lane==='metadata'?'Метаданные':item.lane==='search'?'Поиск':'Медиа'}${item.started_at?` · ${elapsed} с`:''}</p>`}</div><span class="pill">${labels[item.state]}</span></div>`;
   }).join(''):'<p class="fine background-task-empty">Нет задач</p>'}</section>`).join('');
 }
+document.addEventListener('click',async event=>{
+  const button=event.target.closest('[data-mapping-retry]');if(!button)return;
+  button.disabled=true;
+  try{await api(`/mapping-jobs/${button.dataset.mappingRetry}/retry`,'POST',{});await pollBackgroundTasks();toast('Сохранённый план поставлен в очередь повторно');}
+  catch(error){toast(error.message,true);button.disabled=false;}
+});
 async function pollBackgroundTasks(){
   const dialog=$('#background-tasks-dialog');
   if(!dialog)return;
@@ -89,7 +96,7 @@ async function pollBackgroundTasks(){
   clearTimeout(backgroundTasksTimer);
   backgroundTasksRequest=(async()=>{
     try{
-      if(!document.hidden){const data=await api('/background-tasks');renderProcessIndicator(data.items||[],data.downloads||[],data.selection||[]);if(dialog.open)renderBackgroundTasks(data.items||[],data.downloads||[],data.selection||[]);}
+      if(!document.hidden){const data=await api('/background-tasks');renderProcessIndicator(data.items||[],data.downloads||[],data.selection||[]);if(typeof mappingJobProgress==='function')mappingJobProgress(data.items||[]);if(dialog.open)renderBackgroundTasks(data.items||[],data.downloads||[],data.selection||[]);}
     }catch(error){$('#process-tooltip').textContent='Не удалось обновить процессы';$('#process-pill').hidden=false;$('#process-pill').innerHTML='<span class="process-chip selection">?</span>';$('#process-pill').setAttribute('aria-label','Не удалось обновить процессы');if(dialog.open)$('#background-tasks-summary').textContent=`Не удалось обновить: ${error.message}`;}
   })();
   try{await backgroundTasksRequest;}finally{backgroundTasksRequest=null;backgroundTasksTimer=setTimeout(pollBackgroundTasks,dialog.open?1500:5000);}
@@ -509,9 +516,11 @@ document.addEventListener('submit', event=>{const form=event.target;if(!(form in
   else if(form.id==='inline-task-form'){
     const payload={requirements:readRequirements(form)};
     if($('[data-inline-seasons]',form)){
-      payload.seasons=$$('[data-inline-season]',form).map(row=>{
-        if(row.dataset.manualSeason){const season=Number($('[data-manual-season]',row).value),title=$('[data-manual-title]',row).value.trim();if(!Number.isInteger(season)||season<0)throw new Error('Укажите номер сезона');if(!title)throw new Error('Укажите название сезона');return {season,title,manual:true,...(row.dataset.seasonId?{season_id:Number(row.dataset.seasonId)}:{})};}
-        const value=$('select',row).value;if(!value)throw new Error('Выберите сезон');return {season:Number(value.replace('alt:','')),episodes:episodeList($('input',row).value),...(value.startsWith('alt:')?{numbering_season:Number(value.slice(4))}:{})};
+      const rows=$$('[data-inline-season]',form);payload.season_order=rows.map(row=>Number(row.dataset.sourceSeason));
+      payload.seasons=rows.filter(row=>$('[data-season-enabled]',row).checked).map(row=>{
+        const season=Number(row.dataset.sourceSeason);
+        if(row.dataset.manualSeason){const title=$('[data-manual-title]',row).value.trim();if(!title)throw new Error('Укажите название сезона');return {season,title,manual:true,...(row.dataset.seasonId?{season_id:Number(row.dataset.seasonId)}:{})};}
+        return {season,episodes:episodeList($('[data-season-episodes]',row).value),...(row.dataset.numberingSeason?{numbering_season:Number(row.dataset.numberingSeason)}:{})};
       });
       if(!payload.seasons.length)throw new Error('Выберите хотя бы один сезон');
       const keys=payload.seasons.map(s=>(s.manual?'manual:':'')+(s.numbering_season!=null?'alt:':'')+s.season);

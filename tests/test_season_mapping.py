@@ -12,17 +12,90 @@ from lazarr.models import (
     Episode,
     MediaAsset,
     Release,
+    Season,
+    Subtask,
     SubtaskAsset,
     Task,
+    TaskSeason,
 )
 from lazarr.sdk import TorrentFile
 from lazarr.season_mapping import related_files, releases_key
 from lazarr.services import CreateTask
 from test_api import login
+from test_worker import FakeEngine
 
 
 def files(*paths):
     return [TorrentFile(index=i, path=path, size=100, offset=i * 100) for i, path in enumerate(paths)]
+
+
+def test_add_release_to_empty_manual_season_then_map_episode(core, media, season, monkeypatch):
+    import json
+    from lazarr.sdk import DownloadSource
+
+    config, db, _, service = core
+    service.create_from_metadata(CreateTask(media_id="42", kind="tv", season=1), media, season, 1)
+    with db.session() as session:
+        manual = Season(media_id=1, number=2, title="Manual", metadata_json={"manual": True})
+        session.add(manual)
+        session.flush()
+        manual_id = manual.id
+        session.add(TaskSeason(task_id=1, season_id=manual.id, selection_key="2", whole_season=True))
+        session.get(Task, 1).paused = True
+
+    with TestClient(create_app(config)) as client:
+        login(client)
+        ctx = client.app.state.ctx
+        ctx.plugins.configure("nyaa", {}, True)
+
+        async def inspect(self, candidate):
+            return candidate.model_copy(update={"title": "Manual release"})
+
+        async def resolve(self, candidate):
+            return DownloadSource(torrent=json.dumps(["Pilot.mkv", "Pilot.ru.srt"]).encode())
+
+        monkeypatch.setattr(ctx.plugins.classes["nyaa"], "inspect", inspect)
+        monkeypatch.setattr(ctx.plugins.classes["nyaa"], "resolve_download", resolve)
+        engine = FakeEngine()
+        engine.close = ctx.engine.close
+        monkeypatch.setattr(ctx, "engine", engine)
+        monkeypatch.setattr(ctx.worker, "engine", engine)
+        path = "/api/v1/tasks/1/seasons/2/mapping"
+        assert client.post(path + "/releases", json={"url": "invalid"}).status_code == 422
+        for _ in range(2):
+            response = client.post(path + "/releases", json={"url": "https://nyaa.si/view/321"})
+            assert response.status_code == 200, response.text
+        release_id = response.json()["release_id"]
+        snapshot = client.get(path).json()
+        assert snapshot["episodes"] == []
+        assert [release["id"] for release in snapshot["releases"]] == [release_id]
+        assert len(snapshot["releases"][0]["files"]) == 2
+        with db.session() as session:
+            assert session.scalar(select(Episode).where(Episode.season_id == manual_id)) is None
+            assert session.scalar(select(CandidateDecision)) is None
+            assert session.scalar(select(Download)) is None
+        response = client.post(path + "/episodes", json={"number": 1, "title": "Pilot"})
+        assert response.status_code == 200, response.text
+        subtask_id = response.json()["subtask_id"]
+        ctx.worker.choose = AsyncMock()
+        response = client.put(
+            path,
+            json={
+                "rows": [
+                    {
+                        "subtask_id": subtask_id,
+                        "title": "Pilot",
+                        "release_id": release_id,
+                        "video_index": 0,
+                        "track_indices": [1],
+                    }
+                ]
+            },
+        )
+        assert response.status_code == 200, response.text
+        ctx.worker.choose.assert_awaited_once()
+        with db.session() as session:
+            assert session.get(Subtask, subtask_id).episode_id is not None
 
 
 def test_related_files_without_episode_numbers_and_ambiguity():
@@ -164,7 +237,9 @@ def test_season_editor_bindings_validation_titles_and_manual_episodes(core, medi
             assert data["releases"][0]["files"][0]["related"] == [1]
             ctx.worker.add_manual_task_candidate = AsyncMock(return_value=1)
             assert client.post(path + "/releases", json={"url": "https://nyaa.si/view/1"}).status_code == 200
-            ctx.worker.add_manual_task_candidate.assert_awaited_once_with(1, "https://nyaa.si/view/1", 1)
+            ctx.worker.add_manual_task_candidate.assert_awaited_once_with(
+                1, "https://nyaa.si/view/1", 1, return_release=True
+            )
             assert len(client.get(path).json()["releases"]) == 1
             # Zero-match candidates can be added without selecting any episodes.
             response = client.post(path + "/releases", json={"candidate_id": 1})
@@ -300,6 +375,93 @@ def test_episode_numbers_swap_and_survive_metadata_refresh(core, media, season):
         saved = {row["subtask_id"]: row["number"] for row in client.get(path).json()["episodes"]}
         assert saved[rows[0]["subtask_id"]] == 2
         assert saved[rows[1]["subtask_id"]] == 1
+
+
+def test_insert_split_episode_before_existing_number(core, media, season, monkeypatch):
+    config, db, _, service = core
+    service.create_from_metadata(CreateTask(media_id="42", kind="tv", season=1), media, season, 1)
+    with TestClient(create_app(config)) as client:
+        login(client)
+        ctx = client.app.state.ctx
+        path = "/api/v1/tasks/1/seasons/1/mapping"
+        before = client.get(path).json()["episodes"]
+        with db.session() as session:
+            release = Release(provider="nyaa", external_id="parts", revision="parts", data={"title": "Parts"})
+            session.add(release)
+            session.flush()
+            release_id = release.id
+            session.add(
+                ConfigEntry(key=releases_key(session.get(Task, 1), 1), value={"releases": [release_id]})
+            )
+        torrent = config.data_dir / "torrents" / "parts.torrent"
+        torrent.parent.mkdir(exist_ok=True)
+        torrent.write_bytes(b"parts")
+        monkeypatch.setattr(
+            ctx.engine,
+            "inspect",
+            lambda _: SimpleNamespace(
+                files=files("Episode1.part1.mkv", "Episode1.part2.mkv", "Episode2.mkv")
+            ),
+        )
+        monkeypatch.setattr(ctx.worker, "choose", AsyncMock())
+        # Explicit duplicate numbers still fail. Draft additions reserve a free
+        # number before the final, simultaneous renumbering of all visible rows.
+        assert client.post(path + "/episodes", json={"number": 2, "title": "Part 2"}).status_code == 422
+        response = client.post(path + "/episodes", json={"title": "Part 2"})
+        assert response.status_code == 200, response.text
+        new_id = response.json()["subtask_id"]
+        assert response.json()["number"] > max(row["number"] for row in before)
+        rows = [
+            {
+                "subtask_id": row["subtask_id"],
+                "number": row["number"] + (row["number"] >= 2),
+                "title": row["title"],
+            }
+            for row in before
+        ]
+        rows.insert(1, {"subtask_id": new_id, "number": 2, "title": "Part 2"})
+        for index, row in enumerate(rows[:3]):
+            row.update(release_id=release_id, video_index=index)
+        response = client.put(path, json={"rows": rows})
+        assert response.status_code == 200, response.text
+        assert ctx.worker.choose.await_count == 3
+        with db.session() as session:
+            for call in ctx.worker.choose.await_args_list:
+                decision = session.get(CandidateDecision, call.args[0])
+                assert decision.subtask_id == rows[call.kwargs["video_index"]]["subtask_id"]
+            service._upsert_season(session, 1, season)
+        after = client.get(path).json()["episodes"]
+        assert [(row["subtask_id"], row["number"]) for row in after] == [
+            (row["subtask_id"], row["number"]) for row in rows
+        ]
+        # The same structure can be saved again without a number collision.
+        assert client.put(path, json={"rows": rows}).status_code == 200
+
+
+def test_compact_numbers_after_deleting_episode(core, media, season):
+    config, db, _, service = core
+    service.create_from_metadata(CreateTask(media_id="42", kind="tv", season=1), media, season, 1)
+    with TestClient(create_app(config)) as client:
+        login(client)
+        path = "/api/v1/tasks/1/seasons/1/mapping"
+        before = client.get(path).json()["episodes"]
+        rows = [
+            {"subtask_id": row["subtask_id"], "number": i + 1, "title": row["title"]}
+            for i, row in enumerate(before[1:])
+        ]
+        payload = {"rows": rows, "deleted_subtask_ids": [before[0]["subtask_id"]]}
+        response = client.put(path, json=payload)
+        assert response.status_code == 200, response.text
+        assert client.put(path, json=payload).status_code == 200
+        with db.session() as session:
+            service._upsert_season(session, 1, season)
+        after = client.get(path).json()["episodes"]
+        assert [(row["subtask_id"], row["number"]) for row in after] == [
+            (row["subtask_id"], row["number"]) for row in rows
+        ]
+        # Appending never accidentally restores a hidden, deleted episode.
+        added = client.post(path + "/episodes", json={"title": "New"}).json()
+        assert added["subtask_id"] not in {row["subtask_id"] for row in before}
 
 
 def test_season_title_survives_refresh_and_is_exposed_in_library(core, media, season):

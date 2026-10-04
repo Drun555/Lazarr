@@ -18,6 +18,7 @@ from lazarr.models import (
     Task,
     Episode,
     Season,
+    TaskSeason,
     Media,
     Release,
     Download,
@@ -151,13 +152,21 @@ class Worker:
                 requests = [self.service.request_for(db, subtask)]
             return await self._save_manual_candidate(requests, url)
 
-    async def add_manual_task_candidate(self, task_id, url, season_number=None):
+    async def add_manual_task_candidate(self, task_id, url, season_number=None, *, return_release=False):
         """Inspect one supplied URL against every subtask in a task or season."""
         async with self.lock:
             with self.db.session() as db:
                 task = db.get(Task, task_id)
                 if not task:
                     raise ValueError("Задача не найдена")
+                if return_release:
+                    membership = db.scalar(
+                        select(TaskSeason)
+                        .join(Season, TaskSeason.season_id == Season.id)
+                        .where(TaskSeason.task_id == task_id, Season.number == season_number)
+                    )
+                    if membership is None:
+                        raise ValueError("Сезон задачи не найден")
                 query = select(Subtask).where(Subtask.task_id == task_id)
                 if season_number is not None:
                     query = (
@@ -166,13 +175,13 @@ class Worker:
                         .where(Season.number == season_number)
                     )
                 subtasks = list(db.scalars(query.order_by(Subtask.id)))
-                if not subtasks:
+                if not subtasks and not return_release:
                     raise ValueError("В выбранной области нет серий")
                 requests = [self.service.request_for(db, subtask) for subtask in subtasks]
-            return await self._save_manual_candidate(requests, url)
+            return await self._save_manual_candidate(requests, url, return_release=return_release)
 
     @pinned
-    async def _save_manual_candidate(self, requests, url):
+    async def _save_manual_candidate(self, requests, url, *, return_release=False):
         candidate = self.plugins.manual_candidate(url)
         try:
             detailed, metadata, report = await self.evaluate(
@@ -181,6 +190,8 @@ class Worker:
         except CandidateFiltered as exc:
             raise ValueError(str(exc)) from exc
         release_id, _ = self._record(detailed, metadata, report)
+        if return_release:
+            return release_id
         with self.db.session() as db:
             decision = db.scalar(
                 select(CandidateDecision).where(
@@ -195,6 +206,11 @@ class Worker:
         groups = {}
         pending = []
         with self.db.session() as db:
+            mapping_tasks = {
+                entry.value["task_id"]
+                for entry in db.scalars(select(ConfigEntry).where(ConfigEntry.key.startswith("mapping_job.")))
+                if entry.value.get("state") in {"queued", "running"}
+            }
             for sub, task in db.execute(
                 select(Subtask, Task)
                 .join(Task, Subtask.task_id == Task.id)
@@ -205,6 +221,8 @@ class Worker:
                     Subtask.lease_until <= time.time(),
                 )
             ):
+                if task.id in mapping_tasks:
+                    continue
                 if db.scalar(
                     select(SubtaskAsset.id).where(
                         SubtaskAsset.subtask_id == sub.id, SubtaskAsset.pending.is_(True)

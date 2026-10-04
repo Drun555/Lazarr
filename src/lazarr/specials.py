@@ -88,8 +88,18 @@ def save_catalog(db, media_id, catalog):
 
 
 def catalog_for(db, media_id):
+    from lazarr.season_structure import insertions, local_number
+
     saved = db.get(ConfigEntry, f"special_catalog.{media_id}")
-    seasons = {s["number"]: s for s in saved.value["seasons"]} if saved else {}
+    positions = insertions(db, media_id)
+    seasons = (
+        {
+            local_number(s["number"], positions): {**s, "number": local_number(s["number"], positions)}
+            for s in saved.value["seasons"]
+        }
+        if saved
+        else {}
+    )
     for season in db.scalars(select(Season).where(Season.media_id == media_id, Season.number > 0)):
         episodes = list(db.scalars(select(Episode).where(Episode.season_id == season.id)))
         if episodes:

@@ -99,7 +99,11 @@ async def test_shared_media_detail_tracks_release_calendar_last_search(core, med
     identity = groups[2]["items"][0]["id"]
     before = library.detail(identity)
     assert before["task_count"] == 1 and before["last_search_at"] is None
-    assert before["seasons"] == media.seasons
+    assert [
+        {key: row[key] for key in expected} for row, expected in zip(before["seasons"], media.seasons)
+    ] == media.seasons
+    assert before["seasons"][0]["manual"] is False
+    assert before["seasons"][0]["season_id"] is not None
     assert any(e["season"] == 2 and e["episode"] == 14 for e in before["episodes"])
     # Use canonical filename numbering for this synthetic worker fixture.
     with db.session() as session:

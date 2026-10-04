@@ -1,5 +1,6 @@
 /* Season-wide mapping draft. File identity includes the release, never just its index. */
 let seasonMapping=null;
+const mappingJobStates=new Map();
 const mappingBugIcon='<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><path d="M9 7V5a3 3 0 0 1 6 0v2M8 3 6 1m10 2 2-2M5 10H2m3 5H2m17-5h3m-3 5h3M6 7 3 5m15 2 3-2M6 18l-3 3m15-3 3 3M12 8v13"/><rect x="5" y="7" width="14" height="14" rx="7"/></svg>';
 
 const mappingKey=(release,index)=>`${release}:${index}`;
@@ -8,6 +9,21 @@ function mappingRows(data){
     ...(episode.special_position?{special_position:{mode:episode.special_position.mode,...episode.special_position.position}}:{}),
     release_id:episode.release_id,video_index:episode.binding?.video_index??null,
     track_indices:(episode.binding?.tracks||[]).filter(track=>track.file_index!=null).map(track=>track.file_index)}));
+}
+function mappingRenumber(){
+  seasonMapping.rows.forEach((row,index)=>{
+    if(row.subtask_id<0&&row.title===`Эпизод ${row.number}`)row.title=`Эпизод ${index+1}`;
+    row.number=index+1;
+  });
+}
+function mappingMoveRow(identity,target,after=false){
+  const draft=seasonMapping;if(!draft||draft.busy||draft.applying||identity===target)return;
+  const row=draft.rows.find(row=>row.subtask_id===identity);
+  if(!row||!draft.rows.some(row=>row.subtask_id===target))return;
+  draft.rows=draft.rows.filter(other=>other!==row);
+  draft.rows.splice(draft.rows.findIndex(row=>row.subtask_id===target)+(after?1:0),0,row);
+  mappingRenumber();renderSeasonMapping();
+  $(`[data-mapping-reorder="${identity}"]`)?.focus({preventScroll:true});
 }
 async function mappingPromptUrl(value){
   try{return window.prompt('Введите URL раздачи',value);}catch{
@@ -26,6 +42,13 @@ async function mappingPromptUrl(value){
 async function seasonMappingDialog(task,season){
   const data=await api(`/tasks/${task}/seasons/${season}/mapping`);
   seasonMapping={task,season,data,seasonTitle:data.season_title??'',deletedSubtaskIds:[],hiddenReleaseIds:data.hidden_release_ids||[],rows:mappingRows(data),smart:true,selected:null,busy:false,addingRelease:false,releaseUrl:''};
+  if(data.job&&data.job.state!=='completed'){
+    const saved=data.job.payload;
+    seasonMapping.rows=saved.rows;seasonMapping.seasonTitle=saved.season_title??seasonMapping.seasonTitle;
+    seasonMapping.deletedSubtaskIds=saved.deleted_subtask_ids||[];
+    if(saved.pool_release_ids)seasonMapping.hiddenReleaseIds=data.releases.filter(release=>!saved.pool_release_ids.includes(release.id)).map(release=>release.id);
+    seasonMapping.applying=['queued','running'].includes(data.job.state);
+  }
   renderSeasonMapping();
 }
 function mappingChip(release,file,assigned=false){
@@ -122,17 +145,27 @@ function renderSeasonMapping(){
       const files=release?.files.filter(file=>file.kind===kind&&(kind==='video'?row.video_index===file.index:row.track_indices.includes(file.index)))||[];
       return `<td class="mapping-drop${files.length?'':' mapping-drop-empty'}" data-mapping-row="${row.subtask_id}" data-mapping-kind="${kind}" tabindex="0" role="button" aria-label="${{video:'Видео',audio:'Аудио',subtitle:'Субтитры'}[kind]} эпизода ${row.number}"><div class="mapping-chips">${files.map(file=>mappingChip(release,file,true)).join('')||'<span class="mapping-placeholder">Перенесите файлы сюда</span>'}</div></td>`;
     };
-    return `<tr><td><div class="mapping-episode-fields"><input class="mapping-number" type="number" min="1" max="10000" step="1" aria-label="${row.subtask_id<0?'Номер нового эпизода':'Номер эпизода '+row.number}" data-mapping-number="${row.subtask_id}" value="${row.number}"><input aria-label="Имя эпизода ${row.number}" data-mapping-title="${row.subtask_id}" maxlength="500" value="${esc(row.title)}"><button type="button" class="mapping-delete-episode" data-mapping-delete-episode="${row.subtask_id}" aria-label="Удалить эпизод ${esc(row.number)}" title="Удалить серию">×</button></div></td>${cell('video')}${cell('audio')}${draft.season===0?mappingPositionCell(row):''}${cell('subtitle')}</tr>`;
+    return `<tr data-mapping-episode-row="${row.subtask_id}"><td><div class="mapping-episode-fields"><button type="button" class="mapping-reorder" draggable="${!draft.busy}" data-mapping-reorder="${row.subtask_id}" aria-label="Переместить эпизод ${row.number}" title="Перетащите строку вверх или вниз. Клавиатура: ↑ и ↓">⠿</button><input class="mapping-number" type="number" disabled aria-label="${row.subtask_id<0?'Номер нового эпизода':'Номер эпизода '+row.number}" data-mapping-number="${row.subtask_id}" value="${row.number}"><input aria-label="Имя эпизода ${row.number}" data-mapping-title="${row.subtask_id}" maxlength="500" value="${esc(row.title)}"><button type="button" class="mapping-delete-episode" data-mapping-delete-episode="${row.subtask_id}" aria-label="Удалить эпизод ${esc(row.number)}" title="Удалить серию">×</button></div></td>${cell('video')}${cell('audio')}${draft.season===0?mappingPositionCell(row):''}${cell('subtitle')}</tr>`;
   }).join('');
   openModal(`Сопоставить файлы · Сезон ${draft.season}`,`<div id="season-mapping-editor" aria-busy="${draft.busy}">
+    ${draft.data.job&&draft.data.job.state!=='completed'?`<p class="fine" role="status" id="mapping-job-status">План сохранён на сервере. ${esc(draft.data.job.detail)} (${draft.data.job.completed??0}/${draft.data.job.total??0}). Прогресс и повтор доступны в «Процессах».</p>`:''}
     <section class="mapping-bank" data-mapping-pool tabindex="0" aria-label="Несопоставленные файлы"><div class="mapping-bank-heading"><input class="mapping-season-title" id="mapping-season-title" aria-label="Название сезона" title="Название сезона" maxlength="500" value="${esc(draft.seasonTitle)}" placeholder="Название сезона"><label class="mapping-smart" title="При переносе видео автоматически добавляются связанные аудиофайлы и субтитры из той же раздачи. Неоднозначные совпадения нужно сопоставить вручную."><input id="mapping-smart" type="checkbox" ${draft.smart?'checked':''}> Smart-режим</label><button type="button" class="ghost" id="mapping-toggle-release">${draft.addingRelease?'<span class="mapping-spinner" aria-hidden="true"></span> Получаю файлы…':'Вручную добавить раздачу'}</button><button type="button" class="ghost" id="mapping-existing-release" aria-expanded="false">Выбрать раздачу из существующих</button></div>
     <div class="mapping-release-list">${pool||'<p class="fine">Добавьте раздачу, чтобы начать сопоставление.</p>'}</div></section>
     <p id="mapping-feedback" class="form-error" role="status"></p>
     <div class="mapping-table-scroll"><table class="mapping-table"><thead><tr><th>Эпизод</th><th>Видеофайл</th><th>Аудиофайлы</th>${draft.season===0?'<th>Порядок показа</th>':''}<th>Субтитры</th></tr></thead><tbody>${rows}<tr class="mapping-add-row"><td colspan="${draft.season===0?5:4}"><button type="button" class="ghost" id="mapping-add-episode" aria-label="Добавить эпизод" title="Добавить эпизод">+</button></td></tr></tbody></table></div>
-    <div class="form-footer"><p class="fine">Изменения и удаление серий применяются при сохранении.</p><button type="button" class="primary" id="mapping-save">Сохранить сопоставление</button></div></div>`);
-  if(draft.busy)$$('button,input,select', $('#season-mapping-editor')).forEach(node=>node.disabled=true);
+    <div class="form-footer"><p class="fine">Перетаскивайте строки за ⠿ — номера пересчитываются автоматически. Изменения применяются при сохранении.</p><button type="button" class="primary" id="mapping-save">Сохранить сопоставление</button></div></div>`);
+  if(draft.busy||draft.applying)$$('button,input,select', $('#season-mapping-editor')).forEach(node=>node.disabled=true);
 }
 function mappingEditorActive(draft){return seasonMapping===draft&&$('#modal').open&&Boolean($('#season-mapping-editor'));}
+function mappingJobProgress(items){
+  for(const job of items.filter(item=>item.kind==='season-mapping')){
+    const previous=mappingJobStates.get(job.id);mappingJobStates.set(job.id,job.state);
+    if(['queued','running'].includes(previous)&&['completed','failed'].includes(job.state))toast(job.state==='completed'?`Сопоставление сезона ${job.season_number} применено`:`Не удалось применить сезон ${job.season_number}. План сохранён; повтор доступен в «Процессах».`,job.state==='failed');
+  }
+  const status=$('#mapping-job-status');if(!status||!seasonMapping?.data.job)return;
+  const job=items.find(item=>item.id===seasonMapping.data.job.id);if(!job)return;
+  status.textContent=`План сохранён на сервере. ${job.detail} (${job.completed??0}/${job.total??0}). ${job.state==='completed'?'Откройте редактор заново, чтобы увидеть результат.':'Прогресс и повтор доступны в «Процессах».'}`;
+}
 function mappingFind(key){
   const [releaseId,index]=key.split(':').map(Number);
   const release=seasonMapping.data.releases.find(release=>release.id===releaseId);
@@ -148,7 +181,7 @@ function mappingUnassign(key,subtaskId=null){
   }
 }
 function mappingPlace(key,target){
-  const draft=seasonMapping;if(!draft||draft.busy)return;
+  const draft=seasonMapping;if(!draft||draft.busy||draft.applying)return;
   const {release,file}=mappingFind(key);if(!file||file.kind==='other')return;
   const row=draft.rows.find(row=>row.subtask_id===Number(target.dataset.mappingRow));
   if(!row)return;
@@ -172,11 +205,6 @@ function mappingPlace(key,target){
 }
 document.addEventListener('input',event=>{
   if(event.target.id==='mapping-season-title'&&seasonMapping)seasonMapping.seasonTitle=event.target.value;
-  if(event.target.dataset.mappingNumber&&seasonMapping){
-    const row=seasonMapping.rows.find(row=>row.subtask_id===Number(event.target.dataset.mappingNumber));
-    const oldTitle=`Эпизод ${row.number}`;row.number=event.target.value===''?'':Number(event.target.value);
-    if(row.title===oldTitle){row.title=`Эпизод ${row.number}`;$(`[data-mapping-title="${row.subtask_id}"]`).value=row.title;}
-  }
   if(event.target.dataset.mappingTitle&&seasonMapping){const row=seasonMapping.rows.find(row=>row.subtask_id===Number(event.target.dataset.mappingTitle));row.title=event.target.value;}
 });
 document.addEventListener('change',event=>{
@@ -200,17 +228,42 @@ document.addEventListener('change',event=>{
 });
 document.addEventListener('change',event=>{if(event.target.id==='mapping-smart'&&seasonMapping)seasonMapping.smart=event.target.checked;});
 document.addEventListener('dragstart',event=>{
+  const handle=event.target.closest('[data-mapping-reorder]');
+  if(handle&&seasonMapping&&!seasonMapping.busy&&!seasonMapping.applying){
+    mappingClosePicker();seasonMapping.draggingRow=Number(handle.dataset.mappingReorder);
+    event.dataTransfer.setData('application/x-lazarr-episode',handle.dataset.mappingReorder);event.dataTransfer.effectAllowed='move';return;
+  }
   const chip=event.target.closest('[data-mapping-file]');if(!chip||seasonMapping?.busy)return;
   mappingClosePicker();
   event.dataTransfer.setData('application/x-lazarr-file',chip.dataset.mappingFile);event.dataTransfer.effectAllowed='move';
 });
-document.addEventListener('dragover',event=>{if(event.target.closest('.mapping-drop,[data-mapping-pool]')){event.preventDefault();event.dataTransfer.dropEffect='move';}});
+function mappingClearDrop(){ $$('.mapping-row-before,.mapping-row-after').forEach(row=>row.classList.remove('mapping-row-before','mapping-row-after')); }
+document.addEventListener('dragend',()=>{if(seasonMapping)delete seasonMapping.draggingRow;mappingClearDrop();});
+document.addEventListener('dragover',event=>{
+  if(!seasonMapping||seasonMapping.busy||seasonMapping.applying)return;
+  if(seasonMapping.draggingRow!==undefined){
+    mappingClearDrop();const row=event.target.closest('[data-mapping-episode-row]');if(!row)return;
+    event.preventDefault();event.dataTransfer.dropEffect='move';
+    const rect=row.getBoundingClientRect();row.classList.add(event.clientY>rect.top+rect.height/2?'mapping-row-after':'mapping-row-before');return;
+  }
+  if(event.target.closest('.mapping-drop,[data-mapping-pool]')){event.preventDefault();event.dataTransfer.dropEffect='move';}
+});
 document.addEventListener('drop',event=>{
-  const target=event.target.closest('.mapping-drop,[data-mapping-pool]');if(!target||!seasonMapping||seasonMapping.busy)return;
+  if(seasonMapping?.draggingRow!==undefined){
+    event.preventDefault();const identity=seasonMapping.draggingRow;delete seasonMapping.draggingRow;mappingClearDrop();
+    const row=event.target.closest('[data-mapping-episode-row]');if(!row)return;
+    const rect=row.getBoundingClientRect();mappingMoveRow(identity,Number(row.dataset.mappingEpisodeRow),event.clientY>rect.top+rect.height/2);return;
+  }
+  const target=event.target.closest('.mapping-drop,[data-mapping-pool]');if(!target||!seasonMapping||seasonMapping.busy||seasonMapping.applying)return;
   event.preventDefault();const key=event.dataTransfer.getData('application/x-lazarr-file');if(!key)return;
   if(target.hasAttribute('data-mapping-pool')){mappingUnassign(key);renderSeasonMapping();}else mappingPlace(key,target);
 });
 document.addEventListener('keydown',event=>{
+  const handle=event.target.closest('[data-mapping-reorder]');
+  if(handle&&seasonMapping&&!seasonMapping.busy&&!seasonMapping.applying&&['ArrowUp','ArrowDown'].includes(event.key)){
+    event.preventDefault();const identity=Number(handle.dataset.mappingReorder),index=seasonMapping.rows.findIndex(row=>row.subtask_id===identity),down=event.key==='ArrowDown';
+    const target=seasonMapping.rows[index+(down?1:-1)];if(target)mappingMoveRow(identity,target.subtask_id,down);return;
+  }
   if(event.key==='Escape'&&$('.mapping-episode-picker')){event.preventDefault();mappingClosePicker()?.focus();return;}
   if((event.key==='Enter'||event.key===' ')&&event.target.matches('.mapping-drop,[data-mapping-pool]')){event.preventDefault();event.target.click();}
 });
@@ -218,7 +271,7 @@ document.addEventListener('click',async event=>{
   if(!event.target.closest('.mapping-episode-picker,[data-mapping-file],#mapping-existing-release'))mappingClosePicker();
   const opener=event.target.closest('[data-season-mapping]');
   if(opener){try{opener.disabled=true;await seasonMappingDialog(Number(opener.dataset.seasonMapping),Number(opener.dataset.seasonNumber));}catch(exc){toast(exc.message,true);}finally{opener.disabled=false;}return;}
-  if(!event.target.closest('#season-mapping-editor')||!seasonMapping||seasonMapping.busy)return;
+  if(!event.target.closest('#season-mapping-editor')||!seasonMapping||seasonMapping.busy||seasonMapping.applying)return;
   if(event.target.closest('#mapping-existing-release')){await mappingExistingReleases(event.target.closest('button'));return;}
   const removeRelease=event.target.closest('[data-mapping-remove-release]');
   if(removeRelease){const id=Number(removeRelease.dataset.mappingRemoveRelease);seasonMapping.hiddenReleaseIds.push(id);for(const row of seasonMapping.rows){if(row.release_id===id){row.release_id=null;row.video_index=null;row.track_indices=[];}}seasonMapping.selected=null;renderSeasonMapping();return;}
@@ -242,13 +295,13 @@ document.addEventListener('click',async event=>{
     const identity=Number(deleteEpisode.dataset.mappingDeleteEpisode);
     if(identity>0)seasonMapping.deletedSubtaskIds.push(identity);
     seasonMapping.rows=seasonMapping.rows.filter(row=>row.subtask_id!==identity);
-    seasonMapping.selected=null;renderSeasonMapping();return;
+    mappingRenumber();seasonMapping.selected=null;renderSeasonMapping();return;
   }
   if(event.target.closest('#mapping-add-episode')){
     const number=Math.max(0,...seasonMapping.rows.map(row=>Number(row.number)))+1;
     const subtask_id=Math.min(0,...seasonMapping.rows.map(row=>row.subtask_id))-1;
     seasonMapping.rows.push({subtask_id,number,title:`Эпизод ${number}`,release_id:null,video_index:null,track_indices:[]});
-    renderSeasonMapping();const input=$(`[data-mapping-number="${subtask_id}"]`);input.focus();input.scrollIntoView({block:'center'});return;
+    mappingRenumber();renderSeasonMapping();const input=$(`[data-mapping-title="${subtask_id}"]`);input.focus();input.scrollIntoView({block:'center'});return;
   }
   if(event.target.closest('#mapping-toggle-release')){const url=await mappingPromptUrl(seasonMapping.releaseUrl);if(url===null||!url.trim())return;seasonMapping.releaseUrl=url.trim();await mappingAddRelease({url:seasonMapping.releaseUrl});return;}
   const remove=event.target.closest('[data-mapping-remove]');
@@ -275,13 +328,14 @@ document.addEventListener('click',async event=>{
     if(draft.season===0&&draft.rows.some(row=>{const p=row.special_position||{};return (['before','after','episode'].includes(row.position_kind)&&!(p.airsbefore_season||p.airsafter_season))||(row.position_kind==='episode'&&!p.airsbefore_episode);})){$('#mapping-feedback').textContent='Выберите сезон и, при необходимости, эпизод для порядка показа.';return;}
     draft.busy=true;renderSeasonMapping();
     try{
-      for(const row of draft.rows.filter(row=>row.subtask_id<0)){
-        const restored=draft.data.episodes.find(episode=>draft.deletedSubtaskIds.includes(episode.subtask_id)&&episode.number===row.number);
-        if(restored){row.subtask_id=restored.subtask_id;draft.deletedSubtaskIds=draft.deletedSubtaskIds.filter(id=>id!==row.subtask_id);continue;}
-        const created=await api(`/tasks/${draft.task}/seasons/${draft.season}/mapping/episodes`,'POST',{number:row.number,title:row.title.trim()});
-        row.subtask_id=created.subtask_id;
-      }
-      await api(`/tasks/${draft.task}/seasons/${draft.season}/mapping`,'PUT',{pool_release_ids:draft.data.releases.filter(release=>!draft.hiddenReleaseIds.includes(release.id)).map(release=>release.id),deleted_subtask_ids:draft.deletedSubtaskIds,season_title:draft.seasonTitle,rows:draft.rows,revisions:Object.fromEntries(draft.data.releases.filter(release=>release.revision).map(release=>[release.id,release.revision]))});$('#modal').close();toast('Сопоставление сохранено');await refreshTasks();await refreshLibraryView();}
+      const payload={background:true,pool_release_ids:draft.data.releases.filter(release=>!draft.hiddenReleaseIds.includes(release.id)).map(release=>release.id),deleted_subtask_ids:draft.deletedSubtaskIds,season_title:draft.seasonTitle,rows:draft.rows,revisions:Object.fromEntries(draft.data.releases.filter(release=>release.revision).map(release=>[release.id,release.revision]))};
+      const signature=JSON.stringify(payload);
+      if(draft.saveSignature!==signature){draft.saveSignature=signature;draft.requestId=crypto.randomUUID();}
+      const result=await api(`/tasks/${draft.task}/seasons/${draft.season}/mapping`,'PUT',{...payload,request_id:draft.requestId});
+      if(result.job)mappingJobStates.set(result.job.id,result.job.state);
+      if(mappingEditorActive(draft))$('#modal').close();toast(result.job?'План сохранён. Применение и прогресс — в «Процессах».':'Сопоставление сохранено');
+      if(result.job)pollBackgroundTasks();
+      await refreshTasks();await refreshLibraryView();}
     catch(exc){draft.busy=false;if(mappingEditorActive(draft)){renderSeasonMapping();$('#mapping-feedback').textContent=exc.message;}}
   }
 });
@@ -305,7 +359,8 @@ async function mappingAddRelease(payload){
     }));
     const added=result.release_id??(payload.candidate_id?draft.candidateChoices?.find(choice=>choice.id===payload.candidate_id)?.release_id:updated.releases.find(release=>release.url===payload.url)?.id);
     draft.hiddenReleaseIds=draft.hiddenReleaseIds.filter(id=>id!==added);
-    draft.rows=[...mappingRows(updated).filter(row=>!draft.deletedSubtaskIds.includes(row.subtask_id)).map(row=>remapped.get(row.subtask_id)||row),...draft.rows.filter(row=>row.subtask_id<0).map(row=>remapped.get(row.subtask_id))];draft.data=updated;
+    const known=new Set(draft.rows.map(row=>row.subtask_id));
+    draft.rows=[...draft.rows.map(row=>remapped.get(row.subtask_id)),...mappingRows(updated).filter(row=>!known.has(row.subtask_id)&&!draft.deletedSubtaskIds.includes(row.subtask_id))];draft.data=updated;
     draft.busy=false;draft.addingRelease=false;draft.releaseUrl='';
     if(mappingEditorActive(draft))renderSeasonMapping();toast('Файлы раздачи готовы для сопоставления');
   }catch(exc){draft.busy=false;draft.addingRelease=false;if(mappingEditorActive(draft)){renderSeasonMapping();$('#mapping-feedback').textContent=exc.message;}}

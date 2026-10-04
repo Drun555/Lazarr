@@ -408,6 +408,8 @@ class LibraryService:
             season_info = {item["number"]: dict(item) for item in metadata.get("seasons", [])}
             for season in seasons.values():
                 info = season_info.setdefault(season.number, {"number": season.number})
+                info["manual"] = bool((season.metadata_json or {}).get("manual"))
+                info["season_id"] = season.id
                 info.update(
                     {
                         key: value

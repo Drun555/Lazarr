@@ -483,8 +483,13 @@ dialog:has(#season-mapping-editor){width:min(1440px,calc(100% - 32px));padding:2
 .mapping-table{width:100%;table-layout:fixed;border-collapse:collapse;min-width:720px;}
 .mapping-table th{text-align:left;font-size:12px;color:var(--muted);padding:12px;}
 .mapping-table td{padding:12px;border:1px solid var(--line);vertical-align:middle;}
-.mapping-table th:first-child{width:20%;}
+.mapping-table th:first-child{width:260px;}
 .mapping-episode-fields{display:flex;align-items:center;gap:8px;}
+.mapping-reorder{flex:0 0 24px;padding:3px;background:transparent;border:0;cursor:grab;font-size:22px;line-height:1;}
+.mapping-reorder:active{cursor:grabbing;}
+.mapping-row-before>td{box-shadow:inset 0 3px var(--accent);}
+.mapping-row-after>td{box-shadow:inset 0 -3px var(--accent);}
+.mapping-number:disabled{opacity:1;cursor:default;}
 .mapping-table .mapping-episode-fields input{width:100%;min-width:0;margin:0;}
 .mapping-table .mapping-episode-fields .mapping-number{flex:0 0 44px;width:44px;padding:6px;}
 .mapping-table .mapping-episode-fields input{padding:6px 8px;font-size:12px;min-height:32px;}
@@ -532,3 +537,25 @@ dialog:has(#season-mapping-editor){width:min(1440px,calc(100% - 32px));padding:2
 
 .mapping-position select{width:100%;min-width:0;margin:3px 0;font-size:12px;padding:6px;}
 .mapping-position .fine{display:block;margin-top:4px;}
+
+.season-table-scroll{overflow-x:auto;border:1px solid var(--line);border-radius:14px;margin:14px 0;}
+.season-table{width:100%;border-collapse:collapse;font-size:13px;}
+.season-table th{padding:12px 10px;text-align:left;color:var(--muted);font-size:11px;font-weight:600;white-space:nowrap;background:#ffffff04;}
+.season-table td{padding:12px 10px;border-top:1px solid var(--line);vertical-align:middle;}
+.season-table tr:hover{background:#ffffff04;}
+.season-table .season-name{min-width:200px;width:100%;}
+.season-name .fine{display:block;margin-top:5px;font-size:11px;color:var(--muted);}
+.season-table input{margin:0;padding:9px 10px;min-height:36px;border-radius:9px;}
+.season-table input[data-season-position]{width:48px;text-align:center;opacity:1;color:var(--muted);background:transparent;border-color:transparent;appearance:textfield;}
+.season-table input[data-season-episodes]{width:130px;}
+.season-table input[type=checkbox]{width:17px;height:17px;min-height:0;accent-color:var(--accent);cursor:pointer;}
+.season-table td:nth-child(5){text-align:center;}
+.season-table .season-drag{padding:4px;width:25px;min-width:25px;min-height:32px;background:transparent;color:var(--muted);cursor:grab;font-size:22px;}
+.season-table .season-drag:active{cursor:grabbing;}
+.season-table .season-drag:disabled{cursor:default;opacity:.25;}
+.season-state{display:inline-block;white-space:nowrap;font-size:11px;border-radius:20px;padding:6px 9px;background:#ffffff07;color:var(--muted);}
+.season-state.complete{background:#73cba51a;color:#8dd9b9;}
+.season-unselected .season-name strong{color:var(--muted);}
+.season-table .season-drop-before td{box-shadow:inset 0 2px var(--accent);}
+.season-table .season-drop-after td{box-shadow:inset 0 -2px var(--accent);}
+.season-table [data-remove-inline-season]{padding:4px 8px;margin-left:5px;}

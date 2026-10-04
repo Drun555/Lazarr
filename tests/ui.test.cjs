@@ -1055,21 +1055,112 @@ test('season mapping prefills files, moves smart groups, rejects wrong columns a
     d.querySelector('#mapping-add-episode').click();
     assert.equal(d.querySelectorAll('.mapping-table tbody tr:not(.mapping-add-row)').length,3);
     assert.equal(d.querySelector('[data-mapping-title="-1"]').value,'Эпизод 3');
-    input(w,d.querySelector('[data-mapping-number="-1"]'),'4');
-    assert.equal(d.querySelector('[data-mapping-title="-1"]').value,'Эпизод 4');
+    assert.equal(d.querySelector('[data-mapping-number="-1"]').disabled,true);
+    d.querySelector('[data-mapping-reorder="-1"]').dispatchEvent(new w.KeyboardEvent('keydown',{key:'ArrowUp',bubbles:true,cancelable:true}));
+    assert.equal(d.querySelector('[data-mapping-title="-1"]').value,'Эпизод 2');
     input(w,d.querySelector('[data-mapping-title="-1"]'),'Бонус');
-    input(w,d.querySelector('[data-mapping-number="-1"]'),'5');
+    d.querySelector('[data-mapping-reorder="-1"]').dispatchEvent(new w.KeyboardEvent('keydown',{key:'ArrowDown',bubbles:true,cancelable:true}));
     assert.equal(d.querySelector('[data-mapping-title="-1"]').value,'Бонус');
     assert.equal(calls.some(call=>call.url.endsWith('/mapping/episodes')),false);
     assert.equal(d.querySelector('[data-mapping-title="1"]').value,'Моё имя');
     assert.equal(cell(2,'video').querySelector('[data-mapping-file]').dataset.mappingFile,'7:2');
     assert.equal(d.querySelector('#mapping-season-title').value,'Мой сезон');
-    input(w,d.querySelector('[data-mapping-number="1"]'),'6');
     d.querySelector('#mapping-save').click();await settle();await settle();
     assert.equal(calls.find(call=>call.method==='PUT'&&call.url.endsWith('/mapping')).payload.season_title,'Мой сезон');
     const saved=calls.find(call=>call.method==='PUT'&&call.url.endsWith('/mapping')).payload.rows;
-    assert.equal(saved[2].subtask_id,3);assert.equal(saved[2].number,5);assert.equal(saved[2].title,'Бонус');
-    assert.equal(saved[0].number,6);assert.equal(saved[0].title,'Моё имя');assert.equal(saved[1].video_index,2);assert.deepEqual(saved[1].track_indices,[]);
+    assert.equal(saved[2].subtask_id,-1);assert.equal(saved[2].number,3);assert.equal(saved[2].title,'Бонус');
+    assert.equal(saved[0].number,1);assert.equal(saved[0].title,'Моё имя');assert.equal(saved[1].video_index,2);assert.deepEqual(saved[1].track_indices,[]);
+    assert.equal(calls.some(call=>call.url.endsWith('/mapping/episodes')),false);
+    assert.deepEqual(errors,[]);
+  }finally{dom.window.close();}
+});
+
+test('episode row drag reorders bindings, survives release refresh, and saves a split episode without a number collision',async()=>{
+  const {dom,w,document:d,errors,calls}=await setup();
+  try{
+    const data={episodes:[{subtask_id:1,number:1,title:'Part 1',release_id:7,binding:{video_index:0,tracks:[]}},{subtask_id:2,number:2,title:'Следующая серия',release_id:7,binding:{video_index:2,tracks:[]}}],releases:[{id:7,title:'Parts',files:[{index:0,path:'part1.mkv',kind:'video',related:[]},{index:1,path:'part2.mkv',kind:'video',related:[]},{index:2,path:'next.mkv',kind:'video',related:[]}]}]};
+    const original=w.fetch;let failSave=true;
+    w.fetch=async(url,options={})=>{
+      if(!url.includes('/mapping'))return original(url,options);
+      const payload=options.body?JSON.parse(options.body):undefined;calls.push({url,method:options.method,payload});
+      if(url.endsWith('/episodes'))return {ok:true,status:200,json:async()=>({subtask_id:3,number:3})};
+      if(options.method==='PUT'&&failSave){failSave=false;return {ok:false,status:422,json:async()=>({detail:'Повторите сохранение'})};}
+      return {ok:true,status:200,json:async()=>data};
+    };
+    await w.testSeasonMappingDialog(1,1);
+    const order=()=>[...d.querySelectorAll('[data-mapping-episode-row]')].map(row=>row.dataset.mappingEpisodeRow);
+    const numbers=()=>[...d.querySelectorAll('[data-mapping-number]')].map(input=>input.value);
+    const drag=(identity,target,y=0)=>{
+      const transfer={setData(){},getData(){return '';}};
+      const start=new w.Event('dragstart',{bubbles:true});start.dataTransfer=transfer;
+      d.querySelector(`[data-mapping-reorder="${identity}"]`).dispatchEvent(start);
+      const over=new w.MouseEvent('dragover',{bubbles:true,cancelable:true,clientY:y});over.dataTransfer=transfer;
+      d.querySelector(`[data-mapping-episode-row="${target}"]`).dispatchEvent(over);
+      assert.equal(over.defaultPrevented,true);
+      const drop=new w.MouseEvent('drop',{bubbles:true,cancelable:true,clientY:y});drop.dataTransfer=transfer;
+      d.querySelector(`[data-mapping-episode-row="${target}"]`).dispatchEvent(drop);
+    };
+    d.querySelector('#mapping-add-episode').click();
+    input(w,d.querySelector('[data-mapping-title="-1"]'),'Part 2');
+    const drop=new w.Event('drop',{bubbles:true,cancelable:true});drop.dataTransfer={getData:()=> '7:1'};
+    d.querySelector('[data-mapping-row="-1"][data-mapping-kind="video"]').dispatchEvent(drop);
+    drag(-1,2);
+    assert.deepEqual(order(),['1','-1','2']);assert.deepEqual(numbers(),['1','2','3']);
+    assert.ok([...d.querySelectorAll('[data-mapping-number]')].every(input=>input.disabled));
+    assert.equal(d.querySelector('[data-mapping-row="-1"] [data-mapping-file]').dataset.mappingFile,'7:1');
+    drag(1,2,1);assert.deepEqual(order(),['-1','2','1']);
+    drag(1,-1);assert.deepEqual(order(),['1','-1','2']);
+    assert.equal(calls.filter(call=>call.method==='POST'||call.method==='PUT').length,0);
+    w.prompt=()=> 'https://nyaa.si/view/321';d.querySelector('#mapping-toggle-release').click();await settle();await settle();
+    assert.deepEqual(order(),['1','-1','2']);assert.deepEqual(numbers(),['1','2','3']);
+    d.querySelector('#mapping-save').click();await settle();await settle();
+    assert.match(d.querySelector('#mapping-feedback').textContent,/Повторите/);
+    assert.deepEqual(order(),['1','-1','2']);
+    d.querySelector('#mapping-save').click();await settle();await settle();
+    assert.equal(calls.filter(call=>call.url.endsWith('/episodes')).length,0);
+    const saves=calls.filter(call=>call.method==='PUT');
+    assert.equal(saves[0].payload.request_id,saves[1].payload.request_id);
+    assert.equal(saves[0].payload.background,true);
+    const rows=calls.filter(call=>call.method==='PUT').at(-1).payload.rows;
+    assert.deepEqual(rows.map(row=>[row.subtask_id,row.number,row.video_index]),[[1,1,0],[-1,2,1],[2,3,2]]);
+    assert.deepEqual(errors,[]);
+  }finally{dom.window.close();}
+});
+
+test('mapping plan acceptance closes the editor and failed background jobs offer safe retry',async()=>{
+  const {dom,w,document:d,errors,calls}=await setup();
+  try{
+    const job={id:'f973bf11-574d-46a5-815e-783a635d328b',kind:'season-mapping',lane:'mapping',state:'queued',season_number:1,completed:1,total:2,detail:'Диск недоступен'};
+    const data={episodes:[{subtask_id:1,number:1,title:'First',release_id:null,binding:null}],releases:[]};
+    const original=w.fetch;
+    w.fetch=async(url,options={})=>{
+      if(url==='/api/v1/background-tasks')return {ok:true,status:200,json:async()=>({items:[job]})};
+      if(url.endsWith('/retry')){calls.push({url,method:options.method});job.state='queued';return {ok:true,status:200,json:async()=>({ok:true,job})};}
+      if(url.endsWith('/mapping')){
+        if(options.method==='PUT'){
+          const payload=JSON.parse(options.body);calls.push({url,method:options.method,payload});
+          return {ok:true,status:202,json:async()=>({ok:true,job:{...job,state:'queued'}})};
+        }
+        return {ok:true,status:200,json:async()=>data};
+      }
+      return original(url,options);
+    };
+    await w.testSeasonMappingDialog(1,1);
+    d.querySelector('#mapping-add-episode').click();d.querySelector('#mapping-save').click();await settle();await settle();
+    assert.equal(d.querySelector('#modal').open,false);
+    assert.match(d.querySelector('#toast').textContent,/План сохранён/);
+    const payload=calls.find(call=>call.method==='PUT').payload;
+    assert.equal(payload.background,true);assert.ok(payload.request_id);assert.equal(payload.rows[1].subtask_id,-1);
+    job.state='failed';
+    d.querySelector('#background-tasks-open').click();await settle();await settle();
+    assert.match(d.querySelector('#background-tasks-list').textContent,/Применение сопоставления.*1\/2/s);
+    d.querySelector('[data-mapping-retry]').click();await settle();await settle();
+    assert.ok(calls.some(call=>call.url===`/api/v1/mapping-jobs/${job.id}/retry`&&call.method==='POST'));
+    data.job={...job,payload};
+    await w.testSeasonMappingDialog(1,1);
+    assert.equal(d.querySelector('[data-mapping-title="-1"]').value,'Эпизод 2');
+    assert.equal(d.querySelector('#mapping-save').disabled,true);
+    assert.match(d.querySelector('#mapping-job-status').textContent,/План сохранён/);
     assert.deepEqual(errors,[]);
   }finally{dom.window.close();}
 });
@@ -1174,16 +1265,20 @@ test('media task edits inline, keeps draft across refresh and saves seasons with
     d.querySelector('[data-edit-media-task]').click();
     assert.equal(d.querySelector('#modal').open,false);
     const form=d.querySelector('#inline-task-form');
-    assert.equal(form.querySelector('[data-inline-season] input').value,'2');
+    assert.equal(form.querySelectorAll('[data-inline-season]').length,2);
+    assert.equal(form.querySelector('[data-season-episodes]').value,'2');
+    assert.equal(form.querySelector('[data-season-position]').disabled,true);
     form.querySelector('[name=min_resolution]').value='1080';
-    form.querySelector('[data-inline-season] select').value='2';
-    form.querySelector('[data-inline-season] input').value='1-2';
+    form.querySelector('[data-source-season="1"] [data-season-enabled]').click();
+    form.querySelector('[data-source-season="2"] [data-season-enabled]').click();
+    form.querySelector('[data-source-season="2"] [data-season-episodes]').value='1-2';
     await w.testOpenLibraryMedia(2,true);
     assert.equal(d.querySelector('#inline-task-form'),form);
     assert.equal(form.querySelector('[name=min_resolution]').value,'1080');
     form.dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}));await settle();await settle();
     const saved=calls.find(call=>call.url==='/api/v1/tasks/7'&&call.method==='PATCH');
     assert.deepEqual(saved.payload.seasons,[{season:2,episodes:[1,2]}]);
+    assert.deepEqual(saved.payload.season_order,[1,2]);
     assert.equal(saved.payload.requirements.min_resolution,1080);
     assert.deepEqual(saved.payload.requirements.audio_languages,['ja']);
     assert.deepEqual(saved.payload.requirements.subtitle_languages,['ru']);
@@ -1207,15 +1302,27 @@ test('pencil editor inserts manual seasons alongside TMDB seasons',async()=>{
     const edit=d.querySelector('[data-edit-media-task]');
     edit.click();
     const form=d.querySelector('#inline-task-form');
-    assert.match(form.textContent,/следующие сезоны сдвигаются/);
+    assert.match(form.textContent,/номера обновятся автоматически/);
     assert.ok(form.querySelector('[name=min_resolution]'));
+    const transfer={setData(){}};
+    const start=new w.Event('dragstart',{bubbles:true});start.dataTransfer=transfer;
+    form.querySelector('[data-source-season="2"] [data-season-drag]').dispatchEvent(start);
+    const drop=new w.MouseEvent('drop',{bubbles:true,cancelable:true,clientY:0});drop.dataTransfer=transfer;
+    form.querySelector('[data-source-season="1"]').dispatchEvent(drop);
+    assert.deepEqual([...form.querySelectorAll('[data-inline-season]')].map(row=>row.dataset.sourceSeason),['2','1']);
+    assert.equal(form.querySelector('[data-source-season="1"] [data-season-enabled]').checked,true);
+    form.querySelector('[data-source-season="1"] [data-season-drag]').dispatchEvent(new w.KeyboardEvent('keydown',{key:'ArrowUp',bubbles:true}));
     form.querySelector('[data-add-manual-season]').click();
-    assert.equal(form.querySelectorAll('[data-inline-season]').length,2);
-    form.querySelector('input[data-manual-season]').value='1';
+    assert.equal(form.querySelectorAll('[data-inline-season]').length,3);
+    const handle=form.querySelector('[data-source-season="3"] [data-season-drag]');
+    handle.dispatchEvent(new w.KeyboardEvent('keydown',{key:'ArrowUp',bubbles:true}));
+    handle.dispatchEvent(new w.KeyboardEvent('keydown',{key:'ArrowUp',bubbles:true}));
+    assert.deepEqual([...form.querySelectorAll('[data-season-position]')].map(node=>node.value),['1','2','3']);
     form.querySelector('[data-manual-title]').value='Новая арка';
     form.dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}));await settle();await settle();
     const saved=calls.find(call=>call.url==='/api/v1/tasks/7'&&call.method==='PATCH');
-    assert.deepEqual(saved.payload.seasons,[{season:1,episodes:null},{season:1,title:'Новая арка',manual:true}]);
+    assert.deepEqual(saved.payload.seasons,[{season:3,title:'Новая арка',manual:true},{season:1,episodes:null}]);
+    assert.deepEqual(saved.payload.season_order,[3,1,2]);
     assert.deepEqual(saved.payload.requirements,task.requirements);
     assert.equal(d.querySelector('#inline-task-form'),null);
     assert.deepEqual(errors,[]);

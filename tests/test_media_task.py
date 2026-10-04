@@ -373,6 +373,70 @@ def test_manual_insertion_shifts_loaded_and_catalog_seasons_without_losing_ident
             assert session.scalar(select(Season).where(Season.number == 5)).title == "Вставка"
 
 
+def test_season_table_reorders_unloaded_and_manual_seasons(core, media, monkeypatch):
+    from lazarr.models import ConfigEntry, Episode, Media
+    from lazarr.season_structure import insertions, local_metadata, provider_number
+
+    config, db, _, service = core
+    media.seasons = [{"number": n, "title": f"TMDB {n}", "episode_count": 2} for n in range(1, 3)]
+    task_id = service.create_from_metadata(
+        CreateTask(media_id="42", kind="tv", season=1), media, season_info(1), 1
+    )
+    with db.session() as session:
+        original_id = session.scalar(select(Season.id))
+        episode_ids = list(session.scalars(select(Episode.id)))
+        task = session.get(Task, task_id)
+        prefix = f"season_mapping.{task.id}.{task.created_at}."
+        session.add(ConfigEntry(key=prefix + "1", value={"releases": [42]}))
+    with TestClient(create_app(config)) as client:
+        login(client)
+        requested = []
+
+        async def get_media(*args):
+            return media
+
+        async def get_season(self, external_id, number):
+            requested.append(number)
+            return season_info(number)
+
+        plugin = client.app.state.ctx.plugins.classes["tmdb"]
+        monkeypatch.setattr(plugin, "get_media", get_media)
+        monkeypatch.setattr(plugin, "get_season", get_season)
+        url = f"/api/v1/tasks/{task_id}"
+        response = client.patch(
+            url,
+            json={
+                "seasons": [{"season": 3, "manual": True, "title": "Вставка"}, {"season": 1}],
+                "season_order": [3, 2, 1],
+            },
+        )
+        assert response.status_code == 200, response.text
+        with db.session() as session:
+            assert session.get(Season, original_id).number == 3
+            assert list(session.scalars(select(Episode.id))) == episode_ids
+            assert session.get(ConfigEntry, prefix + "3").value == {"releases": [42]}
+            assert [s["number"] for s in local_metadata(session, session.get(Media, 1))["seasons"]] == [3, 2]
+            positions = insertions(session, 1)
+            assert provider_number(3, positions) == 1
+            assert provider_number(2, positions) == 2
+            with pytest.raises(ValueError):
+                provider_number(1, positions)
+        # Unselecting an empty manual season retains its structure and identity.
+        response = client.patch(url, json={"seasons": [{"season": 3}], "season_order": [1, 2, 3]})
+        assert response.status_code == 200, response.text
+        assert requested == [1, 1]
+        detail = client.get("/api/v1/libraries/media/1").json()
+        assert next(s for s in detail["seasons"] if s["number"] == 1)["manual"]
+        # Invalid/stale tables must roll back selection updates as well.
+        response = client.patch(url, json={"seasons": [{"season": 2}], "season_order": [1, 2]})
+        assert response.status_code == 422, response.text
+        assert client.get("/api/v1/libraries/media/1").json()["task"]["seasons"][0]["season"] == 3
+        with db.session() as session:
+            session.add(ConfigEntry(key="mapping_job.busy", value={"task_id": task_id, "state": "queued"}))
+        response = client.patch(url, json={"season_order": [1, 3, 2]})
+        assert response.status_code == 422, response.text
+
+
 def test_edit_seasons_keeps_downloaded_files_and_restores_completed_parts(core, media, season, tmp_path):
     from lazarr.services import SeasonSelection
     from lazarr.models import LibraryAsset, MediaAsset, Release

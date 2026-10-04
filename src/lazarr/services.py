@@ -743,7 +743,7 @@ class TaskService:
                     save_catalog(db, media.id, catalog)
         return resolved
 
-    def _replace_selections(self, db, task, selections):
+    def _replace_selections(self, db, task, selections, *, preserve_manual=False):
         from lazarr.season_structure import insert
 
         selections = list(selections)
@@ -830,19 +830,29 @@ class TaskService:
         for season_id, season in old_seasons.items():
             if (
                 season_id not in retained
+                and not preserve_manual
                 and (season.metadata_json or {}).get("manual")
                 and not db.scalar(select(Episode.id).where(Episode.season_id == season_id))
             ):
                 db.delete(season)
         enqueue(db, task.id)
 
-    def edit(self, task_id, user_id, *, requirements=None, paused=None, selections=None):
+    def edit(self, task_id, user_id, *, requirements=None, paused=None, selections=None, season_order=None):
         with self.db.session() as db:
             task = db.get(Task, task_id)
             if not task:
                 raise ValueError("Задача не найдена")
+            if season_order is not None:
+                from lazarr.season_structure import ensure_idle
+
+                ensure_idle(db, task.media_id)
             if selections is not None:
-                self._replace_selections(db, task, selections)
+                self._replace_selections(db, task, selections, preserve_manual=season_order is not None)
+            if season_order is not None:
+                from lazarr.season_structure import reorder
+
+                db.flush()
+                reorder(db, task.media_id, season_order)
             if requirements is not None and task.requirements != requirements.model_dump():
                 task.requirements = requirements.model_dump()
                 # A new requirements revision invalidates earlier decisions/overrides.

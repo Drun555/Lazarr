@@ -257,33 +257,37 @@ document.addEventListener('submit',async event=>{
   }catch(error){form.querySelector('.form-error').textContent=error.message;}
 });
 
-function inlineSeasonRow(selection={},task=null){
-  const row=document.createElement('div');row.className='task-season-row';row.dataset.inlineSeason='';
-  row.innerHTML='<label>Сезон<select>'+seasonOptions(libraryItem.metadata)+'</select></label><label>Серии<input placeholder="Все серии сезона"><small>Пусто — все; либо 1, 2, 5–8</small></label><button type="button" class="ghost" data-remove-inline-season aria-label="Удалить сезон из структуры">Удалить</button>';
-  const select=$('select',row);
-  if(selection.season!=null){
-    const value=selection.numbering_season!=null?'alt:'+selection.numbering_season:String(selection.season);
-    if(![...select.options].some(option=>option.value===value))select.add(new Option('Сезон '+selection.season,value));
-    select.value=value;
-    if(!selection.whole_season&&task)$('input',row).value=task.subtasks.filter(part=>part.status!=='removed'&&part.season===selection.season).map(part=>part.episode).join(', ');
-  }else{
-    const selected=new Set($$('[data-inline-season] select').map(node=>node.value));
-    const available=[...select.options].find(option=>option.value!=='0'&&!selected.has(option.value))||[...select.options].find(option=>!selected.has(option.value));
-    if(!available)return null;select.value=available.value;
-  }
+function inlineSeasonRow(info,selection,task){
+  const row=document.createElement('tr');row.dataset.inlineSeason='';row.dataset.sourceSeason=info.number;
+  if(info.manual)row.dataset.manualSeason='true';
+  if(info.season_id)row.dataset.seasonId=info.season_id;
+  if(selection?.numbering_season!=null)row.dataset.numberingSeason=selection.numbering_season;
+  const parts=(task.subtasks||[]).filter(part=>part.status!=='removed'&&(part.canonical_season??part.season)===info.number);
+  const stored=(libraryItem?.episodes||[]).filter(part=>(part.canonical_season??part.season)===info.number);
+  const done=Math.max(parts.filter(part=>part.status==='done').length,stored.filter(part=>(part.files||[]).some(file=>file.current&&file.verified)).length),total=info.episode_count??Math.max(parts.length,stored.length);
+  const active=parts.some(part=>['starting','downloading','ready'].includes(part.status));
+  const status=done&&total&&done>=total?'Скачан':done?`Скачано ${done} из ${total}`:active?'Скачивается':'Не скачан';
+  const title=info.title||`Сезон ${info.number}`,fresh=info.manual&&!info.season_id;
+  row.innerHTML=`<td><button type="button" class="season-drag" data-season-drag draggable="${info.number!==0}" ${info.number===0?'disabled':''} aria-label="Переместить ${esc(title)}" title="Перетащите строку или используйте ↑ и ↓">⠿</button></td><td><input type="number" data-season-position disabled value="${info.number}" aria-label="Номер сезона"></td><td class="season-name">${info.manual?`<input data-manual-title maxlength="500" value="${esc(title)}" aria-label="Название ручного сезона" required>`:`<strong>${esc(title)}</strong>`}<span class="fine">${info.number===0?'Спецматериалы · номер закреплён':info.manual?'Добавлен вручную':`TMDB · ${total||'—'} серий`}</span></td><td><span class="season-state ${done>=total&&done?'complete':''}">${status}</span></td><td><input type="checkbox" data-season-enabled aria-label="Включить ${esc(title)} в задачу" ${selection?'checked':''} ${fresh?'disabled':''}></td><td><input data-season-episodes placeholder="Все серии" aria-label="Серии сезона ${info.number}" ${!selection||info.manual?'disabled':''}>${fresh?'<button type="button" class="ghost" data-remove-inline-season aria-label="Убрать новый сезон">×</button>':''}</td>`;
+  if(selection&&!selection.whole_season&&!info.manual)$('[data-season-episodes]',row).value=parts.map(part=>part.episode).join(', ');
+  if(info.manual)$('[data-manual-title]',row).disabled=!selection;
   return row;
 }
-function manualSeasonRow(selection={}){
-  const row=document.createElement('div');row.className='task-season-row';row.dataset.inlineSeason='';row.dataset.manualSeason='true';
-  const selected=$$('[data-inline-season]').map(node=>Number(node.dataset.manualSeason?$('[data-manual-season]',node).value:$('select',node).value.replace('alt:',''))).filter(Number.isFinite);
-  const known=(libraryItem.metadata.seasons||[]).map(season=>Number(season.number)).filter(Number.isFinite);
-  const suggested=Math.max(0,...selected,...known)+1;
-  row.innerHTML='<label>Номер сезона<input type="number" data-manual-season min="0" max="10000" required></label><label>Название<input data-manual-title maxlength="500" placeholder="Например, Арка Киото" required></label><button type="button" class="ghost" data-remove-inline-season aria-label="Удалить сезон из структуры">Удалить</button>';
-  if(selection.season_id){row.dataset.seasonId=selection.season_id;$('[data-manual-season]',row).readOnly=true;}
-  $('[data-manual-season]',row).value=selection.season??suggested;
-  $('[data-manual-title]',row).value=selection.title||`Сезон ${selection.season??suggested}`;
-  return row;
+function renumberInlineSeasons(){
+  let number=1;
+  $$('[data-inline-season]').forEach(row=>{$('[data-season-position]',row).value=Number(row.dataset.sourceSeason)===0?0:number++;});
 }
+function moveInlineSeason(row,target,after=false){
+  if(!row||!target||row===target||Number(row.dataset.sourceSeason)===0||Number(target.dataset.sourceSeason)===0||row.closest('form').dataset.submitting)return;
+  target.parentElement.insertBefore(row,after?target.nextSibling:target);renumberInlineSeasons();$('[data-season-drag]',row).focus({preventScroll:true});
+}
+let draggedInlineSeason=null;
+document.addEventListener('dragstart',event=>{const handle=event.target.closest('[data-season-drag]');if(!handle||handle.disabled)return;draggedInlineSeason=handle.closest('[data-inline-season]');event.dataTransfer.setData('application/x-lazarr-season',draggedInlineSeason.dataset.sourceSeason);event.dataTransfer.effectAllowed='move';});
+document.addEventListener('dragover',event=>{const row=event.target.closest('[data-inline-season]');if(!draggedInlineSeason||!row||Number(row.dataset.sourceSeason)===0)return;event.preventDefault();event.dataTransfer.dropEffect='move';$$('.season-drop-before,.season-drop-after').forEach(node=>node.classList.remove('season-drop-before','season-drop-after'));const rect=row.getBoundingClientRect();row.classList.add(event.clientY>rect.top+rect.height/2?'season-drop-after':'season-drop-before');});
+document.addEventListener('drop',event=>{const target=event.target.closest('[data-inline-season]');if(!draggedInlineSeason||!target)return;event.preventDefault();const rect=target.getBoundingClientRect();moveInlineSeason(draggedInlineSeason,target,event.clientY>rect.top+rect.height/2);draggedInlineSeason=null;$$('.season-drop-before,.season-drop-after').forEach(node=>node.classList.remove('season-drop-before','season-drop-after'));});
+document.addEventListener('dragend',()=>{draggedInlineSeason=null;$$('.season-drop-before,.season-drop-after').forEach(node=>node.classList.remove('season-drop-before','season-drop-after'));});
+document.addEventListener('keydown',event=>{const handle=event.target.closest('[data-season-drag]');if(!handle||handle.disabled||!['ArrowUp','ArrowDown'].includes(event.key))return;event.preventDefault();const row=handle.closest('tr'),down=event.key==='ArrowDown';moveInlineSeason(row,down?row.nextElementSibling:row.previousElementSibling,down);});
+document.addEventListener('change',event=>{if(event.target.matches('[data-season-enabled]')){const row=event.target.closest('tr');$('[data-season-episodes]',row).disabled=!event.target.checked||Boolean(row.dataset.manualSeason);if(row.dataset.manualSeason)$('[data-manual-title]',row).disabled=!event.target.checked;row.classList.toggle('season-unselected',!event.target.checked);}});
 function closeInlineTaskEditor(){
   const form=$('#inline-task-form');if(!form)return;
   const panel=$('#media-task');form.remove();
@@ -297,13 +301,22 @@ function openInlineTaskEditor(button){
   const task=libraryItem.task||state.tasks.find(task=>task.id===Number(button.dataset.editMediaTask));
   const panel=$('#media-task');panel.open=true;
   const form=document.createElement('form');form.id='inline-task-form';form.dataset.task=task.id;
-  const seasonFields='<fieldset><legend>Сезоны и серии</legend><p class="fine">Пустое поле серий означает весь сезон. При вставке ручного сезона следующие сезоны сдвигаются на один номер.</p><div data-inline-seasons></div><div class="task-actions"><button type="button" class="ghost" data-add-inline-season>Добавить сезон из TMDB</button><button type="button" class="ghost" data-add-manual-season>Добавить сезон вручную</button></div></fieldset>';
+  const seasonFields='<fieldset class="season-editor"><legend>Сезоны</legend><p class="fine">Все сезоны TMDB и ручные — в одном списке. Перетаскивайте за ⠿: номера обновятся автоматически. Флажок включает сезон в задачу; пустое поле серий означает весь сезон.</p><div class="season-table-scroll"><table class="season-table"><thead><tr><th></th><th>№</th><th>Сезон</th><th>Готовность</th><th>В задаче</th><th>Серии</th></tr></thead><tbody data-inline-seasons></tbody></table></div><button type="button" class="ghost" data-add-manual-season>＋ Добавить сезон вручную</button></fieldset>';
   const requirements=requirementFields(task.requirements);
   const note='Готовые файлы сохраняются. Новые требования применяются к ещё не скачанным сериям.';
   form.innerHTML=(task.kind==='tv'||libraryItem.kind==='tv'?seasonFields:'')+requirements+`<p class="fine">${note}</p><div class="form-footer"><p class="form-error" role="alert"></p><button type="button" class="ghost" data-cancel-inline-task>Отмена</button><button type="submit" class="primary">Сохранить</button></div>`;
-  if(task.kind==='tv'||libraryItem.kind==='tv')for(const selection of task.seasons||[])$('[data-inline-seasons]',form).append(selection.manual?manualSeasonRow(selection):inlineSeasonRow(selection,task));
+  if(task.kind==='tv'||libraryItem.kind==='tv'){
+    const catalog=new Map((libraryItem.metadata.seasons||[]).map(info=>[info.number,{...info}]));
+    for(const info of libraryItem.seasons||[])catalog.set(info.number,{...catalog.get(info.number),...info});
+    for(const selection of task.seasons||[]){const number=selection.canonical_season??selection.season;catalog.set(number,{...catalog.get(number),number,...(selection.manual?{manual:true,title:selection.title,season_id:selection.season_id}:{})});}
+    for(const info of [...catalog.values()].sort((a,b)=>a.number-b.number)){
+      const selection=(task.seasons||[]).find(row=>(row.canonical_season??row.season)===info.number);
+      const row=inlineSeasonRow(info,selection,task);row.classList.toggle('season-unselected',!selection);$('[data-inline-seasons]',form).append(row);
+    }
+  }
   $('.media-task-body>dl',panel).hidden=true;$('.media-task-body>.task-actions',panel).hidden=true;
   $('.media-task-body',panel).prepend(form);$$('[data-edit-media-task]',panel).forEach(node=>node.disabled=true);
+  renumberInlineSeasons();
   $('select, input, button',form)?.focus();
 }
 document.addEventListener('click',event=>{
@@ -312,7 +325,6 @@ document.addEventListener('click',event=>{
   if(button.hasAttribute('data-edit-media-task')){
     openInlineTaskEditor(button);
   }else if(button.hasAttribute('data-cancel-inline-task'))closeInlineTaskEditor();
-  else if(button.hasAttribute('data-add-inline-season')){const row=inlineSeasonRow();if(row)$('[data-inline-seasons]').append(row);}
-  else if(button.hasAttribute('data-add-manual-season'))$('[data-inline-seasons]').append(manualSeasonRow());
-  else if(button.hasAttribute('data-remove-inline-season')){if($$('[data-inline-season]').length>1)button.closest('[data-inline-season]').remove();else toast('Выберите хотя бы один сезон',true);}
+  else if(button.hasAttribute('data-add-manual-season')){const number=Math.max(0,...$$('[data-inline-season]').map(row=>Number(row.dataset.sourceSeason)))+1;const row=inlineSeasonRow({number,title:'Новый сезон',manual:true},{whole_season:true},{subtasks:[]});$('[data-inline-seasons]').append(row);renumberInlineSeasons();$('[data-manual-title]',row).focus();}
+  else if(button.hasAttribute('data-remove-inline-season')){button.closest('[data-inline-season]').remove();renumberInlineSeasons();}
 });

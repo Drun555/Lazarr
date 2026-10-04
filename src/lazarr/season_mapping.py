@@ -1,8 +1,11 @@
 """Season-wide editor over the existing per-episode download bindings."""
 
 import asyncio
+from types import SimpleNamespace
+from uuid import UUID
 
 from fastapi import Depends, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
@@ -75,7 +78,7 @@ async def inspect(ctx, release):
 
 
 class EpisodeInput(BaseModel):
-    number: int = Field(ge=1, le=10000)
+    number: int | None = Field(default=None, ge=1, le=10000)
     title: str = Field(min_length=1, max_length=500)
 
 
@@ -97,6 +100,8 @@ class MappingRow(BaseModel):
 
 
 class MappingInput(BaseModel):
+    background: bool = False
+    request_id: UUID | None = None
     pool_release_ids: list[int] | None = Field(default=None, max_length=10000)
     deleted_subtask_ids: list[int] = Field(default_factory=list, max_length=10000)
     season_title: str | None = Field(default=None, max_length=500)
@@ -213,6 +218,7 @@ def register(app, context, authenticated, permission):
                 }
             )
         return {
+            "job": await asyncio.to_thread(ctx.mapping_jobs.latest, task_id, season_number),
             "season_title": season_title,
             "placement_seasons": catalog,
             "episodes": episodes,
@@ -243,20 +249,21 @@ def register(app, context, authenticated, permission):
                     raise ValueError("Раздача не принадлежит сезону")
                 release = db.get(Release, decision.release_id)
             await inspect(ctx, release)
-            decision_id = payload.candidate_id
+            release_id = release.id
         else:
-            decision_id = await ctx.worker.add_manual_task_candidate(task_id, payload.url, season_number)
+            release_id = await ctx.worker.add_manual_task_candidate(
+                task_id, payload.url, season_number, return_release=True
+            )
         with ctx.db.session() as db:
-            decision = db.get(CandidateDecision, decision_id)
             key = releases_key(task, season_number)
             entry = db.get(ConfigEntry, key)
             ids = entry.value.get("releases", []) if entry else []
             value = {
-                "releases": sorted(set(ids + [decision.release_id])),
+                "releases": sorted(set(ids + [release_id])),
                 "hidden_releases": [
                     identity
                     for identity in (entry.value.get("hidden_releases", []) if entry else [])
-                    if identity != decision.release_id
+                    if identity != release_id
                 ],
             }
             if entry:
@@ -264,7 +271,7 @@ def register(app, context, authenticated, permission):
             else:
                 db.add(ConfigEntry(key=key, value=value))
             audit(db, user.id, "season_mapping.release", str(task_id), {"season": season_number, **value})
-        return {"ok": True, "release_id": decision.release_id}
+        return {"ok": True, "release_id": release_id}
 
     @app.post("/api/v1/tasks/{task_id}/seasons/{season_number}/mapping/releases/{release_id}/report")
     @pinned
@@ -443,13 +450,24 @@ def register(app, context, authenticated, permission):
         async with ctx.worker.lock:
             with ctx.db.session() as db:
                 _, season, rows = scope(db, task_id, season_number)
-                if any(episode.number == payload.number for _, episode in rows):
+                # Draft rows are appended under a free number first. The mapping
+                # save then applies the final numbers together, allowing insertion.
+                number = payload.number
+                if number is None:
+                    number = (
+                        max(
+                            db.scalars(select(Episode.number).where(Episode.season_id == season.id)),
+                            default=0,
+                        )
+                        + 1
+                    )
+                if any(episode.number == number for _, episode in rows):
                     raise ValueError("Эпизод с таким номером уже добавлен")
                 episode = db.scalar(
-                    select(Episode).where(Episode.season_id == season.id, Episode.number == payload.number)
+                    select(Episode).where(Episode.season_id == season.id, Episode.number == number)
                 )
                 if not episode:
-                    episode = Episode(season_id=season.id, number=payload.number, title=payload.title.strip())
+                    episode = Episode(season_id=season.id, number=number, title=payload.title.strip())
                     db.add(episode)
                     db.flush()
                 if not payload.title.strip():
@@ -487,6 +505,20 @@ def register(app, context, authenticated, permission):
         user=Depends(permission("tasks")),
     ):
         ctx = context(request)
+        from lazarr.mapping_jobs import current_job
+
+        if payload.background:
+            async with ctx.mapping_jobs.accept_lock:
+                job = await asyncio.to_thread(
+                    ctx.mapping_jobs.enqueue, task_id, season_number, payload, user.id
+                )
+            ctx.mapping_jobs.wake.set()
+            return JSONResponse({"ok": True, "job": job}, status_code=202)
+        if current_job.get() is None:
+            jobs = await asyncio.to_thread(ctx.mapping_jobs.snapshot)
+            if any(job["task_id"] == task_id and job["state"] in {"queued", "running"} for job in jobs):
+                raise HTTPException(409, "Сопоставление задачи уже применяется")
+        await ctx.mapping_jobs.progress("Проверка сохранённого плана и файлов")
         snapshot = await get_mapping(task_id, season_number, request, user)
         existing = {row["subtask_id"]: row for row in snapshot["episodes"]}
         deleted_ids = set(payload.deleted_subtask_ids)
@@ -509,6 +541,8 @@ def register(app, context, authenticated, permission):
         seen = set()
         # Validate the whole edit before making any download changes.
         for row in payload.rows:
+            if row.subtask_id < 0 and row.number is not None:
+                existing[row.subtask_id] = {"release_id": None, "binding": None}
             if row.subtask_id not in existing or row.subtask_id in seen:
                 raise ValueError("Серия не принадлежит сезону или указана дважды")
             seen.add(row.subtask_id)
@@ -548,12 +582,48 @@ def register(app, context, authenticated, permission):
         with ctx.db.session() as db:
             task, season, scoped_rows = scope(db, task_id, season_number)
             episodes = {sub.id: episode for sub, episode in scoped_rows}
+            spare = (
+                max(db.scalars(select(Episode.number).where(Episode.season_id == season.id)), default=0) + 1
+            )
+            for row in payload.rows:
+                if row.subtask_id >= 0:
+                    continue
+                episode = Episode(season_id=season.id, number=spare, title=row.title.strip())
+                spare += 1
+                db.add(episode)
+                db.flush()
+                sub = Subtask(task_id=task_id, episode_id=episode.id, part_key=f"episode:{episode.id}")
+                db.add(sub)
+                db.flush()
+                existing[sub.id] = existing.pop(row.subtask_id)
+                row.subtask_id = sub.id
+                episodes[sub.id] = episode
             changes = {
                 episodes[row.subtask_id].id: row.number
                 for row in payload.rows
                 if row.number is not None and row.number != episodes[row.subtask_id].number
             }
             season_episodes = list(db.scalars(select(Episode).where(Episode.season_id == season.id)))
+            retired = {episodes[identity].id for identity in deleted_ids if identity in episodes}
+            retired.update(
+                episode.id
+                for episode in season_episodes
+                if db.get(ConfigEntry, f"episode_deleted.{episode.id}")
+            )
+            # Deleted rows keep their IDs and history, but must not reserve visible
+            # numbers when the remaining rows are compacted after a deletion.
+            occupied = {
+                changes.get(episode.id, episode.number)
+                for episode in season_episodes
+                if episode.id not in retired
+            }
+            spare = max([0, *occupied, *(episode.number for episode in season_episodes)]) + 1
+            for episode in season_episodes:
+                if episode.id in retired:
+                    if episode.number in occupied:
+                        changes[episode.id] = spare
+                        spare += 1
+                    occupied.add(changes.get(episode.id, episode.number))
             numbers = [changes.get(episode.id, episode.number) for episode in season_episodes]
             if len(numbers) != len(set(numbers)):
                 raise ValueError("Номера эпизодов в сезоне должны быть уникальными")
@@ -592,10 +662,15 @@ def register(app, context, authenticated, permission):
                 entry.value = value
             else:
                 db.add(ConfigEntry(key=key, value=value))
+            ctx.mapping_jobs.persist_payload(db, payload)
         completed = []
         try:
             # Submit replacements before removals so shared files remain protected.
             for row in sorted(payload.rows, key=lambda row: row.video_index is None):
+                await ctx.mapping_jobs.progress(
+                    f"Серия {row.number or row.subtask_id}: применение файлов (ожидание загрузчика и диска)",
+                    len(completed),
+                )
                 old = existing[row.subtask_id]
                 binding = old["binding"] or {}
                 old_tracks = sorted(
@@ -679,10 +754,12 @@ def register(app, context, authenticated, permission):
                             db.add(ConfigEntry(key=key, value={"title": episode.title}))
                     audit(db, user.id, "season_mapping.save", str(row.subtask_id))
                 completed.append(row.subtask_id)
+                await ctx.mapping_jobs.progress(f"Применено серий: {len(completed)}", len(completed))
             # Assign returned files first, then retire the deleted rows using shared-file protection.
             from lazarr.deletion import delete_selection
 
             for identity in deleted_ids:
+                await ctx.mapping_jobs.progress("Удаление исключённых серий", len(completed))
                 with ctx.db.session() as db:
                     sub = db.get(Subtask, identity)
                     if db.get(ConfigEntry, f"episode_deleted.{sub.episode_id}"):
@@ -702,6 +779,27 @@ def register(app, context, authenticated, permission):
             ) from exc
         from lazarr.storage import reconcile
 
+        await ctx.mapping_jobs.progress("Обновление файлов медиатеки", len(completed))
         await asyncio.to_thread(reconcile, ctx.db)
         ctx.scheduler.discard_satisfied()
         return {"ok": True}
+
+    async def apply_job(job):
+        payload = MappingInput.model_validate(job["payload"]).model_copy(update={"background": False})
+        await save_mapping(
+            job["task_id"],
+            job["season_number"],
+            payload,
+            Request({"type": "http", "app": app}),
+            SimpleNamespace(id=job["owner_id"]),
+        )
+
+    app.state.apply_mapping_job = apply_job
+
+    @app.post("/api/v1/mapping-jobs/{identity}/retry")
+    async def retry_mapping(identity: UUID, request: Request, user=Depends(permission("tasks"))):
+        ctx = context(request)
+        async with ctx.mapping_jobs.accept_lock:
+            job = await asyncio.to_thread(ctx.mapping_jobs.retry, str(identity))
+        ctx.mapping_jobs.wake.set()
+        return {"ok": True, "job": job}

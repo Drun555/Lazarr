@@ -86,6 +86,8 @@ class Context:
         self.telegram.menu = TelegramMenu(self, self.telegram)
 
     async def close(self):
+        if hasattr(self, "mapping_jobs"):
+            await self.mapping_jobs.close()
         await self.preparation.close()
         await self.telegram.stop()
         if self.config.background:
@@ -154,6 +156,7 @@ class AccountEdit(BaseModel):
 
 
 class TaskEdit(BaseModel):
+    season_order: list[int] | None = Field(default=None, min_length=1, max_length=200)
     seasons: list[SeasonSelection] | None = Field(default=None, min_length=1, max_length=200)
     requirements: Requirements | None = None
     paused: bool | None = None
@@ -209,10 +212,14 @@ def create_app(config: RuntimeConfig | None = None):
     async def lifespan(app):
         ctx = Context(config)
         app.state.ctx = ctx
+        from lazarr.mapping_jobs import MappingJobs
+
+        ctx.mapping_jobs = MappingJobs(ctx, app.state.apply_mapping_job)
         if config.background:
             await ctx.scheduler.start()
             await ctx.telegram.start()
             ctx.preparation.start()
+        await ctx.mapping_jobs.start()
         try:
             yield
         finally:
@@ -278,6 +285,7 @@ def create_app(config: RuntimeConfig | None = None):
         downloads = await asyncio.to_thread(ctx.service.download_activity)
         selection = await asyncio.to_thread(ctx.service.selection_activity)
         snapshot = ctx.background_tasks.snapshot(user.id)
+        snapshot["items"] = await asyncio.to_thread(ctx.mapping_jobs.snapshot) + snapshot["items"]
         search = ctx.scheduler.snapshot()
         state = (
             "running"
@@ -534,7 +542,12 @@ def create_app(config: RuntimeConfig | None = None):
         user=Depends(permission("tasks")),
     ):
         ctx = context(request)
-        if payload.paused is not None and payload.requirements is None and payload.seasons is None:
+        if (
+            payload.paused is not None
+            and payload.requirements is None
+            and payload.seasons is None
+            and payload.season_order is None
+        ):
             # Saving pause must not wait for the search lock held by network requests.
             ctx.service.edit(identity, user.id, paused=payload.paused)
             if payload.paused:
@@ -554,6 +567,7 @@ def create_app(config: RuntimeConfig | None = None):
                 requirements=payload.requirements,
                 paused=payload.paused,
                 selections=selections,
+                season_order=payload.season_order,
             )
             await ctx.worker.sync_consumers()
         ctx.scheduler.wake.set()
