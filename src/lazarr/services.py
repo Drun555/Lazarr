@@ -1,6 +1,7 @@
 from lazarr.search_runtime import current_engine
 import time
 import calendar
+from contextlib import AsyncExitStack
 from datetime import datetime, timezone
 from sqlalchemy import select, update, text
 from pydantic import BaseModel, Field
@@ -21,14 +22,18 @@ from lazarr.models import (
     Release,
     Download,
 )
-from lazarr.sdk import MetadataItem, SeasonInfo, SubtaskRequest
+from lazarr.sdk import MetadataItem, SeasonInfo, EpisodeInfo, SubtaskRequest
 from lazarr.security import audit
+from lazarr.season_structure import insertions, local_metadata, local_number, provider_number
 
 
 class SeasonSelection(BaseModel):
     season: int = Field(ge=0)
     episodes: list[int] | None = None
     numbering_season: int | None = Field(default=None, ge=1)
+    manual: bool = False
+    title: str | None = Field(default=None, max_length=500)
+    season_id: int | None = Field(default=None, ge=1)
 
 
 class CreateTask(BaseModel):
@@ -59,7 +64,9 @@ class CreateTask(BaseModel):
             ]
         else:
             raise ValueError("Выберите хотя бы один сезон")
-        keys = [(s.numbering_season is not None, s.numbering_season or s.season) for s in selections]
+        keys = [
+            (s.manual, s.numbering_season is not None, s.numbering_season or s.season) for s in selections
+        ]
         if len(keys) != len(set(keys)):
             raise ValueError("Сезон указан несколько раз")
         return selections
@@ -193,7 +200,12 @@ class TaskService:
             existing = set(db.scalars(select(Subtask.episode_id).where(Subtask.task_id == task.id)))
             for selection, canonical, numbering, info in resolved:
                 season = self._upsert_season(db, media.id, info)
-                key = f"alt:{selection.numbering_season}" if numbering else str(season.number)
+                if numbering:
+                    numbering = {
+                        **numbering,
+                        "season": local_number(numbering["season"], insertions(db, media.id)),
+                    }
+                key = f"alt:{numbering['season']}" if numbering else str(season.number)
                 membership = db.scalar(
                     select(TaskSeason).where(TaskSeason.task_id == task.id, TaskSeason.selection_key == key)
                 )
@@ -249,12 +261,23 @@ class TaskService:
             media = db.get(Media, media_id)
             if not media or media.kind != "tv":
                 raise ValueError("Сериал не найден")
+            positions = insertions(db, media_id)
+            selection = selection.model_copy(
+                update={
+                    "season": provider_number(selection.season, positions),
+                    "numbering_season": provider_number(selection.numbering_season, positions)
+                    if selection.numbering_season is not None
+                    else None,
+                }
+            )
             payload = CreateTask(
                 provider=media.provider, media_id=media.external_id, kind="tv", seasons=[selection]
             )
         return await self.create(payload, user_id)
 
-    def _upsert_season(self, db, media_id, info: SeasonInfo):
+    def _upsert_season(self, db, media_id, info: SeasonInfo, *, local=False):
+        if not local:
+            info = info.model_copy(update={"number": local_number(info.number, insertions(db, media_id))})
         season = db.scalar(select(Season).where(Season.media_id == media_id, Season.number == info.number))
         if not season:
             season = Season(media_id=media_id, number=info.number, title=info.title)
@@ -292,11 +315,14 @@ class TaskService:
     async def refresh_seasons(self):
         with self.db.session() as db:
             rows = [
-                (s.id, m.provider, m.external_id, s.number)
+                (s.id, m.provider, m.external_id, provider_number(s.number, insertions(db, m.id)))
                 for s, m in db.execute(
                     select(Season, Media)
                     .join(Media, Season.media_id == Media.id)
-                    .where(Season.refreshed_at < time.time() - 86400)
+                    .where(
+                        Season.refreshed_at < time.time() - 86400,
+                        Season.metadata_json["manual"].as_boolean().is_not(True),
+                    )
                 )
             ]
         for season_id, provider_id, external_id, number in rows:
@@ -327,7 +353,9 @@ class TaskService:
                     if catalog is not None:
                         save_catalog(db, season.media_id, catalog)
                     if item:
-                        db.get(Media, season.media_id).metadata_json = item.model_dump()
+                        stored_media = db.get(Media, season.media_id)
+                        stored_media.metadata_json = item.model_dump()
+                        item = MetadataItem.model_validate(local_metadata(db, stored_media))
                     for membership in db.scalars(
                         select(TaskSeason).where(
                             TaskSeason.season_id == season_id, TaskSeason.whole_season.is_(True)
@@ -349,7 +377,7 @@ class TaskService:
                                 item,
                             )
                             if (
-                                selection.season != number
+                                selection.season != season.number
                                 or numbering["source"] != membership.numbering["source"]
                             ):
                                 continue
@@ -378,7 +406,7 @@ class TaskService:
         season = db.get(Season, episode.season_id) if episode else None
         return SubtaskRequest(
             id=subtask.id,
-            media=MetadataItem.model_validate(media.metadata_json),
+            media=MetadataItem.model_validate(local_metadata(db, media)),
             season=season.number if season else None,
             episode=episode.number if episode else None,
             absolute_number=episode.absolute_number if episode else None,
@@ -529,6 +557,9 @@ class TaskService:
                             "canonical_season": seasons[m.season_id].number,
                             "whole_season": m.whole_season,
                             "numbering_season": m.numbering.get("season"),
+                            "manual": bool((seasons[m.season_id].metadata_json or {}).get("manual")),
+                            "title": seasons[m.season_id].title,
+                            "season_id": m.season_id,
                         }
                         for m in memberships
                     ],
@@ -605,15 +636,91 @@ class TaskService:
             if not task:
                 raise ValueError("Задача не найдена")
             media = db.get(Media, task.media_id)
+            database_media_id = media.id
             payload = CreateTask(
                 provider=media.provider, media_id=media.external_id, kind=media.kind, seasons=selections
             )
-        resolved, occupied = [], set()
-        async with self.plugins.open(payload.provider) as provider:
-            item = await provider.get_media(payload.kind, payload.media_id)
+        resolved, occupied, keys = [], set(), set()
+        async with AsyncExitStack() as stack:
+            provider = None
+            if any(not selection.manual for selection in selections):
+                provider = await stack.enter_async_context(self.plugins.open(payload.provider))
+            remote_item = (
+                await provider.get_media(payload.kind, payload.media_id)
+                if provider
+                else MetadataItem.model_validate(media.metadata_json)
+            )
+            media.metadata_json = remote_item.model_dump()
+            with self.db.session() as db:
+                positions = insertions(db, database_media_id)
+                item = MetadataItem.model_validate(local_metadata(db, media))
             for selection in payload.selections():
+                key = (
+                    selection.manual,
+                    selection.numbering_season is not None,
+                    selection.numbering_season or selection.season,
+                )
+                if key in keys:
+                    raise ValueError("Сезон указан несколько раз")
+                keys.add(key)
+                if selection.manual:
+                    if selection.numbering_season is not None or selection.episodes is not None:
+                        raise ValueError("Для ручного сезона укажите только номер и название")
+                    title = (selection.title or f"Сезон {selection.season}").strip()
+                    if not title:
+                        raise ValueError("Укажите название сезона")
+                    with self.db.session() as db:
+                        stored = (
+                            db.get(Season, selection.season_id)
+                            if selection.season_id
+                            else db.scalar(
+                                select(Season).where(
+                                    Season.media_id == database_media_id,
+                                    Season.number == selection.season,
+                                )
+                            )
+                        )
+                        if selection.season_id and (
+                            not stored
+                            or stored.media_id != database_media_id
+                            or not (stored.metadata_json or {}).get("manual")
+                            or stored.number != selection.season
+                        ):
+                            raise ValueError("Ручной сезон изменился; откройте редактор заново")
+                        if stored and not (stored.metadata_json or {}).get("manual"):
+                            stored = None
+                        selection = selection.model_copy(update={"season_id": stored.id if stored else None})
+                        episodes = (
+                            list(
+                                db.scalars(
+                                    select(Episode)
+                                    .where(Episode.season_id == stored.id)
+                                    .order_by(Episode.number)
+                                )
+                            )
+                            if stored
+                            else []
+                        )
+                        episode_info = [
+                            EpisodeInfo(
+                                id=episode.external_id or f"manual:{episode.id}",
+                                number=episode.number,
+                                title=episode.title,
+                                overview=episode.overview,
+                                still=episode.still,
+                                air_date=episode.air_date,
+                                absolute_number=episode.absolute_number,
+                            )
+                            for episode in episodes
+                        ]
+                    info = SeasonInfo(number=selection.season, title=title, episodes=episode_info)
+                    resolved.append((selection, {}, info, {episode.number for episode in episodes}))
+                    continue
                 canonical, numbering = resolve_numbering(selection, item)
-                info = await provider.get_season(payload.media_id, canonical.season)
+                info = await provider.get_season(
+                    payload.media_id, provider_number(canonical.season, positions)
+                )
+                info = info.model_copy(update={"number": canonical.season})
                 numbers = {episode.number for episode in info.episodes}
                 if canonical.episodes is not None:
                     if not canonical.episodes or not set(canonical.episodes) <= numbers:
@@ -624,22 +731,62 @@ class TaskService:
                     raise ValueError("Выбранные сезоны содержат одни и те же серии")
                 occupied.update(parts)
                 resolved.append((selection, numbering, info, numbers))
-            if any(info.number == 0 for _, _, info, _ in resolved):
+            if provider and any(
+                info.number == 0 and not selection.manual for selection, _, info, _ in resolved
+            ):
                 from lazarr.specials import fetch_catalog, save_catalog
 
-                catalog = await fetch_catalog(provider, item)
+                catalog = await fetch_catalog(provider, remote_item)
                 with self.db.session() as db:
                     save_catalog(db, media.id, catalog)
         return resolved
 
     def _replace_selections(self, db, task, selections):
-        for membership in db.scalars(select(TaskSeason).where(TaskSeason.task_id == task.id)):
+        from lazarr.season_structure import insert
+
+        selections = list(selections)
+        # New manual rows occupy their requested positions. Shift existing and
+        # provider-backed rows, including seasons not selected in this task.
+        new_rows = sorted(
+            [i for i, (s, _, _, _) in enumerate(selections) if s.manual and s.season_id is None],
+            key=lambda i: selections[i][0].season,
+        )
+        for index in new_rows:
+            position = selections[index][0].season
+            insert(db, task.media_id, position)
+            for other, (selection, numbering, info, numbers) in enumerate(selections):
+                if other in new_rows:
+                    continue
+                updates = {}
+                if selection.season >= position:
+                    updates["season"] = selection.season + 1
+                if selection.numbering_season is not None and selection.numbering_season >= position:
+                    updates["numbering_season"] = selection.numbering_season + 1
+                if numbering and numbering["season"] >= position:
+                    numbering = {**numbering, "season": numbering["season"] + 1}
+                if info.number >= position:
+                    info = info.model_copy(update={"number": info.number + 1})
+                selections[other] = (selection.model_copy(update=updates), numbering, info, numbers)
+        old_memberships = list(db.scalars(select(TaskSeason).where(TaskSeason.task_id == task.id)))
+        old_seasons = {
+            membership.season_id: db.get(Season, membership.season_id) for membership in old_memberships
+        }
+        for membership in old_memberships:
             db.delete(membership)
         db.flush()
         wanted = set()
         memberships = []
         for selection, numbering, info, numbers in selections:
-            season = self._upsert_season(db, task.media_id, info)
+            if selection.manual:
+                season = db.get(Season, selection.season_id) if selection.season_id else None
+                if season is None:
+                    season = Season(media_id=task.media_id, number=info.number, title=info.title)
+                    db.add(season)
+                    db.flush()
+                season.title = info.title
+                season.metadata_json = {**(season.metadata_json or {}), "manual": True}
+            else:
+                season = self._upsert_season(db, task.media_id, info, local=True)
             membership = TaskSeason(
                 task_id=task.id,
                 season_id=season.id,
@@ -677,6 +824,14 @@ class TaskService:
         task.numbering = memberships[0].numbering if len(memberships) == 1 else {}
         task.whole_season = all(m.whole_season for m in memberships)
         db.flush()
+        retained = {membership.season_id for membership in memberships}
+        for season_id, season in old_seasons.items():
+            if (
+                season_id not in retained
+                and (season.metadata_json or {}).get("manual")
+                and not db.scalar(select(Episode.id).where(Episode.season_id == season_id))
+            ):
+                db.delete(season)
         enqueue(db, task.id)
 
     def edit(self, task_id, user_id, *, requirements=None, paused=None, selections=None):
@@ -686,7 +841,7 @@ class TaskService:
                 raise ValueError("Задача не найдена")
             if selections is not None:
                 self._replace_selections(db, task, selections)
-            if requirements is not None:
+            if requirements is not None and task.requirements != requirements.model_dump():
                 task.requirements = requirements.model_dump()
                 # A new requirements revision invalidates earlier decisions/overrides.
                 for sub in db.scalars(select(Subtask).where(Subtask.task_id == task_id)):

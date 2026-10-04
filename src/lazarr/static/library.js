@@ -259,7 +259,7 @@ document.addEventListener('submit',async event=>{
 
 function inlineSeasonRow(selection={},task=null){
   const row=document.createElement('div');row.className='task-season-row';row.dataset.inlineSeason='';
-  row.innerHTML='<label>Сезон<select>'+seasonOptions(libraryItem.metadata)+'</select></label><label>Серии<input placeholder="Все серии сезона"><small>Пусто — все; либо 1, 2, 5–8</small></label><button type="button" class="ghost" data-remove-inline-season>Убрать</button>';
+  row.innerHTML='<label>Сезон<select>'+seasonOptions(libraryItem.metadata)+'</select></label><label>Серии<input placeholder="Все серии сезона"><small>Пусто — все; либо 1, 2, 5–8</small></label><button type="button" class="ghost" data-remove-inline-season aria-label="Удалить сезон из структуры">Удалить</button>';
   const select=$('select',row);
   if(selection.season!=null){
     const value=selection.numbering_season!=null?'alt:'+selection.numbering_season:String(selection.season);
@@ -273,27 +273,46 @@ function inlineSeasonRow(selection={},task=null){
   }
   return row;
 }
+function manualSeasonRow(selection={}){
+  const row=document.createElement('div');row.className='task-season-row';row.dataset.inlineSeason='';row.dataset.manualSeason='true';
+  const selected=$$('[data-inline-season]').map(node=>Number(node.dataset.manualSeason?$('[data-manual-season]',node).value:$('select',node).value.replace('alt:',''))).filter(Number.isFinite);
+  const known=(libraryItem.metadata.seasons||[]).map(season=>Number(season.number)).filter(Number.isFinite);
+  const suggested=Math.max(0,...selected,...known)+1;
+  row.innerHTML='<label>Номер сезона<input type="number" data-manual-season min="0" max="10000" required></label><label>Название<input data-manual-title maxlength="500" placeholder="Например, Арка Киото" required></label><button type="button" class="ghost" data-remove-inline-season aria-label="Удалить сезон из структуры">Удалить</button>';
+  if(selection.season_id){row.dataset.seasonId=selection.season_id;$('[data-manual-season]',row).readOnly=true;}
+  $('[data-manual-season]',row).value=selection.season??suggested;
+  $('[data-manual-title]',row).value=selection.title||`Сезон ${selection.season??suggested}`;
+  return row;
+}
 function closeInlineTaskEditor(){
   const form=$('#inline-task-form');if(!form)return;
   const panel=$('#media-task');form.remove();
   $('.media-task-body>dl',panel).hidden=false;
   $('.media-task-body>.task-actions',panel).hidden=false;
-  $('[data-edit-media-task]',panel).disabled=false;
-  $('[data-edit-media-task]',panel).focus();
+  $$('[data-edit-media-task]',panel).forEach(button=>button.disabled=false);
+  $('[data-edit-media-task]',panel)?.focus();
+}
+function openInlineTaskEditor(button){
+  if($('#inline-task-form'))return;
+  const task=libraryItem.task||state.tasks.find(task=>task.id===Number(button.dataset.editMediaTask));
+  const panel=$('#media-task');panel.open=true;
+  const form=document.createElement('form');form.id='inline-task-form';form.dataset.task=task.id;
+  const seasonFields='<fieldset><legend>Сезоны и серии</legend><p class="fine">Пустое поле серий означает весь сезон. При вставке ручного сезона следующие сезоны сдвигаются на один номер.</p><div data-inline-seasons></div><div class="task-actions"><button type="button" class="ghost" data-add-inline-season>Добавить сезон из TMDB</button><button type="button" class="ghost" data-add-manual-season>Добавить сезон вручную</button></div></fieldset>';
+  const requirements=requirementFields(task.requirements);
+  const note='Готовые файлы сохраняются. Новые требования применяются к ещё не скачанным сериям.';
+  form.innerHTML=(task.kind==='tv'||libraryItem.kind==='tv'?seasonFields:'')+requirements+`<p class="fine">${note}</p><div class="form-footer"><p class="form-error" role="alert"></p><button type="button" class="ghost" data-cancel-inline-task>Отмена</button><button type="submit" class="primary">Сохранить</button></div>`;
+  if(task.kind==='tv'||libraryItem.kind==='tv')for(const selection of task.seasons||[])$('[data-inline-seasons]',form).append(selection.manual?manualSeasonRow(selection):inlineSeasonRow(selection,task));
+  $('.media-task-body>dl',panel).hidden=true;$('.media-task-body>.task-actions',panel).hidden=true;
+  $('.media-task-body',panel).prepend(form);$$('[data-edit-media-task]',panel).forEach(node=>node.disabled=true);
+  $('select, input, button',form)?.focus();
 }
 document.addEventListener('click',event=>{
   const button=event.target.closest('button');if(!button)return;
   if(button.closest('#media-task>summary'))event.preventDefault();
   if(button.hasAttribute('data-edit-media-task')){
-    const task=libraryItem.task||state.tasks.find(task=>task.id===Number(button.dataset.editMediaTask));
-    const panel=$('#media-task');panel.open=true;
-    const form=document.createElement('form');form.id='inline-task-form';form.dataset.task=task.id;
-    form.innerHTML=(task.kind==='tv'?'<fieldset><legend>Сезоны и серии</legend><div data-inline-seasons></div><button type="button" class="ghost" data-add-inline-season>Добавить сезон</button></fieldset>':'')+requirementFields(task.requirements)+'<p class="fine">Готовые файлы сохраняются. Новые требования применяются к ещё не скачанным сериям.</p><div class="form-footer"><p class="form-error" role="alert"></p><button type="button" class="ghost" data-cancel-inline-task>Отмена</button><button type="submit" class="primary">Сохранить</button></div>';
-    if(task.kind==='tv')for(const selection of task.seasons||[])$('[data-inline-seasons]',form).append(inlineSeasonRow(selection,task));
-    $('.media-task-body>dl',panel).hidden=true;$('.media-task-body>.task-actions',panel).hidden=true;
-    $('.media-task-body',panel).prepend(form);button.disabled=true;
-    $('select, input, button',form)?.focus();
+    openInlineTaskEditor(button);
   }else if(button.hasAttribute('data-cancel-inline-task'))closeInlineTaskEditor();
   else if(button.hasAttribute('data-add-inline-season')){const row=inlineSeasonRow();if(row)$('[data-inline-seasons]').append(row);}
+  else if(button.hasAttribute('data-add-manual-season'))$('[data-inline-seasons]').append(manualSeasonRow());
   else if(button.hasAttribute('data-remove-inline-season')){if($$('[data-inline-season]').length>1)button.closest('[data-inline-season]').remove();else toast('Выберите хотя бы один сезон',true);}
 });

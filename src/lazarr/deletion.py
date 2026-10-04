@@ -386,6 +386,9 @@ async def delete_media(worker, identity, user_id, delete_files=False):
             if season_ids:
                 db.execute(delete(Episode).where(Episode.season_id.in_(season_ids)))
                 db.execute(delete(Season).where(Season.id.in_(season_ids)))
+            structure = db.get(ConfigEntry, f"season_structure.{identity}")
+            if structure:
+                db.delete(structure)
             db.delete(media)
             if paths:
                 db.add(

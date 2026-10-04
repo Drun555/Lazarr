@@ -509,9 +509,12 @@ document.addEventListener('submit', event=>{const form=event.target;if(!(form in
   else if(form.id==='inline-task-form'){
     const payload={requirements:readRequirements(form)};
     if($('[data-inline-seasons]',form)){
-      payload.seasons=$$('[data-inline-season]',form).map(row=>{const value=$('select',row).value;if(!value)throw new Error('Выберите сезон');return {season:Number(value.replace('alt:','')),episodes:episodeList($('input',row).value),...(value.startsWith('alt:')?{numbering_season:Number(value.slice(4))}:{})};});
+      payload.seasons=$$('[data-inline-season]',form).map(row=>{
+        if(row.dataset.manualSeason){const season=Number($('[data-manual-season]',row).value),title=$('[data-manual-title]',row).value.trim();if(!Number.isInteger(season)||season<0)throw new Error('Укажите номер сезона');if(!title)throw new Error('Укажите название сезона');return {season,title,manual:true,...(row.dataset.seasonId?{season_id:Number(row.dataset.seasonId)}:{})};}
+        const value=$('select',row).value;if(!value)throw new Error('Выберите сезон');return {season:Number(value.replace('alt:','')),episodes:episodeList($('input',row).value),...(value.startsWith('alt:')?{numbering_season:Number(value.slice(4))}:{})};
+      });
       if(!payload.seasons.length)throw new Error('Выберите хотя бы один сезон');
-      const keys=payload.seasons.map(s=>(s.numbering_season!=null?'alt:':'')+s.season);
+      const keys=payload.seasons.map(s=>(s.manual?'manual:':'')+(s.numbering_season!=null?'alt:':'')+s.season);
       if(new Set(keys).size!==keys.length)throw new Error('Сезон указан несколько раз');
     }
     await api('/tasks/'+form.dataset.task,'PATCH',payload);closeInlineTaskEditor();await refreshTasks();await refreshLibraryView();toast('Задача обновлена');

@@ -1196,6 +1196,32 @@ test('media task edits inline, keeps draft across refresh and saves seasons with
   }finally{dom.window.close();}
 });
 
+test('pencil editor inserts manual seasons alongside TMDB seasons',async()=>{
+  const {dom,w,document:d,calls,errors,setTasks,setLibrary}=await setup();
+  try{
+    const task={id:7,media_id:2,title:'Show',kind:'tv',seasons:[{season:1,whole_season:true}],subtasks:[{id:1,season:1,episode:1,status:'queued'}],requirements:{audio_languages:['ja'],subtitle_languages:['ru'],min_resolution:720,max_resolution:2160,keyword:''},paused:false};
+    setTasks([task]);setLibrary([{id:'series',name:'Сериалы',items:[{id:2,title:'Show'}]}],{id:2,title:'Show',kind:'tv',metadata:{seasons:[{number:1,title:'Сезон 1',episode_count:2},{number:2,title:'Сезон 2',episode_count:2}]},episodes:[],task});
+    d.querySelector('[data-tab=library]').click();await settle();await settle();
+    d.querySelector('[data-library-media="2"]').click();await settle();await settle();
+    assert.equal(d.querySelector('[data-edit-task-structure]'),null);
+    const edit=d.querySelector('[data-edit-media-task]');
+    edit.click();
+    const form=d.querySelector('#inline-task-form');
+    assert.match(form.textContent,/следующие сезоны сдвигаются/);
+    assert.ok(form.querySelector('[name=min_resolution]'));
+    form.querySelector('[data-add-manual-season]').click();
+    assert.equal(form.querySelectorAll('[data-inline-season]').length,2);
+    form.querySelector('input[data-manual-season]').value='1';
+    form.querySelector('[data-manual-title]').value='Новая арка';
+    form.dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}));await settle();await settle();
+    const saved=calls.find(call=>call.url==='/api/v1/tasks/7'&&call.method==='PATCH');
+    assert.deepEqual(saved.payload.seasons,[{season:1,episodes:null},{season:1,title:'Новая арка',manual:true}]);
+    assert.deepEqual(saved.payload.requirements,task.requirements);
+    assert.equal(d.querySelector('#inline-task-form'),null);
+    assert.deepEqual(errors,[]);
+  }finally{dom.window.close();}
+});
+
 test('mapping bug report keeps the draft and puts only the summary in the GitHub URL',async()=>{
   const {dom,w,document:d,errors}=await setup();
   try{

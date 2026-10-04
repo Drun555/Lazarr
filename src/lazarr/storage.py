@@ -135,8 +135,11 @@ def _migrate_sources(database):
 
 
 def desired_links(db, warnings):
+    from types import SimpleNamespace
+
     from lazarr.library import library_kind
     from lazarr.library_metadata import sidecars
+    from lazarr.season_structure import local_metadata
     from lazarr.specials import catalog_for, placement
 
     result, winners, names = {}, set(), set()
@@ -176,6 +179,15 @@ def desired_links(db, warnings):
             )
         )
     for library, asset, download, media in rows:
+        media = SimpleNamespace(
+            id=media.id,
+            title=media.title,
+            year=media.year,
+            kind=media.kind,
+            provider=media.provider,
+            external_id=media.external_id,
+            metadata_json=local_metadata(db, media),
+        )
         identity = (media.id, library.part_key)
         if identity in winners:
             continue

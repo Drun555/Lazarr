@@ -23,6 +23,7 @@ from lazarr.calendar import released
 from lazarr.matcher import classify_external_subtitles
 from lazarr.sdk import language
 from lazarr.subtitle_language import stored_subtitle_language
+from lazarr.season_structure import insertions, local_metadata, provider_number
 
 LIBRARIES = [("series", "Сериалы"), ("movies", "Кино"), ("anime", "Аниме")]
 
@@ -122,9 +123,9 @@ class LibraryService:
             with self.db.session() as db:
                 media = db.get(Media, identity)
                 pending = [
-                    (season.id, season.number)
+                    (season.id, provider_number(season.number, insertions(db, identity)))
                     for season in db.scalars(select(Season).where(Season.media_id == identity))
-                    if season.refreshed_at == 0
+                    if season.refreshed_at == 0 and not (season.metadata_json or {}).get("manual")
                 ]
                 provider_id = media.provider if media else None
                 external_id = media.external_id if media else None
@@ -155,6 +156,10 @@ class LibraryService:
             media = db.get(Media, identity)
             if not media or media.kind != "tv":
                 raise ValueError("Сериал не найден")
+            stored = db.scalar(select(Season).where(Season.media_id == identity, Season.number == number))
+            if stored and (stored.metadata_json or {}).get("manual"):
+                return
+            number = provider_number(number, insertions(db, identity))
             canonical = {
                 int(key.split(":")[0])
                 for key, aliases in media.metadata_json.get("episode_numbering", {}).items()
@@ -239,6 +244,7 @@ class LibraryService:
             media = db.get(Media, identity)
             if not media:
                 return None
+            metadata = local_metadata(db, media)
             seasons = {s.id: s for s in db.scalars(select(Season).where(Season.media_id == identity))}
             episode_query = select(Episode).where(Episode.season_id.in_(seasons))
             if episode_id is not None:
@@ -333,7 +339,7 @@ class LibraryService:
                 related = [s for s in subs if s.episode_id == (episode.id if episode else None)]
                 canonical = seasons[episode.season_id].number if episode else None
                 aliases = (
-                    media.metadata_json.get("episode_numbering", {}).get(f"{canonical}:{episode.number}", [])
+                    metadata.get("episode_numbering", {}).get(f"{canonical}:{episode.number}", [])
                     if episode
                     else []
                 )
@@ -392,14 +398,14 @@ class LibraryService:
                     }
                 )
             parts.sort(key=lambda p: (p["season"] or 0, p["episode"] or 0))
-            season_info = {item["number"]: dict(item) for item in media.metadata_json.get("seasons", [])}
+            season_info = {item["number"]: dict(item) for item in metadata.get("seasons", [])}
             for season in seasons.values():
                 info = season_info.setdefault(season.number, {"number": season.number})
                 if season.title or db.get(ConfigEntry, f"season_title.{season.id}"):
                     info["title"] = season.title
             return {
                 **self.tile(media),
-                "metadata": media.metadata_json,
+                "metadata": metadata,
                 "seasons": [season_info[number] for number in sorted(season_info)],
                 "episodes": parts,
                 "last_search_at": max((s.last_search_at or 0 for s in subs), default=0) or None,

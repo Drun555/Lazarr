@@ -83,6 +83,7 @@ class Season(Base):
     number: Mapped[int]
     title: Mapped[str] = mapped_column(default="")
     refreshed_at: Mapped[float] = mapped_column(default=time.time)
+    metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
 
 
 class Episode(Base):
@@ -97,6 +98,7 @@ class Episode(Base):
     still: Mapped[str | None] = mapped_column(Text, nullable=True)
     air_date: Mapped[str | None] = mapped_column(nullable=True)
     absolute_number: Mapped[int | None] = mapped_column(nullable=True)
+    metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
 
 
 class Task(Base):
