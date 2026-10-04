@@ -70,6 +70,7 @@ async def test_no_links_for_incomplete_files(core, media, season, worker_setup):
     (source / "Show.S01E01.1080p.mkv").write_bytes(b"partial")
     await worker.poll()
     assert not list((source.parent.parent / "user").rglob("*.mkv"))
+    assert not list((source.parent.parent / "user").rglob("*.nfo"))
 
 
 async def test_first_version_wins_and_sidecars_are_adjacent(core, media, season, worker_setup):

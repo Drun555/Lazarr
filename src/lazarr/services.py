@@ -286,6 +286,7 @@ class TaskService:
         override = db.get(ConfigEntry, f"season_title.{season.id}") if season.id else None
         season.title = override.value["title"] if override else info.title
         season.refreshed_at = time.time()
+        season.metadata_json = info.model_dump(exclude={"episodes"})
         episodes = list(db.scalars(select(Episode).where(Episode.season_id == season.id)))
         by_original_number = {}
         occupied = {episode.number for episode in episodes}
@@ -309,6 +310,7 @@ class TaskService:
                 episode.title = item.title
             episode.overview, episode.still = item.overview, item.still
             episode.absolute_number = item.absolute_number
+            episode.metadata_json = item.model_dump()
         db.flush()
         return season
 

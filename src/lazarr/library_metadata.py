@@ -21,6 +21,27 @@ def identifiers(node, provider, identity, external=None):
             field(node, "uniqueid", value, type=name, default="true" if name == provider else "false")
 
 
+def ratings(node, data, provider):
+    if data.get("community_rating") is not None:
+        container = ET.SubElement(node, "ratings")
+        rating = ET.SubElement(container, "rating", name=provider, max="10", default="true")
+        field(rating, "value", data["community_rating"])
+        field(rating, "votes", data.get("vote_count"))
+
+
+def people(node, entries):
+    for person in entries:
+        kind, name = person.get("Type"), person.get("Name")
+        if kind == "Actor" and name:
+            actor = ET.SubElement(node, "actor")
+            field(actor, "name", name)
+            field(actor, "role", person.get("Role"))
+            field(actor, "thumb", person.get("ImageUrl"))
+            field(actor, "order", person.get("SortOrder"))
+        elif kind in {"Director", "Writer"} and name:
+            field(node, kind.lower(), name)
+
+
 def media_nfo(media):
     data = media.metadata_json
     node = ET.Element("movie" if media.kind == "movie" else "tvshow")
@@ -32,6 +53,9 @@ def media_nfo(media):
         "premiered": data.get("release_date"),
         "mpaa": data.get("official_rating"),
         "status": data.get("status"),
+        "tagline": data.get("tagline"),
+        "runtime": data.get("runtime"),
+        "enddate": data.get("end_date"),
     }.items():
         field(node, name, value)
     identifiers(node, media.provider, media.external_id, data.get("external_ids"))
@@ -43,21 +67,16 @@ def media_nfo(media):
     ):
         for value in data.get(key, []):
             field(node, name, value)
-    if data.get("community_rating") is not None:
-        ratings = ET.SubElement(node, "ratings")
-        rating = ET.SubElement(ratings, "rating", name=media.provider, max="10", default="true")
-        field(rating, "value", data["community_rating"])
-    for person in data.get("people", []):
-        kind, name = person.get("Type"), person.get("Name")
-        if kind == "Actor" and name:
-            actor = ET.SubElement(node, "actor")
-            field(actor, "name", name)
-            field(actor, "role", person.get("Role"))
-        elif kind in {"Director", "Writer"}:
-            field(node, kind.lower(), name)
+    ratings(node, data, media.provider)
+    people(node, data.get("people", []))
+    for trailer in data.get("remote_trailers", []):
+        match = re.fullmatch(r"https://www\.youtube\.com/watch\?v=([\w-]+)", trailer.get("Url", ""))
+        if match:
+            field(node, "trailer", "plugin://plugin.video.youtube/?action=play_video&videoid=" + match[1])
     if media.kind == "movie" and data.get("collection"):
         collection = ET.SubElement(node, "set")
         field(collection, "name", data["collection"])
+        field(node, "collectionnumber", data.get("collection_id"))
     return node
 
 
@@ -88,6 +107,13 @@ def sidecars(media, episode, season, number, directory, stem, root, special_posi
             if matching
             else {}
         )
+        if matching:
+            # Fresh season details supplement the summary returned with the series.
+            details = getattr(season, "metadata_json", None) or {}
+            info = {
+                **info,
+                **{key: value for key, value in details.items() if value is not None and value != ""},
+            }
         node = ET.Element("season")
         field(
             node,
@@ -96,9 +122,14 @@ def sidecars(media, episode, season, number, directory, stem, root, special_posi
         )
         field(node, "seasonnumber", number["season"])
         field(node, "premiered", info.get("air_date"))
+        field(node, "plot", info.get("overview"))
+        identifiers(node, media.provider, info.get("id"))
+        ratings(node, info, media.provider)
+        people(node, info.get("people", []))
         nfo(directory / "season.nfo", node)
         artwork(directory / "poster", info.get("poster"))
         node = ET.Element("episodedetails")
+        details = getattr(episode, "metadata_json", None) or {}
         for name, value in {
             "title": episode.title,
             "showtitle": media.title,
@@ -106,12 +137,15 @@ def sidecars(media, episode, season, number, directory, stem, root, special_posi
             "episode": number["episode"],
             "plot": episode.overview,
             "aired": episode.air_date,
+            "runtime": details.get("runtime"),
         }.items():
             field(node, name, value)
         if number["season"] == 0:
             for name, value in (special_position or {}).items():
                 field(node, name, value)
         identifiers(node, media.provider, episode.external_id)
+        ratings(node, details, media.provider)
+        people(node, details.get("people", []))
         nfo(directory / (stem + ".nfo"), node)
         artwork(directory / (stem + "-thumb"), episode.still)
     return result

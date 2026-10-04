@@ -18,8 +18,8 @@ class Plugin(MetadataProvider):
         id="tmdb",
         name="TMDB",
         kind="metadata",
-        version="1.0.7",
-        sdk=">=1.4,<2",
+        version="1.0.8",
+        sdk=">=1.8,<2",
         config_fields=[
             ConfigField(name="api_key", label="API key или Read Access Token", secret=True, required=True),
             ConfigField(name="base_url", label="API URL", default="https://api.themoviedb.org/3"),
@@ -49,6 +49,37 @@ class Plugin(MetadataProvider):
             return response.json()
         except ValueError as exc:
             raise ProviderError("parse_error", "TMDB returned invalid JSON") from exc
+
+    @staticmethod
+    def image(path, size="w342"):
+        return f"https://image.tmdb.org/t/p/{size}{path}" if path else None
+
+    def people(self, cast=(), crew=()):
+        result = []
+        seen = set()
+        for person in cast:
+            key = (person.get("id", person.get("name")), person.get("character", ""))
+            if not person.get("name") or key in seen:
+                continue
+            seen.add(key)
+            result.append(
+                {
+                    "Name": person["name"],
+                    "Type": "Actor",
+                    "Role": person.get("character", ""),
+                    "ImageUrl": self.image(person.get("profile_path")),
+                    "SortOrder": person.get("order"),
+                }
+            )
+        for person in crew:
+            job = person.get("job")
+            if job in {"Writer", "Screenplay", "Story", "Teleplay"}:
+                job = "Writer"
+            key = (person.get("id", person.get("name")), job)
+            if job in {"Director", "Writer", "Producer"} and person.get("name") and key not in seen:
+                seen.add(key)
+                result.append({"Name": person["name"], "Type": job})
+        return result
 
     def item(self, data, kind):
         title = data.get("title") if kind == "movie" else data.get("name")
@@ -96,15 +127,23 @@ class Plugin(MetadataProvider):
                 data.get("status")
             ),
             studios=[s["name"] for s in data.get("production_companies", [])],
-            people=[
-                {"Name": p["name"], "Type": "Actor", "Role": p.get("character", "")}
-                for p in data.get("credits", {}).get("cast", [])
-            ]
-            + [
-                {"Name": p["name"], "Type": p["job"]}
-                for p in data.get("credits", {}).get("crew", [])
-                if p.get("job") in {"Director", "Writer", "Producer"}
-            ],
+            people=self.people(
+                data.get("credits", {}).get("cast", []), data.get("credits", {}).get("crew", [])
+            ),
+            tagline=data.get("tagline") or "",
+            runtime=(data.get("runtime") or None) if kind == "movie" else None,
+            vote_count=data.get("vote_count"),
+            end_date=data.get("last_air_date") if data.get("status") in {"Ended", "Canceled"} else None,
+            collection_id=str(data["belongs_to_collection"]["id"])
+            if (data.get("belongs_to_collection") or {}).get("id")
+            else None,
+            tags=list(
+                dict.fromkeys(
+                    k["name"]
+                    for k in data.get("keywords", {}).get("keywords" if kind == "movie" else "results", [])
+                    if k.get("name")
+                )
+            ),
             remote_trailers=[
                 {"Name": v.get("name", "Trailer"), "Url": "https://www.youtube.com/watch?v=" + v["key"]}
                 for v in data.get("videos", {}).get("results", [])
@@ -126,6 +165,10 @@ class Plugin(MetadataProvider):
                     "title": s["name"],
                     "episode_count": s["episode_count"],
                     "air_date": s.get("air_date"),
+                    "id": str(s["id"]) if s.get("id") else None,
+                    "poster": self.image(s.get("poster_path")),
+                    "overview": s.get("overview") or "",
+                    "community_rating": s.get("vote_average") or None,
                 }
                 for s in data.get("seasons", [])
             ],
@@ -144,9 +187,9 @@ class Plugin(MetadataProvider):
             raise ProviderError("configuration", "Invalid TMDB identity")
         data = await self.get(
             f"/{kind}/{media_id}",
-            append_to_response="external_ids,alternative_titles,episode_groups,credits,videos,content_ratings"
+            append_to_response="external_ids,alternative_titles,episode_groups,credits,videos,content_ratings,keywords"
             if kind == "tv"
-            else "external_ids,alternative_titles,credits,videos,release_dates",
+            else "external_ids,alternative_titles,credits,videos,release_dates,keywords",
         )
         item = self.item(data, kind)
         groups = [
@@ -190,10 +233,18 @@ class Plugin(MetadataProvider):
     async def get_season(self, media_id, season):
         if not str(media_id).isdigit() or season < 0:
             raise ProviderError("configuration", "Invalid season")
-        data = await self.get(f"/tv/{media_id}/season/{season}")
+        data = await self.get(f"/tv/{media_id}/season/{season}", append_to_response="credits")
         return SeasonInfo(
             number=season,
             title=data.get("name", ""),
+            id=str(data["id"]) if data.get("id") else None,
+            overview=data.get("overview") or "",
+            poster=self.image(data.get("poster_path")),
+            air_date=data.get("air_date"),
+            community_rating=data.get("vote_average") or None,
+            people=self.people(
+                data.get("credits", {}).get("cast", []), data.get("credits", {}).get("crew", [])
+            ),
             episodes=[
                 EpisodeInfo(
                     id=str(e["id"]),
@@ -204,6 +255,13 @@ class Plugin(MetadataProvider):
                     if e.get("still_path")
                     else None,
                     air_date=e.get("air_date"),
+                    runtime=e.get("runtime") or None,
+                    community_rating=e.get("vote_average") or None,
+                    vote_count=e.get("vote_count"),
+                    people=self.people(
+                        [*data.get("credits", {}).get("cast", []), *e.get("guest_stars", [])],
+                        e.get("crew", []),
+                    ),
                 )
                 for e in data.get("episodes", [])
             ],

@@ -37,6 +37,42 @@ def test_related_files_without_episode_numbers_and_ambiguity():
     }
 
 
+def test_related_files_require_common_title_fragments_anywhere():
+    root = "[Beatrice-Raws] Bakemonogatari [BDRip 1920x1080 x264 FLAC]"
+    stem = "[Beatrice-Raws] Bakemonogatari 01 [BDRip 1920x1080 x264 FLAC]"
+    items = files(
+        f"{root}/{stem}.mkv",
+        f"{root}/RUS Sound/{stem}.[SHIZA].mka",
+        f"{root}/RUS Subs/[Other Group] Bakemonogatari 01 [720p].ass",
+        f"{root}/Sound Vol.1.flac",
+        f"{root}/RUS Sound/[Beatrice-Raws] Other Title 01 [BDRip 1920x1080 x264 FLAC].mka",
+        f"{root}/RUS Subs/[Other Group] Bakemonogatari 02 [720p].ass",
+        f"{root}/RUS Subs/Translation Bakemonogatari 01.ass",
+    )
+    assert related_files(items) == {0: [1, 2, 6]}
+    # Explicit user selections still override the automatic name check.
+    assert related_files(items, [{"video_index": 0, "tracks": [{"file_index": 3}]}]) == {0: [1, 2, 3, 6]}
+
+
+def test_related_files_sum_separate_fragments_and_preserve_short_titles():
+    assert related_files(
+        files(
+            "Alpha Red Omega 01.mkv",
+            "Translation Alpha Blue Omega 01.ass",
+            "Show.S01E01.1080p.mkv",
+            "Show.S01E01.ru.mka",
+            "S01E01.1080p.flac",
+            "Other.S01E01.1080p.flac",
+        )
+    ) == {0: [1], 2: [3]}
+    assert related_files(
+        files(
+            "[Group] Alpha 01 [1080p].mkv",
+            "[Group] Algae 01 [1080p].ass",
+        )
+    ) == {0: []}
+
+
 def seed_release(config, db):
     with db.session() as session:
         release = Release(
@@ -76,6 +112,35 @@ def seed_release(config, db):
     torrent.parent.mkdir(exist_ok=True)
     torrent.write_bytes(b"test")
     return identity
+
+
+def test_mapping_api_excludes_soundtrack_from_smart_group(core, media, season):
+    config, db, _, service = core
+    service.create_from_metadata(CreateTask(media_id="42", kind="tv", season=1), media, season, 1)
+    seed_release(config, db)
+    with TestClient(create_app(config)) as client:
+        login(client)
+        ctx = client.app.state.ctx
+        original = ctx.engine
+        ctx.engine = SimpleNamespace(
+            inspect=lambda _: SimpleNamespace(
+                files=files(
+                    "[Beatrice-Raws] Bakemonogatari 01 [1080p].mkv",
+                    "RUS Subs/[Different Group] Bakemonogatari 01.ass",
+                    "[Beatrice-Raws] Bakemonogatari 02 [1080p].mkv",
+                    "RUS Sound/Sound Vol.1.flac",
+                    "RUS Sound/[Other Group] Bakemonogatari 01.mka",
+                )
+            )
+        )
+        try:
+            response = client.get("/api/v1/tasks/1/seasons/1/mapping")
+            assert response.status_code == 200, response.text
+            catalog = response.json()["releases"][0]["files"]
+            assert catalog[0]["related"] == [1, 4]
+            assert catalog[2]["related"] == []
+        finally:
+            ctx.engine = original
 
 
 def test_season_editor_bindings_validation_titles_and_manual_episodes(core, media, season):

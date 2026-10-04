@@ -12,7 +12,7 @@ from lazarr.languages import language as language, ALIASES
 
 LANGUAGES = ALIASES
 
-SDK_VERSION = "1.7"
+SDK_VERSION = "1.8"
 
 
 def safe_relative_path(value: str) -> str:
@@ -83,6 +83,11 @@ class MetadataItem(BaseModel):
     tags: list[str] = Field(default_factory=list)
     remote_trailers: list[dict] = Field(default_factory=list)
     collection: str | None = None
+    collection_id: str | None = None
+    tagline: str = ""
+    runtime: int | None = None
+    vote_count: int | None = None
+    end_date: str | None = None
     # Explicit provider mappings, keyed by canonical "season:episode".
     episode_numbering: dict[str, list[dict]] = Field(default_factory=dict)
 
@@ -95,12 +100,22 @@ class EpisodeInfo(BaseModel):
     still: str | None = None
     air_date: str | None = None
     absolute_number: int | None = None
+    runtime: int | None = None
+    community_rating: float | None = None
+    vote_count: int | None = None
+    people: list[dict] = Field(default_factory=list)
 
 
 class SeasonInfo(BaseModel):
     number: int
     title: str = ""
     episodes: list[EpisodeInfo]
+    id: str | None = None
+    overview: str = ""
+    poster: str | None = None
+    air_date: str | None = None
+    community_rating: float | None = None
+    people: list[dict] = Field(default_factory=list)
 
 
 class SearchQuery(BaseModel):

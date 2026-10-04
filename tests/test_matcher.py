@@ -461,6 +461,12 @@ def test_bakemonogatari_tv_special_pack_matches_main_episodes_and_sidecars():
     paths.append(
         f"{root}/Bonus/PV/[Beatrice-Raws] Bakemonogatari (TV previews 02) [BDRip 1920x1080 x264 FLAC].mkv"
     )
+    paths.extend(
+        [
+            f"{root}/RUS Sound/Sound Vol.1.flac",
+            f"{root}/RUS Subs/[Beatrice-Raws] Other Title 01 [BDRip 1920x1080 x264 FLAC].ass",
+        ]
+    )
     torrent_files = files(*paths)
     item = candidate(
         title="Bakemonogatari [TV+Special] [12+3 из 12+3] [RUS(ext), JAP+Sub] [2009] [1080p]",
@@ -480,6 +486,18 @@ def test_bakemonogatari_tv_special_pack_matches_main_episodes_and_sidecars():
         assert all(t.language == "ru" for t in binding.tracks)
         assert sum(t.forced for t in binding.tracks) == 1
         assert binding.missing_subtitle_languages == []
+
+
+def test_external_tracks_share_fragments_after_different_prefixes(media):
+    paths = files(
+        "Alpha Red Omega.S01E01.1080p.mkv",
+        "Subs/RUS/Translation Alpha Blue Omega.S01E01.ass",
+        "Audio/RUS/Translation Alpha Blue Omega.S01E01.mka",
+        "Subs/RUS/Translation Alpha Blue Omega.S01E02.ass",
+        "Audio/RUS/Sound.S01E01.flac",
+    )
+    report = Matcher().evaluate(candidate(), [request(media)], paths)
+    assert [track.file_index for track in report.evaluations[0].binding.tracks] == [1, 2]
 
 
 def test_mixed_episode_counts_require_tv_special_tag_and_matching_main_count(media):

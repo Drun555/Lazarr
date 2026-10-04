@@ -68,6 +68,7 @@ class LibraryService:
                     if not m.metadata_json.get("taxonomy_known")
                     or "backdrop" not in m.metadata_json
                     or "people" not in m.metadata_json
+                    or "tagline" not in m.metadata_json
                 ]
             for identity, provider_id, kind, external_id, title in pending:
                 if provider_id not in self.plugins.available("metadata"):
@@ -98,6 +99,12 @@ class LibraryService:
                                     "tags",
                                     "remote_trailers",
                                     "collection",
+                                    "collection_id",
+                                    "tagline",
+                                    "runtime",
+                                    "vote_count",
+                                    "end_date",
+                                    "seasons",
                                 ]
                                 if item.taxonomy_known:
                                     fields.extend(
@@ -401,6 +408,15 @@ class LibraryService:
             season_info = {item["number"]: dict(item) for item in metadata.get("seasons", [])}
             for season in seasons.values():
                 info = season_info.setdefault(season.number, {"number": season.number})
+                info.update(
+                    {
+                        key: value
+                        for key, value in (season.metadata_json or {}).items()
+                        if key in {"id", "overview", "poster", "air_date", "community_rating"}
+                        and value is not None
+                        and value != ""
+                    }
+                )
                 if season.title or db.get(ConfigEntry, f"season_title.{season.id}"):
                     info["title"] = season.title
             return {

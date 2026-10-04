@@ -2,6 +2,8 @@
 
 import re
 import unicodedata
+from difflib import SequenceMatcher
+from functools import lru_cache
 from pathlib import PurePosixPath
 from lazarr.languages import language_name
 from .provider_utils import title_subtitle_evidence, named_season, season_year
@@ -197,6 +199,62 @@ def stem_key(path):
         if language(v) == "und" and v not in {"audio", "subs", "subtitles", "forced", "sdh"}
     ]
     return " ".join(tokens)
+
+
+@lru_cache(maxsize=4096)
+def association_name(path):
+    """Keep title text; shared folders, release tags and numbers are not evidence."""
+    stem = re.sub(r"\[[^]]*\]|\([^)]*\)", " ", PurePosixPath(path).stem)
+    ignored = {
+        "audio",
+        "sound",
+        "subs",
+        "subtitles",
+        "forced",
+        "full",
+        "sdh",
+        "надписи",
+        "полные",
+        "форсированные",
+        "bdrip",
+        "brrip",
+        "bluray",
+        "webrip",
+        "web",
+        "dl",
+        "hdtv",
+        "flac",
+        "aac",
+        "ac3",
+        "dts",
+        "hevc",
+        "avc",
+        "episode",
+        "ep",
+        "серия",
+        "эпизод",
+        "season",
+        "сезон",
+    }
+    return " ".join(
+        token
+        for token in normalized(stem.replace("_", " ")).split()
+        if not any(char.isdigit() for char in token) and language(token) == "und" and token not in ignored
+    )
+
+
+def association_names_match(first, second):
+    """Sum non-overlapping common fragments anywhere in the two filenames."""
+    left, right = sorted((association_name(first), association_name(second)))
+    # Exact short titles (e.g. Show) must remain usable, too.
+    if left == right:
+        return sum(char.isalpha() for char in left) >= 2
+    shared = 0
+    for block in SequenceMatcher(None, left, right, autojunk=False).get_matching_blocks():
+        letters = sum(char.isalpha() for char in left[block.a : block.a + block.size])
+        if letters >= 3:
+            shared += letters
+    return shared >= 8
 
 
 def classify_external_subtitles(tracks, files):
@@ -500,7 +558,7 @@ class Matcher:
                             request_hint,
                         )
                         same_episode = bool(file_number[1]) and file_number == video_number
-                        if same_stem or same_episode:
+                        if same_stem or (same_episode and association_names_match(file.path, v.path)):
                             matching.append(v.index)
                     lang = file_language(file.path)
                     if matching == [video.index]:

@@ -1,5 +1,5 @@
 from pathlib import PurePosixPath
-from .matcher import AUDIO, SUBTITLE, episode_numbers, playable_video, stem_key
+from .matcher import AUDIO, SUBTITLE, association_names_match, episode_numbers, playable_video, stem_key
 
 
 def file_kind(file):
@@ -34,7 +34,11 @@ def related_files(files, bindings=()):
             video.index
             for video in videos
             if stem_key(file.path) == stem_key(video.path)
-            or (number[1] and number == episode_numbers(video.path))
+            or (
+                number[1]
+                and number == episode_numbers(video.path)
+                and association_names_match(file.path, video.path)
+            )
         ]
         if file.index in saved:
             matches = sorted(saved[file.index])
