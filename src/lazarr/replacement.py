@@ -69,7 +69,7 @@ async def retire_selections(worker, db, bindings, target_hash, preserve_link=Non
     # when remapping files within the same torrent.
     roots = {d.id: managed_directory(d) for d in downloads}
     for download in downloads:
-        if worker.engine and worker.engine.contains(download.infohash):
+        if worker.engine and await asyncio.to_thread(worker.engine.contains, download.infohash):
             await asyncio.to_thread(worker.engine.remove, download.infohash)
     for link in links + published:
         if preserve_link and (

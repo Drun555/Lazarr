@@ -77,7 +77,7 @@ def test_add_release_to_empty_manual_season_then_map_episode(core, media, season
         response = client.post(path + "/episodes", json={"number": 1, "title": "Pilot"})
         assert response.status_code == 200, response.text
         subtask_id = response.json()["subtask_id"]
-        ctx.worker.choose = AsyncMock()
+        ctx.worker.choose_many = AsyncMock()
         response = client.put(
             path,
             json={
@@ -93,7 +93,7 @@ def test_add_release_to_empty_manual_season_then_map_episode(core, media, season
             },
         )
         assert response.status_code == 200, response.text
-        ctx.worker.choose.assert_awaited_once()
+        ctx.worker.choose_many.assert_awaited_once()
         with db.session() as session:
             assert session.get(Subtask, subtask_id).episode_id is not None
 
@@ -252,19 +252,19 @@ def test_season_editor_bindings_validation_titles_and_manual_episodes(core, medi
             assert client.get(path).json()["hidden_release_ids"] == [release_id]
             assert client.post(path + "/releases", json={"candidate_id": 1}).status_code == 200
             assert client.get(path).json()["hidden_release_ids"] == []
-            ctx.worker.choose = AsyncMock()
+            ctx.worker.choose_many = AsyncMock()
             # Every row is checked before any selection is changed.
             valid = {"subtask_id": 1, "title": "My pilot", "release_id": release_id, "video_index": 2}
             response = client.put(path, json={"rows": [valid, {**valid, "subtask_id": 999}]})
             assert response.status_code == 422
-            ctx.worker.choose.assert_not_called()
+            ctx.worker.choose_many.assert_not_called()
             response = client.put(path, json={"rows": [{**valid, "track_indices": [2]}]})
             assert response.status_code == 422
-            ctx.worker.choose.assert_not_called()
+            ctx.worker.choose_many.assert_not_called()
             # A title-only edit must not restart an existing download.
             response = client.put(path, json={"rows": [{**valid, "video_index": 0, "track_indices": [1]}]})
             assert response.status_code == 200, response.text
-            ctx.worker.choose.assert_not_called()
+            ctx.worker.choose_many.assert_not_called()
             with db.session() as session:
                 service._upsert_season(session, 1, season)
                 assert session.get(Episode, 1).title == "My pilot"
@@ -279,8 +279,10 @@ def test_season_editor_bindings_validation_titles_and_manual_episodes(core, medi
                 assert session.scalar(select(Episode).where(Episode.number == 5)) is None
             response = client.put(path, json={"rows": [valid]})
             assert response.status_code == 200, response.text
-            ctx.worker.choose.assert_awaited_once()
-            assert ctx.worker.choose.call_args.kwargs == {"video_index": 2, "track_indices": []}
+            ctx.worker.choose_many.assert_awaited_once()
+            assert {
+                k: v for k, v in ctx.worker.choose_many.call_args.args[0][0].items() if k != "decision_id"
+            } == {"video_index": 2, "track_indices": []}
         finally:
             ctx.engine = original
 
@@ -303,7 +305,7 @@ def test_updated_release_mapping_keeps_old_download_and_translates_indices(core,
         ctx = client.app.state.ctx
         original = ctx.engine
         ctx.engine = SimpleNamespace(inspect=lambda _: SimpleNamespace(files=new_files))
-        ctx.worker.choose = AsyncMock()
+        ctx.worker.choose_many = AsyncMock()
         try:
             path = "/api/v1/tasks/1/seasons/1/mapping"
             result = client.get(path).json()
@@ -315,7 +317,7 @@ def test_updated_release_mapping_keeps_old_download_and_translates_indices(core,
             assert result["releases"][0]["files"][3]["legacy"] is True
             response = client.put(path, json={"rows": [], "revisions": {identity: "mapping-test"}})
             assert response.status_code == 422
-            ctx.worker.choose.assert_not_called()
+            ctx.worker.choose_many.assert_not_called()
             # Merely opening and saving must not replace or redownload old files.
             rows = [
                 {
@@ -331,7 +333,7 @@ def test_updated_release_mapping_keeps_old_download_and_translates_indices(core,
             ]
             response = client.put(path, json={"rows": rows})
             assert response.status_code == 200, response.text
-            ctx.worker.choose.assert_not_called()
+            ctx.worker.choose_many.assert_not_called()
             response = client.get("/api/v1/candidates/1/selection")
             assert response.json()["video_index"] == 1
             assert response.json()["tracks"][0]["file_index"] == 2
@@ -340,7 +342,9 @@ def test_updated_release_mapping_keeps_old_download_and_translates_indices(core,
                 path, json={"rows": [{**rows[2], "release_id": identity, "video_index": 3}]}
             )
             assert response.status_code == 200, response.text
-            assert ctx.worker.choose.call_args.kwargs == {
+            assert {
+                k: v for k, v in ctx.worker.choose_many.call_args.args[0][0].items() if k != "decision_id"
+            } == {
                 "video_index": 2,
                 "track_indices": [],
                 "revision": "mapping-test",
@@ -403,7 +407,7 @@ def test_insert_split_episode_before_existing_number(core, media, season, monkey
                 files=files("Episode1.part1.mkv", "Episode1.part2.mkv", "Episode2.mkv")
             ),
         )
-        monkeypatch.setattr(ctx.worker, "choose", AsyncMock())
+        monkeypatch.setattr(ctx.worker, "choose_many", AsyncMock())
         # Explicit duplicate numbers still fail. Draft additions reserve a free
         # number before the final, simultaneous renumbering of all visible rows.
         assert client.post(path + "/episodes", json={"number": 2, "title": "Part 2"}).status_code == 422
@@ -424,11 +428,12 @@ def test_insert_split_episode_before_existing_number(core, media, season, monkey
             row.update(release_id=release_id, video_index=index)
         response = client.put(path, json={"rows": rows})
         assert response.status_code == 200, response.text
-        assert ctx.worker.choose.await_count == 3
+        assert ctx.worker.choose_many.await_count == 1
+        assert len(ctx.worker.choose_many.call_args.args[0]) == 3
         with db.session() as session:
-            for call in ctx.worker.choose.await_args_list:
-                decision = session.get(CandidateDecision, call.args[0])
-                assert decision.subtask_id == rows[call.kwargs["video_index"]]["subtask_id"]
+            for choice in ctx.worker.choose_many.call_args.args[0]:
+                decision = session.get(CandidateDecision, choice["decision_id"])
+                assert decision.subtask_id == rows[choice["video_index"]]["subtask_id"]
             service._upsert_season(session, 1, season)
         after = client.get(path).json()["episodes"]
         assert [(row["subtask_id"], row["number"]) for row in after] == [

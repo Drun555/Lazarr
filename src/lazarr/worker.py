@@ -75,6 +75,7 @@ class Worker:
         self.matcher = Matcher()
         self.calendar = TMDBCalendar()
         self.lock = asyncio.Lock()
+        self.manual_slots = asyncio.Semaphore(2)
         self.selection_lock = asyncio.Lock()
         self.selection_changed = asyncio.Event()
         self.download_lock = asyncio.Lock()
@@ -99,9 +100,11 @@ class Worker:
         allow_preference_mismatch=False,
         ignore_filters=False,
         bypass_cooldown=False,
+        record_progress=True,
     ):
         """Only TorrentEngine supplies the authoritative file list to Matcher."""
-        self.progress.record("inspect", f"Чтение описания: {candidate.title}", candidate=candidate.title)
+        record = self.progress.record if record_progress else lambda *args, **kwargs: None
+        record("inspect", f"Чтение описания: {candidate.title}", candidate=candidate.title)
         async with self.plugins.open(candidate.provider, bypass_cooldown=bypass_cooldown) as provider:
             detailed = await provider.inspect(candidate)
             reason = (
@@ -116,18 +119,18 @@ class Worker:
             )
             if reason:
                 raise CandidateFiltered(reason)
-            self.progress.record("resolve", f"Получение torrent / magnet: {candidate.title}")
+            record("resolve", f"Получение torrent / magnet: {candidate.title}")
             source = await provider.resolve_download(detailed)
-        self.progress.record("metadata", f"Получение структуры торрента: {candidate.title}")
+        record("metadata", f"Получение структуры торрента: {candidate.title}")
         metadata = await asyncio.to_thread(self.engine.inspect, source)
         if any(
             part.casefold() == "bdmv" for file in metadata.files for part in PurePosixPath(file.path).parts
         ):
             raise CandidateFiltered("Blu-ray контейнер BDMV не поддерживается")
-        self.progress.record(
-            "matching", f"Сопоставление {len(metadata.files)} файлов с эпизодами и дорожками"
+        record("matching", f"Сопоставление {len(metadata.files)} файлов с эпизодами и дорожками")
+        report = await asyncio.to_thread(
+            self.matcher.evaluate, detailed, subtasks, metadata.files, metadata.infohash
         )
-        report = self.matcher.evaluate(detailed, subtasks, metadata.files, metadata.infohash)
         for evaluation in report.evaluations:
             request = next(r for r in subtasks if r.id == evaluation.subtask_id)
             initial = assess_candidate(candidate, request, stage=1)
@@ -135,7 +138,7 @@ class Worker:
                 evaluation.scoring[0] = initial
             if evaluation.scoring:
                 final = evaluation.scoring[-1]
-                self.progress.record(
+                record(
                     "score",
                     f"{candidate.title}: {final.total} баллов (порог {final.threshold}); "
                     + ("; ".join(final.blockers) if final.blockers else "проверка завершена"),
@@ -144,7 +147,7 @@ class Worker:
 
     async def add_manual_candidate(self, subtask_id, url):
         """Inspect and save one explicitly supplied torrent URL for manual selection."""
-        async with self.lock:
+        async with self.manual_slots:
             with self.db.session() as db:
                 subtask = db.get(Subtask, subtask_id)
                 if not subtask:
@@ -154,7 +157,7 @@ class Worker:
 
     async def add_manual_task_candidate(self, task_id, url, season_number=None, *, return_release=False):
         """Inspect one supplied URL against every subtask in a task or season."""
-        async with self.lock:
+        async with self.manual_slots:
             with self.db.session() as db:
                 task = db.get(Task, task_id)
                 if not task:
@@ -177,7 +180,9 @@ class Worker:
                 subtasks = list(db.scalars(query.order_by(Subtask.id)))
                 if not subtasks and not return_release:
                     raise ValueError("В выбранной области нет серий")
-                requests = [self.service.request_for(db, subtask) for subtask in subtasks]
+                requests = (
+                    [] if return_release else [self.service.request_for(db, subtask) for subtask in subtasks]
+                )
             return await self._save_manual_candidate(requests, url, return_release=return_release)
 
     @pinned
@@ -185,7 +190,12 @@ class Worker:
         candidate = self.plugins.manual_candidate(url)
         try:
             detailed, metadata, report = await self.evaluate(
-                candidate, requests, allow_preference_mismatch=True, ignore_filters=True, bypass_cooldown=True
+                candidate,
+                requests,
+                allow_preference_mismatch=True,
+                ignore_filters=True,
+                bypass_cooldown=True,
+                record_progress=False,
             )
         except CandidateFiltered as exc:
             raise ValueError(str(exc)) from exc
@@ -935,106 +945,161 @@ class Worker:
         revision=None,
     ):
         async with self.selection_lock:
-            with self.db.session() as db:
-                decision = db.get(CandidateDecision, decision_id)
-                if not decision:
-                    raise ValueError("Кандидат не найден")
-                if expected_subtask is not None:
-                    current = db.get(Subtask, decision.subtask_id)
-                    if (
-                        decision.subtask_id != expected_subtask
-                        or not current
-                        or current.status != "needs_selection"
-                        or decision.action in {"rejected", "selected"}
-                        or db.get(Task, current.task_id).paused
-                    ):
-                        raise ValueError("Выбор устарел: раздача уже выбрана или задача изменена.")
-                if reject:
-                    decision.action = "rejected"
-                    audit(db, user_id, "candidate.reject", str(decision_id))
-                    return
-                sub = db.get(Subtask, decision.subtask_id)
-                request = self.service.request_for(db, sub)
-                release = db.get(Release, decision.release_id)
-                release_id, infohash = release.id, release.revision
-                if revision is not None and revision != infohash:
-                    if not db.scalar(
-                        select(Download.id).where(
-                            Download.release_id == release.id, Download.infohash == revision
-                        )
-                    ):
-                        raise ValueError("Версия торрента не принадлежит раздаче")
-                    infohash = revision
-                candidate = Candidate.model_validate(release.data)
-                already_current = db.scalar(
-                    select(SubtaskAsset.id)
-                    .join(MediaAsset, SubtaskAsset.asset_id == MediaAsset.id)
-                    .join(Download, MediaAsset.download_id == Download.id)
-                    .where(
-                        SubtaskAsset.subtask_id == sub.id,
-                        SubtaskAsset.current.is_(True),
-                        Download.infohash == infohash,
-                    )
-                )
-                if already_current is not None and video_index is None:
-                    return
-            torrent = (self.config.data_dir / "torrents" / f"{infohash}.torrent").read_bytes()
-            metadata = await asyncio.to_thread(self.engine.inspect, DownloadSource(torrent=torrent))
-            report = self.matcher.evaluate(candidate, [request], metadata.files, infohash)
-            evaluation = report.evaluations[0]
-            binding = evaluation.binding
-            if video_index is not None:
-                from lazarr.matcher import (
-                    AUDIO,
-                    SUBTITLE,
-                    classify_external_subtitles,
-                    file_language,
-                    playable_video,
-                )
-                from lazarr.sdk import TrackBinding
+            choice = await self._prepare_choice(
+                decision_id,
+                user_id,
+                reject,
+                video_index,
+                track_indices,
+                expected_subtask=expected_subtask,
+                revision=revision,
+                metadata_cache={},
+            )
+            if choice is not None:
+                await self._submit_choices([(decision_id, choice)], user_id)
 
-                video = next(
-                    (f for f in metadata.files if f.index == video_index and playable_video(f)), None
-                )
-                if not video:
-                    raise ValueError("Выберите видеофайл")
-                tracks = []
-                for index in track_indices or []:
-                    file = next((f for f in metadata.files if f.index == index), None)
-                    if not file or Path(file.path).suffix.lower() not in AUDIO | SUBTITLE:
-                        raise ValueError("Некорректный файл дорожки")
-                    tracks.append(
-                        TrackBinding(
-                            kind="audio" if Path(file.path).suffix.lower() in AUDIO else "subtitle",
-                            language=file_language(file.path),
-                            file_index=index,
-                            path=file.path,
-                        )
-                    )
-                classify_external_subtitles(tracks, metadata.files)
-                binding = FileBinding(
-                    subtask_id=request.id,
-                    video_index=video.index,
-                    video_path=video.path,
-                    episode_order=(request.season or 0) * 10000 + (request.episode or 0),
-                    tracks=tracks,
-                    resolution=binding.resolution if binding else None,
-                    missing_subtitle_languages=sorted(
-                        set(request.requirements.subtitle_languages)
-                        - {t.language for t in tracks if t.kind == "subtitle"}
-                    ),
-                )
-            if binding is None:
-                raise ValueError("Укажите соответствие видео и внешних дорожек вручную")
-            evaluation.binding = binding
-            evaluation.needs_mapping = False
-            plan = DownloadPlan(infohash=infohash, files=metadata.files, bindings=[binding])
-            await self.submit(release_id, metadata, plan, {request.id: evaluation}, override=True)
+    @pinned
+    async def choose_many(self, choices, user_id):
+        """Validate a complete edit, then update each torrent once, not per episode."""
+        async with self.selection_lock:
+            cache, prepared = {}, []
+            for choice in choices:
+                result = await self._prepare_choice(**choice, user_id=user_id, metadata_cache=cache)
+                if result is not None:
+                    prepared.append((choice["decision_id"], result))
+            await self._submit_choices(prepared, user_id)
+
+    async def _submit_choices(self, choices, user_id):
+        groups = {}
+        for identity, (release_id, metadata, evaluation) in choices:
+            groups.setdefault((release_id, metadata.infohash), []).append((identity, metadata, evaluation))
+        for (release_id, infohash), rows in groups.items():
+            metadata = rows[0][1]
+            plan = DownloadPlan(
+                infohash=infohash, files=metadata.files, bindings=[e.binding for _, _, e in rows]
+            )
+            await self.submit(
+                release_id, metadata, plan, {e.subtask_id: e for _, _, e in rows}, override=True
+            )
             self.selection_changed.set()
             with self.db.session() as db:
-                db.get(CandidateDecision, decision_id).action = "selected"
-                db.get(CandidateDecision, decision_id).report = evaluation.model_dump(mode="json")
-                audit(db, user_id, "candidate.select", str(decision_id), {"override": True})
+                for identity, _, evaluation in rows:
+                    decision = db.get(CandidateDecision, identity)
+                    decision.action = "selected"
+                    decision.report = evaluation.model_dump(mode="json")
+                    audit(db, user_id, "candidate.select", str(identity), {"override": True})
+
+    async def _prepare_choice(
+        self,
+        decision_id,
+        user_id,
+        reject=False,
+        video_index=None,
+        track_indices=None,
+        *,
+        expected_subtask=None,
+        revision=None,
+        metadata_cache,
+    ):
+        with self.db.session() as db:
+            decision = db.get(CandidateDecision, decision_id)
+            if not decision:
+                raise ValueError("Кандидат не найден")
+            if expected_subtask is not None:
+                current = db.get(Subtask, decision.subtask_id)
+                if (
+                    decision.subtask_id != expected_subtask
+                    or not current
+                    or current.status != "needs_selection"
+                    or decision.action in {"rejected", "selected"}
+                    or db.get(Task, current.task_id).paused
+                ):
+                    raise ValueError("Выбор устарел: раздача уже выбрана или задача изменена.")
+            if reject:
+                decision.action = "rejected"
+                audit(db, user_id, "candidate.reject", str(decision_id))
+                return
+            sub = db.get(Subtask, decision.subtask_id)
+            request = self.service.request_for(db, sub)
+            release = db.get(Release, decision.release_id)
+            release_id, infohash = release.id, release.revision
+            if revision is not None and revision != infohash:
+                if not db.scalar(
+                    select(Download.id).where(
+                        Download.release_id == release.id, Download.infohash == revision
+                    )
+                ):
+                    raise ValueError("Версия торрента не принадлежит раздаче")
+                infohash = revision
+            candidate = Candidate.model_validate(release.data)
+            already_current = db.scalar(
+                select(SubtaskAsset.id)
+                .join(MediaAsset, SubtaskAsset.asset_id == MediaAsset.id)
+                .join(Download, MediaAsset.download_id == Download.id)
+                .where(
+                    SubtaskAsset.subtask_id == sub.id,
+                    SubtaskAsset.current.is_(True),
+                    Download.infohash == infohash,
+                )
+            )
+            if already_current is not None and video_index is None:
+                return
+        metadata = metadata_cache.get(infohash)
+        if metadata is None:
+            torrent = await asyncio.to_thread(
+                (self.config.data_dir / "torrents" / f"{infohash}.torrent").read_bytes
+            )
+            metadata = await asyncio.to_thread(self.engine.inspect, DownloadSource(torrent=torrent))
+            metadata_cache[infohash] = metadata
+        report = await asyncio.to_thread(
+            self.matcher.evaluate, candidate, [request], metadata.files, infohash
+        )
+        evaluation = report.evaluations[0]
+        binding = evaluation.binding
+        if video_index is not None:
+            from lazarr.matcher import (
+                AUDIO,
+                SUBTITLE,
+                classify_external_subtitles,
+                file_language,
+                playable_video,
+            )
+            from lazarr.sdk import TrackBinding
+
+            video = next((f for f in metadata.files if f.index == video_index and playable_video(f)), None)
+            if not video:
+                raise ValueError("Выберите видеофайл")
+            tracks = []
+            for index in track_indices or []:
+                file = next((f for f in metadata.files if f.index == index), None)
+                if not file or Path(file.path).suffix.lower() not in AUDIO | SUBTITLE:
+                    raise ValueError("Некорректный файл дорожки")
+                tracks.append(
+                    TrackBinding(
+                        kind="audio" if Path(file.path).suffix.lower() in AUDIO else "subtitle",
+                        language=file_language(file.path),
+                        file_index=index,
+                        path=file.path,
+                    )
+                )
+            classify_external_subtitles(tracks, metadata.files)
+            binding = FileBinding(
+                subtask_id=request.id,
+                video_index=video.index,
+                video_path=video.path,
+                episode_order=(request.season or 0) * 10000 + (request.episode or 0),
+                tracks=tracks,
+                resolution=binding.resolution if binding else None,
+                missing_subtitle_languages=sorted(
+                    set(request.requirements.subtitle_languages)
+                    - {t.language for t in tracks if t.kind == "subtitle"}
+                ),
+            )
+        if binding is None:
+            raise ValueError("Укажите соответствие видео и внешних дорожек вручную")
+        evaluation.binding = binding
+        evaluation.needs_mapping = False
+        return release_id, metadata, evaluation
 
     @pinned
     async def choose_all(
@@ -1117,7 +1182,9 @@ class Worker:
                 raise ValueError("Файл раздачи больше недоступен; запустите поиск повторно")
             torrent = torrent_path.read_bytes()
             metadata = await asyncio.to_thread(self.engine.inspect, DownloadSource(torrent=torrent))
-            report = self.matcher.evaluate(candidate, requests, metadata.files, infohash)
+            report = await asyncio.to_thread(
+                self.matcher.evaluate, candidate, requests, metadata.files, infohash
+            )
             eligible = [
                 evaluation
                 for evaluation in report.evaluations
@@ -1382,7 +1449,11 @@ class Worker:
             if reset_leases:
                 db.execute(update(Subtask).values(lease_until=0))
         for infohash, torrent_file, save_path, plan, paused, counters in rows:
-            if infohash == skip_hash or self.engine.contains(infohash) or self.cleanup_blocks(infohash):
+            if (
+                infohash == skip_hash
+                or await asyncio.to_thread(self.engine.contains, infohash)
+                or self.cleanup_blocks(infohash)
+            ):
                 continue
             try:
                 user_root = Path(save_path).parent.parent / "user"
@@ -1439,7 +1510,7 @@ class Worker:
         async with self.download_lock:
             rows = await asyncio.to_thread(self.consumer_rows)
             for infohash, plan, paused in rows:
-                if not self.engine.contains(infohash):
+                if not await asyncio.to_thread(self.engine.contains, infohash):
                     self.consumer_state.pop(infohash, None)
                     continue
                 state = (plan.model_dump_json(), paused)
@@ -1470,8 +1541,11 @@ class Worker:
         await self.sync_consumers()
         with self.db.session() as db:
             rows = [(d.id, d.infohash, d.save_path) for d in db.scalars(select(Download))]
+        verified = False
         for identity, infohash, root in rows:
-            if not self.engine.contains(infohash):
+            if self.selection_lock.locked():
+                break
+            if not await asyncio.to_thread(self.engine.contains, infohash):
                 continue
             try:
                 stats = await asyncio.to_thread(self.engine.snapshot, infohash)
@@ -1519,11 +1593,16 @@ class Worker:
                 if stop:
                     await asyncio.to_thread(self.engine.pause, infohash)
                 for link_id, asset_id, sub_id in links:
+                    if self.selection_lock.locked():
+                        break
                     state = stats["bindings"].get(str(sub_id))
                     if not state:
                         continue
                     if state["buffer_ready"] or state["complete"]:
-                        await self._verify(link_id, asset_id, sub_id, root, state)
+                        verified = (
+                            await self._verify(link_id, asset_id, sub_id, root, state, publish=False)
+                            or verified
+                        )
                     else:
                         with self.db.session() as db:
                             db.get(Subtask, sub_id).status = (
@@ -1531,6 +1610,9 @@ class Worker:
                             )
             except Exception:
                 log.exception("Download poll failed")
+        if verified:
+            await asyncio.to_thread(reconcile, self.db)
+            await self.sync_consumers()
         if time.time() - self.last_checkpoint > 30:
             await asyncio.to_thread(self.engine.checkpoint)
             self.last_checkpoint = time.time()
@@ -1544,7 +1626,7 @@ class Worker:
         self.probe_cache[key] = (time.time(), result)
         return result
 
-    async def _verify(self, link_id, asset_id, sub_id, root, state):
+    async def _verify(self, link_id, asset_id, sub_id, root, state, *, publish=True):
         with self.db.session() as db:
             link, asset, sub = (
                 db.get(SubtaskAsset, link_id),
@@ -1716,7 +1798,9 @@ class Worker:
                     db.add(library_asset)
                 library_asset.preflight = dict(link.preflight)
                 library_asset.verification = dict(link.verification)
-        # Publish buffered, verified files as soon as they are playable.
-        await asyncio.to_thread(reconcile, self.db)
-        if state["complete"]:
-            await self.sync_consumers()
+        # A poll publishes the whole batch once. Direct verification keeps its immediate semantics.
+        if publish:
+            await asyncio.to_thread(reconcile, self.db)
+            if state["complete"]:
+                await self.sync_consumers()
+        return True

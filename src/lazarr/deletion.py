@@ -256,7 +256,7 @@ async def delete_task(worker, identity, user_id, delete_media=False):
                     removable.append(download)
             paths = [managed_directory(d) for d in removable] if delete_media else []
             for download in removable:
-                if worker.engine and worker.engine.contains(download.infohash):
+                if worker.engine and await asyncio.to_thread(worker.engine.contains, download.infohash):
                     if delete_media:
                         await asyncio.to_thread(worker.engine.remove, download.infohash)
                     else:
@@ -351,7 +351,7 @@ async def delete_media(worker, identity, user_id, delete_files=False):
 
             paths = [managed_directory(d) for d in removable] if delete_files else []
             for download in removable:
-                if worker.engine and worker.engine.contains(download.infohash):
+                if worker.engine and await asyncio.to_thread(worker.engine.contains, download.infohash):
                     await asyncio.to_thread(worker.engine.remove, download.infohash)
 
             if subtask_ids:

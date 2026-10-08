@@ -56,11 +56,14 @@ def scope(db, task_id, season_number, *, include_deleted=False):
         )
     )
     if not include_deleted:
-        rows = [
-            (sub, episode)
-            for sub, episode in rows
-            if not db.get(ConfigEntry, f"episode_deleted.{episode.id}")
-        ]
+        deleted = set(
+            db.scalars(
+                select(ConfigEntry.key).where(
+                    ConfigEntry.key.in_([f"episode_deleted.{episode.id}" for _, episode in rows])
+                )
+            )
+        )
+        rows = [(sub, episode) for sub, episode in rows if f"episode_deleted.{episode.id}" not in deleted]
     return task, season, rows
 
 
@@ -134,19 +137,28 @@ def register(app, context, authenticated, permission):
             episodes = []
             snapshots = {}
             bindings = {}
-            for sub, episode in rows:
-                links = list(
-                    db.execute(
-                        select(SubtaskAsset, Download)
-                        .join(MediaAsset, SubtaskAsset.asset_id == MediaAsset.id)
-                        .join(Download, MediaAsset.download_id == Download.id)
-                        .where(
-                            SubtaskAsset.subtask_id == sub.id,
-                            (SubtaskAsset.current.is_(True) | SubtaskAsset.pending.is_(True)),
-                        )
-                        .order_by(SubtaskAsset.pending.desc(), SubtaskAsset.id.desc())
+            selected_links = list(
+                db.execute(
+                    select(SubtaskAsset, MediaAsset.download_id)
+                    .join(MediaAsset, SubtaskAsset.asset_id == MediaAsset.id)
+                    .where(
+                        SubtaskAsset.subtask_id.in_([sub.id for sub, _ in rows]),
+                        (SubtaskAsset.current.is_(True) | SubtaskAsset.pending.is_(True)),
                     )
+                    .order_by(SubtaskAsset.pending.desc(), SubtaskAsset.id.desc())
                 )
+            )
+            downloads = {
+                d.id: d
+                for d in db.scalars(
+                    select(Download).where(Download.id.in_({identity for _, identity in selected_links}))
+                )
+            }
+            links_by_subtask = {}
+            for link, identity in selected_links:
+                links_by_subtask.setdefault(link.subtask_id, []).append((link, downloads[identity]))
+            for sub, episode in rows:
+                links = links_by_subtask.get(sub.id, [])
                 release_ids.update(download.release_id for _, download in links)
                 for link, download in links:
                     snapshots[download.id] = (
@@ -179,7 +191,7 @@ def register(app, context, authenticated, permission):
             if not release:
                 continue
             metadata = await inspect(ctx, release)
-            catalog = mapping_catalog(
+            file_catalog = mapping_catalog(
                 release.revision,
                 [file.model_dump() for file in metadata.files],
                 [
@@ -191,9 +203,10 @@ def register(app, context, authenticated, permission):
             for episode in episodes:
                 if episode["release_id"] == release.id and episode["subtask_id"] in bindings:
                     binding, files, revision = bindings[episode["subtask_id"]]
-                    episode["binding"] = remap_binding(binding, files, catalog) if files else binding
-            groups = related_files(
-                [TorrentFile.model_validate(file) for file in catalog],
+                    episode["binding"] = remap_binding(binding, files, file_catalog) if files else binding
+            groups = await asyncio.to_thread(
+                related_files,
+                [TorrentFile.model_validate(file) for file in file_catalog],
                 [
                     episode["binding"]
                     for episode in episodes
@@ -213,7 +226,7 @@ def register(app, context, authenticated, permission):
                             "related": groups.get(file["index"], []),
                             "legacy": file["revision"] != release.revision,
                         }
-                        for file in catalog
+                        for file in file_catalog
                     ],
                 }
             )
@@ -665,12 +678,9 @@ def register(app, context, authenticated, permission):
             ctx.mapping_jobs.persist_payload(db, payload)
         completed = []
         try:
+            choices = []
             # Submit replacements before removals so shared files remain protected.
             for row in sorted(payload.rows, key=lambda row: row.video_index is None):
-                await ctx.mapping_jobs.progress(
-                    f"Серия {row.number or row.subtask_id}: применение файлов (ожидание загрузчика и диска)",
-                    len(completed),
-                )
                 old = existing[row.subtask_id]
                 binding = old["binding"] or {}
                 old_tracks = sorted(
@@ -714,22 +724,35 @@ def register(app, context, authenticated, permission):
                     }
                     if any(file_identity(catalog[index]) not in indices for index in row.track_indices):
                         raise ValueError("Выбранные дорожки отсутствуют в версии торрента этого видео")
-                    await ctx.worker.choose(
-                        identity,
-                        user.id,
-                        video_index=video["source_index"],
-                        track_indices=[
-                            indices[file_identity(catalog[index])] for index in sorted(set(row.track_indices))
-                        ],
-                        **(
-                            {"revision": revision} if revision != releases[row.release_id]["revision"] else {}
-                        ),
+                    choices.append(
+                        dict(
+                            decision_id=identity,
+                            video_index=video["source_index"],
+                            track_indices=[
+                                indices[file_identity(catalog[index])]
+                                for index in sorted(set(row.track_indices))
+                            ],
+                            **(
+                                {"revision": revision}
+                                if revision != releases[row.release_id]["revision"]
+                                else {}
+                            ),
+                        )
                     )
-                elif changed and old["binding"]:
+            if choices:
+                await ctx.mapping_jobs.progress(
+                    f"Применение {len(choices)} сопоставлений пакетами по раздачам", 0
+                )
+                await ctx.worker.choose_many(choices, user.id)
+            for row in payload.rows:
+                old = existing[row.subtask_id]
+                if row.video_index is None and old["binding"]:
                     from lazarr.deletion import delete_selection
 
                     await delete_selection(ctx.worker, row.subtask_id, user.id)
-                with ctx.db.session() as db:
+            # Titles and placement belong to one season edit, not one transaction per episode.
+            with ctx.db.session() as db:
+                for row in payload.rows:
                     sub = db.get(Subtask, row.subtask_id)
                     episode = db.get(Episode, sub.episode_id)
                     if row.special_position is not None:
@@ -753,8 +776,8 @@ def register(app, context, authenticated, permission):
                         else:
                             db.add(ConfigEntry(key=key, value={"title": episode.title}))
                     audit(db, user.id, "season_mapping.save", str(row.subtask_id))
-                completed.append(row.subtask_id)
-                await ctx.mapping_jobs.progress(f"Применено серий: {len(completed)}", len(completed))
+            completed.extend(row.subtask_id for row in payload.rows)
+            await ctx.mapping_jobs.progress(f"Применено серий: {len(completed)}", len(completed))
             # Assign returned files first, then retire the deleted rows using shared-file protection.
             from lazarr.deletion import delete_selection
 

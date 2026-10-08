@@ -5,6 +5,7 @@ from contextlib import nullcontext
 import time
 from pathlib import Path
 from sqlalchemy import func, select
+from sqlalchemy.orm import load_only
 from lazarr.models import (
     Media,
     Season,
@@ -199,27 +200,29 @@ class LibraryService:
                     .group_by(Task.media_id)
                 ).all()
             )
-            for media in items:
-                downloads = {
-                    download.id: download
-                    for download in db.scalars(
-                        select(Download)
-                        .join(MediaAsset, MediaAsset.download_id == Download.id)
-                        .where(MediaAsset.media_id == media.id, Download.state.in_(active))
-                    )
+            # Fetch each plan-free download once, regardless of episode count.
+            downloads = {
+                d.id: d
+                for d in db.scalars(
+                    select(Download)
+                    .where(Download.state.in_(active))
+                    .options(load_only(Download.id, Download.stats))
+                )
+            }
+            by_media = {}
+            for media_id, download_id in db.execute(
+                select(MediaAsset.media_id, MediaAsset.download_id)
+                .where(MediaAsset.download_id.in_(downloads))
+                .distinct()
+            ):
+                by_media.setdefault(media_id, []).append(downloads[download_id])
+            for media_id, rows in by_media.items():
+                values = [min(1.0, max(0.0, float((d.stats or {}).get("progress", 0)))) for d in rows]
+                summaries[media_id] = {
+                    "state": "downloading",
+                    "progress": sum(values) / len(values),
+                    "download_rate": sum((d.stats or {}).get("download_rate", 0) or 0 for d in rows),
                 }
-                if downloads:
-                    values = [
-                        min(1.0, max(0.0, float((d.stats or {}).get("progress", 0))))
-                        for d in downloads.values()
-                    ]
-                    summaries[media.id] = {
-                        "state": "downloading",
-                        "progress": sum(values) / len(values),
-                        "download_rate": sum(
-                            (d.stats or {}).get("download_rate", 0) or 0 for d in downloads.values()
-                        ),
-                    }
             return [
                 {
                     "id": key,
@@ -269,16 +272,50 @@ class LibraryService:
             if episode_id is not None:
                 sub_query = sub_query.where(Subtask.episode_id == episode_id)
             subs = list(db.scalars(sub_query))
+            downloads = (
+                {
+                    d.id: d
+                    for d in db.scalars(
+                        select(Download).where(
+                            Download.id.in_(
+                                select(MediaAsset.download_id).where(
+                                    MediaAsset.id.in_(
+                                        select(LibraryAsset.asset_id)
+                                        .where(LibraryAsset.media_id == identity)
+                                        .union(
+                                            select(SubtaskAsset.asset_id).where(
+                                                SubtaskAsset.subtask_id.in_([sub.id for sub in subs])
+                                            )
+                                        )
+                                    )
+                                )
+                            )
+                        )
+                    )
+                }
+                if include_versions
+                else {}
+            )
+            releases = (
+                {
+                    r.id: r
+                    for r in db.scalars(
+                        select(Release).where(Release.id.in_({d.release_id for d in downloads.values()}))
+                    )
+                }
+                if downloads
+                else {}
+            )
             stored_versions = {}
-            for link, asset, download, release in db.execute(
-                select(LibraryAsset, MediaAsset, Download, Release)
+            for link, asset in db.execute(
+                select(LibraryAsset, MediaAsset)
                 .join(MediaAsset, MediaAsset.id == LibraryAsset.asset_id)
-                .join(Download, Download.id == MediaAsset.download_id)
-                .join(Release, Release.id == Download.release_id)
                 .where(LibraryAsset.media_id == identity)
                 .where(include_versions)
                 .where(LibraryAsset.episode_id == episode_id if episode_id is not None else True)
             ):
+                download = downloads[asset.download_id]
+                release = releases[download.release_id]
                 if link.part_key.split(":")[0] in {
                     "trailer",
                     "extra",
@@ -314,20 +351,20 @@ class LibraryService:
                         mapping_recommendations[row.subtask_id] = row
             if subs and include_versions:
                 decisions = {
-                    (row.subtask_id, row.release_id): row.id
-                    for row in db.scalars(
-                        select(CandidateDecision).where(
-                            CandidateDecision.subtask_id.in_([s.id for s in subs])
-                        )
+                    (subtask_id, release_id): identity
+                    for subtask_id, release_id, identity in db.execute(
+                        select(
+                            CandidateDecision.subtask_id, CandidateDecision.release_id, CandidateDecision.id
+                        ).where(CandidateDecision.subtask_id.in_([s.id for s in subs]))
                     )
                 }
-                for link, asset, download, release in db.execute(
-                    select(SubtaskAsset, MediaAsset, Download, Release)
+                for link, asset in db.execute(
+                    select(SubtaskAsset, MediaAsset)
                     .join(MediaAsset, MediaAsset.id == SubtaskAsset.asset_id)
-                    .join(Download, Download.id == MediaAsset.download_id)
-                    .join(Release, Release.id == Download.release_id)
                     .where(SubtaskAsset.subtask_id.in_([s.id for s in subs]))
                 ):
+                    download = downloads[asset.download_id]
+                    release = releases[download.release_id]
                     selected_candidates[link.subtask_id] = decisions.get((link.subtask_id, release.id))
                     task_versions.setdefault(link.subtask_id, []).append(
                         self._version(
@@ -341,9 +378,12 @@ class LibraryService:
                         )
                     )
             timezone = self.service.settings().timezone
+            subs_by_episode = {}
+            for sub in subs:
+                subs_by_episode.setdefault(sub.episode_id, []).append(sub)
             parts = []
             for episode in episodes if media.kind == "tv" else [None]:
-                related = [s for s in subs if s.episode_id == (episode.id if episode else None)]
+                related = subs_by_episode.get(episode.id if episode else None, [])
                 canonical = seasons[episode.season_id].number if episode else None
                 aliases = (
                     metadata.get("episode_numbering", {}).get(f"{canonical}:{episode.number}", [])
@@ -436,13 +476,11 @@ class LibraryService:
         streams = asset.probe.get("streams", [])
 
         def subtitle_path(relative):
-            if not relative:
+            if not relative or not asset.probe.get("subtitle_analysis"):
                 return None
             root = Path(download.save_path).resolve()
             path = (root / relative).resolve()
             return path if path.is_relative_to(root) and path.is_file() else None
-
-        video_path = subtitle_path(asset.path)
 
         def stream_language(stream):
             tagged = language(stream.get("tags", {}).get("language"))
@@ -450,6 +488,7 @@ class LibraryService:
                 return tagged
             if stream.get("detected_language"):
                 return language(stream["detected_language"])
+            video_path = subtitle_path(asset.path)
             if video_path and stream.get("index") is not None:
                 return stored_subtitle_language(asset, video_path, stream["index"], stream.get("codec_name"))
             return "und"
