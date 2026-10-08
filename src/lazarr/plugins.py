@@ -1,8 +1,6 @@
 import asyncio
-import hashlib
-import importlib.util
+import importlib
 import inspect
-import json
 import os
 import re
 import ssl
@@ -12,8 +10,6 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 import httpx
 from packaging.specifiers import SpecifierSet
-from packaging.version import Version
-from pydantic import BaseModel, Field
 from sqlalchemy import select
 from lazarr.models import ProviderConfig, ConfigEntry
 from lazarr.rate_limit import RequestPacer
@@ -35,15 +31,6 @@ PROVIDER_TYPES = {
 }
 
 
-class CatalogEntry(BaseModel):
-    id: str = Field(pattern=r"^[a-z][a-z0-9_]{0,63}$")
-    kind: str
-    version: str = Field(pattern=r"^[a-zA-Z0-9._-]{1,64}$")
-    sdk: str = ">=1,<2"
-    url: str
-    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-
-
 def atomic_write(path: Path, content: bytes):
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_name(path.name + ".tmp")
@@ -60,13 +47,10 @@ class PluginManager:
         self.db, self.config, self.secrets = db, config, secrets
         from lazarr.search_runtime import SearchEngineManager
 
-        self.search_engine = SearchEngineManager(config.plugin_dir / "search_engine", transport)
-        self.root = config.plugin_dir
+        self.search_engine = SearchEngineManager()
         self.classes: dict[str, type[Provider]] = {}
-        self.entries: dict[str, dict] = {}
         self.errors: dict[str, str] = {}
         self.transport = transport
-        self.lock = asyncio.Lock()
         self.session_locks: dict[str, asyncio.Lock] = {}
         self.request_pacers = {}
         self.request_interval = 2.0
@@ -74,158 +58,26 @@ class PluginManager:
 
     def bootstrap(self):
         self.search_engine.bootstrap()
-        bundled = Path(__file__).parent / "bundled"
-        catalog = json.loads((bundled / "catalog.json").read_text())
-        for raw in catalog["plugins"]:
-            entry = CatalogEntry.model_validate(raw)
-            pointer = self.root / entry.id / "active.json"
-            if not pointer.exists():
-                content = (bundled / f"{entry.id}.py").read_bytes()
-                self._activate(entry, content)
-        for pointer in self.root.glob("*/active.json"):
-            if pointer.parent.name == "search_engine":
-                continue
-            try:
-                entry = CatalogEntry.model_validate_json(pointer.read_text())
-                if entry.kind not in PROVIDER_TYPES:
-                    continue
-                self._load_active(entry)
-            except Exception:
-                self.errors[pointer.parent.name] = "Cannot load active plugin; update or roll back"
+        self.classes.clear()
+        self.errors.clear()
+        for name in ("tmdb", "nyaa", "rutracker", "kinozal"):
+            cls = importlib.import_module(f"lazarr.providers.{name}").Plugin
+            manifest = cls.manifest
+            expected = PROVIDER_TYPES.get(manifest.kind)
+            if (
+                manifest.id != name
+                or expected is None
+                or not issubclass(cls, expected)
+                or inspect.isabstract(cls)
+            ):
+                raise ValueError(f"Invalid provider contract: {name}")
+            if SDK_VERSION not in SpecifierSet(manifest.sdk):
+                raise ValueError(f"Incompatible provider SDK: {name}")
+            self.classes[name] = cls
         with self.db.session() as db:
             for plugin_id in self.classes:
                 if not db.get(ProviderConfig, plugin_id):
                     db.add(ProviderConfig(id=plugin_id, enabled=plugin_id == "tmdb"))
-
-    def _path(self, entry):
-        return self.root / entry.id / f"{entry.version}-{entry.sha256[:16]}.py"
-
-    def _validate(self, entry, content):
-        if hashlib.sha256(content).hexdigest() != entry.sha256:
-            raise ValueError("Plugin checksum mismatch")
-        if SDK_VERSION not in SpecifierSet(entry.sdk):
-            raise ValueError("Incompatible plugin SDK")
-        if len(content) > 1024 * 1024:
-            raise ValueError("Plugin exceeds 1 MiB")
-        compile(content, entry.id, "exec")
-
-    def _load(self, entry, path):
-        spec = importlib.util.spec_from_file_location(f"lazarr_plugin_{entry.id}_{entry.sha256}", path)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        cls = module.Plugin
-        if not issubclass(cls, Provider):
-            raise ValueError("Plugin must implement Lazarr Provider")
-        manifest = cls.manifest
-        if (manifest.id, manifest.version, manifest.kind) != (entry.id, entry.version, entry.kind):
-            raise ValueError("Plugin identity does not match catalog")
-        if SDK_VERSION not in SpecifierSet(manifest.sdk):
-            raise ValueError("Incompatible plugin SDK")
-        expected = PROVIDER_TYPES.get(manifest.kind)
-        if expected is None:
-            raise ValueError("Unsupported provider kind")
-        if not issubclass(cls, expected) or inspect.isabstract(cls):
-            raise ValueError("Plugin does not implement its provider contract")
-        return cls
-
-    def _load_active(self, entry):
-        path = self._path(entry)
-        self._validate(entry, path.read_bytes())
-        cls = self._load(entry, path)
-        self.classes[entry.id], self.entries[entry.id] = cls, entry.model_dump()
-        self.errors.pop(entry.id, None)
-
-    def _activate(self, entry, content):
-        self._validate(entry, content)
-        path = self._path(entry)
-        atomic_write(path, content)
-        cls = self._load(entry, path)
-        pointer = path.parent / "active.json"
-        if pointer.exists() and pointer.read_text() != entry.model_dump_json():
-            atomic_write(path.parent / "previous.json", pointer.read_bytes())
-        atomic_write(pointer, entry.model_dump_json().encode())
-        self.classes[entry.id], self.entries[entry.id] = cls, entry.model_dump()
-        self.errors.pop(entry.id, None)
-
-    def use_bundled(self, plugin_id):
-        bundled = Path(__file__).parent / "bundled"
-        catalog = json.loads((bundled / "catalog.json").read_text())
-        raw = next((v for v in catalog["plugins"] if v["id"] == plugin_id), None)
-        if raw is None:
-            raise ValueError("Встроенная версия провайдера отсутствует")
-        entry = CatalogEntry.model_validate(raw)
-        self._activate(entry, (bundled / f"{entry.id}.py").read_bytes())
-        return entry
-
-    async def catalog(self, url):
-        if not url.startswith("https://"):
-            raise ValueError("HTTPS repository URL is required")
-        async with httpx.AsyncClient(timeout=30, transport=self.transport) as client:
-            response = await client.get(url)
-            response.raise_for_status()
-            if len(response.content) > 1024 * 1024:
-                raise ValueError("Catalog too large")
-            result = [
-                entry
-                for value in response.json()["plugins"]
-                if (entry := CatalogEntry.model_validate(value)).kind in PROVIDER_TYPES
-            ]
-            if len({entry.id for entry in result}) != len(result):
-                raise ValueError("Duplicate plugin IDs")
-            return result
-
-    async def update(self, url, plugin_id):
-        async with self.lock:
-            entries = await self.catalog(url)
-            entry = next((v for v in entries if v.id == plugin_id), None)
-            if entry is None or not entry.url.startswith("https://"):
-                raise ValueError("Plugin missing or URL is not HTTPS")
-            async with httpx.AsyncClient(timeout=30, transport=self.transport) as client:
-                async with client.stream("GET", entry.url) as response:
-                    response.raise_for_status()
-                    content = bytearray()
-                    async for chunk in response.aiter_bytes():
-                        content.extend(chunk)
-                        if len(content) > 1024 * 1024:
-                            raise ValueError("Plugin too large")
-            self._activate(entry, bytes(content))
-            with self.db.session() as db:
-                if not db.get(ProviderConfig, plugin_id):
-                    db.add(ProviderConfig(id=plugin_id))
-            return entry
-
-    async def auto_update(self, url):
-        bundled = Path(__file__).parent / "bundled"
-        for raw in json.loads((bundled / "catalog.json").read_text())["plugins"]:
-            current = self.entries.get(raw["id"])
-            if current is None or Version(raw["version"]) > Version(current["version"]):
-                self.use_bundled(raw["id"])
-        if not url:
-            return
-        # A repository failure leaves all locally cached providers usable.
-        entries = await self.catalog(url)
-        for entry in entries:
-            current = self.entries.get(entry.id)
-            if current is None or Version(entry.version) > Version(current["version"]):
-                try:
-                    await self.update(url, entry.id)
-                except (ValueError, httpx.HTTPError):
-                    with self.db.session() as db:
-                        row = db.get(ProviderConfig, entry.id)
-                        if row:
-                            row.last_error = "Не удалось обновить плагин; используется локальная версия"
-
-    async def rollback(self, plugin_id):
-        async with self.lock:
-            # Only known IDs can address files under the plugin directory.
-            if plugin_id not in self.entries and plugin_id not in self.errors:
-                raise ValueError("Unknown plugin")
-            previous = self.root / plugin_id / "previous.json"
-            if not previous.exists():
-                raise ValueError("No previous version")
-            entry = CatalogEntry.model_validate_json(previous.read_text())
-            self._activate(entry, self._path(entry).read_bytes())
-            return entry
 
     def content_order(self):
         with self.db.session() as db:
@@ -261,7 +113,7 @@ class PluginManager:
         return sorted(ids, key=lambda key: order.index(key) if key in order else -1)
 
     def manual_candidate(self, value):
-        """Turn a URL from a bundled content provider into a safe candidate stub."""
+        """Turn a URL from a shipped content provider into a safe candidate stub."""
         from lazarr.sdk import Candidate
 
         raw = str(value).strip()

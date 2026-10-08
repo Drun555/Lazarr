@@ -510,7 +510,7 @@ document.addEventListener('submit', event=>{const form=event.target;if(!(form in
   if(form.id==='setup-form'){await api('/setup','POST',Object.fromEntries(data));location.assign('/onboarding');}
   else if(form.id==='login-form'){await api('/session','POST',Object.fromEntries(data));location.assign('/');}
   else if(form.id==='task-form'){if(!state.selected)throw new Error('Выберите произведение');const payload={provider:state.selected.provider,media_id:state.selected.id,kind:state.selected.kind,requirements:readRequirements(form)};if(state.selected.kind==='tv')payload.seasons=taskSeasonSelections();await api('/tasks','POST',payload);$('#selection').hidden=true;$('#search-results').innerHTML='';$('#media-search').value='';state.selected=null;toast('Задача создана. Поиск поставлен в очередь.');await refreshTasks();await switchTab('library');}
-  else if(form.id==='settings-form'){const payload={...state.settings,defaults:readRequirements(form,'default_')};for(const key of ['movie_path','series_path','search_start','plugin_repository','search_engine_repository'])payload[key]=String(data.get(key));payload.theme_color=String(data.get('theme_color')||'purple');payload.seed_ratio=String(data.get('seed_ratio')).trim()===''?null:Number(data.get('seed_ratio'));payload.prefer_full_subtitles=data.get('prefer_full_subtitles')==='on';await api('/settings','PUT',payload);state.settings=payload;await loadStorage();toast('Настройки сохранены');}
+  else if(form.id==='settings-form'){const payload={...state.settings,defaults:readRequirements(form,'default_')};for(const key of ['movie_path','series_path','search_start'])payload[key]=String(data.get(key));payload.theme_color=String(data.get('theme_color')||'purple');payload.seed_ratio=String(data.get('seed_ratio')).trim()===''?null:Number(data.get('seed_ratio'));payload.prefer_full_subtitles=data.get('prefer_full_subtitles')==='on';await api('/settings','PUT',payload);state.settings=payload;await loadStorage();toast('Настройки сохранены');}
   else if(form.id==='account-form'){await api('/accounts','POST',Object.fromEntries(data));form.reset();toast('Аккаунт создан');await loadAccounts();}
   else if(form.id==='delete-task-form'){const result=await api(`/tasks/${form.dataset.task}`,'DELETE',{delete_media:data.get('delete_media')==='on'});$('#modal').close();await refreshTasks();await refreshDownloads();await refreshLibraryView();toast(result.cleanup_pending?'Задача удалена. Очистка файлов будет повторена автоматически.':'Задача удалена');}
   else if(form.id==='inline-task-form'){
@@ -562,12 +562,5 @@ if(location.hash==='#settings'&&$('[data-tab="settings"]'))$('[data-tab="setting
 
 async function loadSearchEngineStatus(){
   const status=await api('/search-engine');
-  $('#search-engine-status').textContent=`Версия ${status.version}${status.source==='bundled'?' · встроенная':''}${!status.automatic?' · автообновление приостановлено после отката':''}${status.error?' · '+status.error:''}`;
-  $('#search-engine-rollback').disabled=!status.can_rollback;
+  $('#search-engine-status').textContent=`Движок ${status.version} · обновляется вместе с Lazarr`;
 }
-document.addEventListener('click',async event=>{
-  const button=event.target.closest('#search-engine-update,#search-engine-rollback');if(!button)return;
-  button.disabled=true;
-  try{await api('/search-engine/'+(button.id==='search-engine-update'?'update':'rollback'),'POST',{});await loadSearchEngineStatus();toast('Движок обновлён');}
-  catch(error){toast(error.message,true);}finally{button.disabled=false;}
-});

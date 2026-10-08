@@ -380,7 +380,7 @@ function showMappingReport(report,draft){
   function issueLink(){
     let body=`## Комментарий\n${comment.value.trim()||'<!-- Что сопоставилось неправильно и какой результат ожидался? -->'}\n\n## Раздача\nURL: ${release.url}\nНазвание: ${release.title}\nПровайдер: ${release.provider_name} (${release.provider})`;
     if(searchReport)body=`## Комментарий\n${comment.value.trim()||'<!-- Что произошло при поиске и какой результат ожидался? -->'}\n\n## Тип проблемы\nIssue относится именно к некорректному ходу поиска раздач.\n\n## Произведение\n${release.title}`;
-    issue.href='https://github.com/Drun555/lazarr-search-engine/issues/new?'+new URLSearchParams({title:`${searchReport?'Некорректный ход поиска':'Ошибка сопоставления'}: ${release.title.slice(0,160)}`,body});
+    issue.href='https://github.com/Drun555/Lazarr/issues/new?'+new URLSearchParams({title:`${searchReport?'Некорректный ход поиска':'Ошибка сопоставления'}: ${release.title.slice(0,160)}`,body});
   }
   comment.addEventListener('input',issueLink);issueLink();
   dialog.querySelector('#mapping-report-download').addEventListener('click',event=>{

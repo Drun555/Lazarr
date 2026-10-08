@@ -1,5 +1,5 @@
 import httpx
-from lazarr.bundled.tmdb import Plugin
+from lazarr.providers.tmdb import Plugin
 from lazarr.sdk import ProviderContext, MetadataItem, EpisodeInfo, SeasonInfo
 from lazarr.services import CreateTask
 from lazarr.models import Episode, Subtask

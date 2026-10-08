@@ -41,10 +41,6 @@ class Settings(BaseModel):
     series_path: str = Field(default_factory=lambda: os.getenv("LAZARR_SERIES_PATH", "downloads/series"))
     search_start: str = "00:00"
     seed_ratio: float | None = Field(default=1.0, ge=0, le=10000)
-    plugin_repository: str = ""
-    search_engine_repository: str = (
-        "https://raw.githubusercontent.com/Drun555/lazarr-search-engine/main/catalog.json"
-    )
 
     @model_validator(mode="before")
     @classmethod
@@ -68,13 +64,6 @@ class Settings(BaseModel):
             raise ValueError("Use HH:MM")
         return value
 
-    @field_validator("plugin_repository", "search_engine_repository")
-    @classmethod
-    def valid_repository(cls, value):
-        if value and not value.startswith("https://"):
-            raise ValueError("Plugin repository must use HTTPS")
-        return value
-
     @field_validator("movie_path", "series_path")
     @classmethod
     def valid_path(cls, value):
@@ -91,8 +80,6 @@ class RuntimeConfig:
         self.data_dir = Path(data_dir or os.getenv("LAZARR_DATA_DIR", "data")).absolute()
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.data_dir.chmod(0o700)
-        self.plugin_dir = Path(os.getenv("LAZARR_PLUGIN_DIR", str(self.data_dir / "plugins")))
-        self.plugin_dir.mkdir(parents=True, exist_ok=True)
         self.trawl_url = os.getenv("LAZARR_TRAWL_URL", "http://trawl:8191")
         self.background = background
         self.test_environment = os.getenv("LAZARR_TEST", "0") == "1"

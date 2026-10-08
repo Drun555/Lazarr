@@ -4,7 +4,7 @@ from urllib.parse import parse_qs
 import httpx
 import pytest
 
-from lazarr.bundled.kinozal import Plugin, page_text
+from lazarr.providers.kinozal import Plugin, page_text
 from lazarr.config import Requirements
 from lazarr.matcher import Matcher
 from lazarr.sdk import Candidate, ProviderContext, ProviderError, SearchQuery, SubtaskRequest

@@ -14,7 +14,6 @@ services:
     environment:
       TZ: ${TZ:-UTC}
       LAZARR_DATA_DIR: /data
-      LAZARR_PLUGIN_DIR: /plugins
       LAZARR_MOVIE_PATH: /downloads/movies
       LAZARR_SERIES_PATH: /downloads/series
       LAZARR_SECURE_COOKIE: ${LAZARR_SECURE_COOKIE:-0}
@@ -25,7 +24,6 @@ services:
       - "6881:6881/udp"
     volumes:
       - lazarr-data:/data
-      - lazarr-plugins:/plugins
       - type: bind
         source: ${LAZARR_DOWNLOADS:-./Downloads}
         target: /downloads
@@ -42,4 +40,3 @@ services:
 
 volumes:
   lazarr-data:
-  lazarr-plugins:

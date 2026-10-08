@@ -18,8 +18,8 @@ if [ "$(id -u)" = "0" ]; then
         usermod --non-unique --uid "$puid" --gid "$pgid" lazarr
     fi
 
-    mkdir -p /data /plugins /downloads/source /downloads/user
-    chown -R "$puid:$pgid" /data /plugins
+    mkdir -p /data /downloads/source /downloads/user
+    chown -R "$puid:$pgid" /data
     chown "$puid:$pgid" /downloads /downloads/source /downloads/user
     chmod 0700 /data
     exec gosu "$puid:$pgid" "$@"

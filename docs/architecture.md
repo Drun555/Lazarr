@@ -102,12 +102,10 @@ erDiagram
 
 LibraryService объединяет постоянный read model Media → Episode → LibraryAsset → MediaAsset/Download/Release с активными Task/Subtask. Три встроенных библиотеки вычисляются по метаданным, без привязки к пользователю или физическому каталогу. `/api/v1/libraries` и `/api/v1/libraries/media/{id}` защищены разрешением library (admin/user). Метаданные SDK 1.4 содержат жанры, страны и исходный язык. `Subtask.last_search_at` (0005) фиксирует фактическую попытку поиска; отсутствие исторической даты передаётся как null.
 
-## Independently updated search engine
+## Search engine shipped with Lazarr
 
-Algorithm source lives in https://github.com/Drun555/lazarr-search-engine. `matcher.py`, `selection.py` and `provider_utils.py` are compatibility facades; they dispatch to the active engine. `season_mapping.py` also uses its file associations. `_search_builtin/` is the bundled offline snapshot, not the primary place to fix algorithms. Refresh this snapshot from a tested engine release when shipping a new Lazarr version.
+Search algorithms live in `src/lazarr/_search_builtin/` and ship as part of the application. `matcher.py`, `selection.py` and `provider_utils.py` expose the engine to callers; `season_mapping.py` uses its file associations. Changes to these algorithms and provider adapters in `src/lazarr/providers/` are released together with Lazarr.
 
-`search_runtime.py` installs the exact SHA-256-verified archive advertised by `Settings.search_engine_repository`, checks engine API 1 and SDK compatibility, and switches only after import/self-check succeeds. Packages execute trusted Python locally; HTTPS repository ownership is the trust boundary, not a sandbox. The default points to the engine's public catalog. The scheduler checks hourly, independently of provider updates. Existing settings acquire this default without changing custom provider catalogs; an empty engine URL disables network updates.
+`search_runtime.py` computes an engine identity from its version and source digest. Candidate reports carry this identity; automatic reports are lazily reevaluated when it changes. Existing downloads and manual file bindings remain intact. `/api/v1/search-engine` exposes the shipped version and identity.
 
-Worker search groups, evaluation/selection operations and season mapping requests pin a generation through a ContextVar. An update therefore cannot mix algorithms inside an operation. Candidate reports carry `engine_version` (version plus content identity); automatic reports are lazily reevaluated on version change. Existing downloads and manual file bindings remain intact. Active/previous package pointers survive restarts. Rollback pauses automatic updates until an explicit update.
-
-Settings expose the catalog URL, installed version, update and rollback controls. `/api/v1/search-engine` returns status; POST `/api/v1/search-engine/update` and `/rollback` require provider-management permission and are audited. Provider adapters, credentials, HTTP/Trawl pacing, task queues, database identity/upserts and torrent submission stay in Lazarr.
+There are no remote catalogs, scheduled plugin updates, runtime installs or rollbacks. Legacy settings and files under `/plugins` are ignored. Provider settings, credentials and sessions remain in the application database.

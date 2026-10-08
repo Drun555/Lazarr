@@ -323,3 +323,34 @@ def test_task_pause_does_not_wait_for_search_lock(core, media, season, monkeypat
                 assert session.get(Task, identity).paused is paused
         worker.cancel_media_search.assert_called_once_with(identity)
         assert worker.sync_consumers.await_count == 2
+
+
+def test_plugins_are_updated_only_with_application(core):
+    from lazarr.models import ConfigEntry
+
+    config, db, _, _ = core
+    with db.session() as session:
+        row = session.get(ConfigEntry, "app")
+        row.value = {
+            **row.value,
+            "plugin_repository": "https://old.example/providers.json",
+            "search_engine_repository": "https://old.example/engine.json",
+        }
+    with TestClient(create_app(config)) as client:
+        login(client)
+        values = client.get("/api/v1/settings").json()
+        assert "plugin_repository" not in values
+        assert "search_engine_repository" not in values
+        assert client.get("/api/v1/search-engine").json()["source"] == "application"
+        assert client.get("/api/v1/plugin-catalog").status_code == 404
+        for path in (
+            "search-engine/update",
+            "search-engine/rollback",
+            "providers/tmdb/update",
+            "providers/tmdb/rollback",
+            "providers/tmdb/bundled",
+        ):
+            assert client.post("/api/v1/" + path, json={}).status_code == 404
+        page = client.get("/").text
+        assert 'name="plugin_repository"' not in page
+        assert 'id="search-engine-update"' not in page

@@ -1,92 +1,7 @@
-import hashlib
 import json
-import httpx
 import pytest
 from lazarr.models import ProviderConfig
 from lazarr.plugins import PluginManager
-
-
-def plugin_source(version):
-    return f'''from lazarr.sdk import ContentProvider, ProviderManifest, SearchPage
-class Plugin(ContentProvider):
-    manifest = ProviderManifest(id="test_provider", name="Test", kind="content", version="{version}")
-    async def healthcheck(self):
-        return {{"version": "{version}"}}
-    async def search(self, query, cursor=None):
-        return SearchPage(items=[])
-    async def inspect(self, candidate):
-        return candidate
-    async def resolve_download(self, candidate):
-        raise NotImplementedError("Test fixture has no releases")
-'''.encode()
-
-
-def catalog(version, source, digest=None):
-    return {
-        "plugins": [
-            {
-                "id": "test_provider",
-                "kind": "content",
-                "version": version,
-                "sdk": ">=1,<2",
-                "url": "https://plugins.example/plugin.py",
-                "sha256": digest or hashlib.sha256(source).hexdigest(),
-            }
-        ]
-    }
-
-
-async def test_updates_pin_active_calls_and_can_rollback_offline(core):
-    _, db, manager, _ = core
-    source = plugin_source("1.0.0")
-    data = catalog("1.0.0", source)
-
-    def transport(request):
-        return (
-            httpx.Response(200, json=data)
-            if request.url.path.endswith("json")
-            else httpx.Response(200, content=source)
-        )
-
-    manager.transport = httpx.MockTransport(transport)
-    await manager.update("https://plugins.example/catalog.json", "test_provider")
-    manager.configure("test_provider", {}, True)
-    async with manager.open("test_provider") as previous:
-        source = plugin_source("1.1.0")
-        data = catalog("1.1.0", source)
-        await manager.update("https://plugins.example/catalog.json", "test_provider")
-        assert (await previous.healthcheck())["version"] == "1.0.0"
-    async with manager.open("test_provider") as current:
-        assert (await current.healthcheck())["version"] == "1.1.0"
-    manager.transport = httpx.MockTransport(lambda req: (_ for _ in ()).throw(httpx.ConnectError("offline")))
-    await manager.rollback("test_provider")
-    manager.bootstrap()
-    async with manager.open("test_provider") as current:
-        assert (await current.healthcheck())["version"] == "1.0.0"
-
-
-async def test_corrupt_or_incompatible_update_keeps_active_version(core):
-    _, _, manager, _ = core
-    source = plugin_source("1.0.0")
-    data = catalog("1.0.0", source)
-    manager.transport = httpx.MockTransport(
-        lambda req: (
-            httpx.Response(200, json=data)
-            if req.url.path.endswith("json")
-            else httpx.Response(200, content=source)
-        )
-    )
-    await manager.update("https://plugins.example/catalog.json", "test_provider")
-    source = plugin_source("1.1.0")
-    data = catalog("1.1.0", source, "0" * 64)
-    with pytest.raises(ValueError, match="checksum"):
-        await manager.update("https://plugins.example/catalog.json", "test_provider")
-    assert manager.classes["test_provider"].manifest.version == "1.0.0"
-    data = catalog("1.1.0", source)
-    data["plugins"][0]["sdk"] = ">=99"
-    with pytest.raises(ValueError, match="SDK"):
-        await manager.update("https://plugins.example/catalog.json", "test_provider")
-    assert manager.classes["test_provider"].manifest.version == "1.0.0"
 
 
 def test_provider_secrets_encrypted_and_not_returned(core):
@@ -115,50 +30,6 @@ async def test_configuration_change_does_not_restore_old_session(core):
         manager.configure("rutracker", {"username": "second"}, True)
     with db.session() as session:
         assert manager.secrets.decrypt(session.get(ProviderConfig, "rutracker").session_state) == {}
-
-
-async def test_incomplete_provider_contract_is_not_activated(core):
-    _, _, manager, _ = core
-    source = plugin_source("1.0.0").replace(b"async def search(", b"async def not_search(")
-    data = catalog("1.0.0", source)
-    manager.transport = httpx.MockTransport(
-        lambda req: (
-            httpx.Response(200, json=data)
-            if req.url.path.endswith("json")
-            else httpx.Response(200, content=source)
-        )
-    )
-    with pytest.raises(ValueError, match="contract"):
-        await manager.update("https://plugins.example/catalog.json", "test_provider")
-    assert "test_provider" not in manager.classes
-
-
-async def test_automatic_updates_and_offline_cache(core):
-    _, _, manager, _ = core
-    source = plugin_source("1.0.0")
-    data = catalog("1.0.0", source)
-
-    def transport(req):
-        return (
-            httpx.Response(200, json=data)
-            if req.url.path.endswith("json")
-            else httpx.Response(200, content=source)
-        )
-
-    manager.transport = httpx.MockTransport(transport)
-    await manager.auto_update("https://plugins.example/catalog.json")
-    manager.configure("test_provider", {}, True)
-    async with manager.open("test_provider") as old:
-        source = plugin_source("1.2.0")
-        data = catalog("1.2.0", source)
-        await manager.auto_update("https://plugins.example/catalog.json")
-        assert (await old.healthcheck())["version"] == "1.0.0"
-    assert manager.classes["test_provider"].manifest.version == "1.2.0"
-    manager.transport = httpx.MockTransport(lambda req: (_ for _ in ()).throw(httpx.ConnectError("offline")))
-    with pytest.raises(httpx.ConnectError):
-        await manager.auto_update("https://plugins.example/catalog.json")
-    async with manager.open("test_provider") as provider:
-        assert (await provider.healthcheck())["version"] == "1.2.0"
 
 
 def test_content_order_persists_and_validates_enabled_providers(core):
@@ -191,23 +62,37 @@ def test_content_order_persists_and_validates_enabled_providers(core):
     assert restarted.available("content") == ["nyaa", "rutracker"]
 
 
-async def test_removed_subtitle_provider_kind_is_ignored(core):
+def test_shipped_providers_ignore_cached_code_and_preserve_settings(core, monkeypatch):
     config, db, manager, _ = core
-    legacy = {
-        "id": "legacy_subtitles",
-        "kind": "subtitle",
-        "version": "1.0.0",
-        "sdk": ">=1,<2",
-        "url": "https://plugins.example/subtitles.py",
-        "sha256": "0" * 64,
-    }
-    pointer = config.plugin_dir / "legacy_subtitles" / "active.json"
-    pointer.parent.mkdir(parents=True)
-    pointer.write_text(json.dumps(legacy))
+    legacy = config.data_dir / "plugins"
+    monkeypatch.setenv("LAZARR_PLUGIN_DIR", str(legacy))
+    for name in ("tmdb", "external_provider", "search_engine"):
+        folder = legacy / name
+        folder.mkdir(parents=True)
+        (folder / "active.json").write_text('{"version":"99.0.0"}')
+        (folder / "plugin.py").write_text('raise RuntimeError("cached code executed")')
+    manager.configure("tmdb", {"api_key": "saved-token"}, False)
+    manager.configure("rutracker", {"username": "saved-user", "trawl_url": "http://localhost:8191"}, True)
+    with db.session() as session:
+        row = session.get(ProviderConfig, "rutracker")
+        row.session_state = manager.secrets.encrypt({"authenticated": True})
+    before = {path: path.read_bytes() for path in legacy.rglob("*") if path.is_file()}
     restarted = PluginManager(db, config, manager.secrets)
     restarted.bootstrap()
-    assert "legacy_subtitles" not in restarted.classes
-    assert "legacy_subtitles" not in restarted.errors
+    assert set(restarted.classes) == {"tmdb", "nyaa", "rutracker", "kinozal"}
+    assert all(cls.__module__.startswith("lazarr.providers.") for cls in restarted.classes.values())
+    assert not restarted.errors
+    assert {path: path.read_bytes() for path in legacy.rglob("*") if path.is_file()} == before
+    with db.session() as session:
+        tmdb = session.get(ProviderConfig, "tmdb")
+        assert not tmdb.enabled
+        assert manager.secrets.decrypt(tmdb.secrets)["api_key"] == "saved-token"
+        tracker = session.get(ProviderConfig, "rutracker")
+        assert tracker.enabled
+        assert tracker.config["trawl_url"] == "http://localhost:8191"
+        assert manager.secrets.decrypt(tracker.session_state) == {"authenticated": True}
 
-    restarted.transport = httpx.MockTransport(lambda request: httpx.Response(200, json={"plugins": [legacy]}))
-    assert await restarted.catalog("https://plugins.example/catalog.json") == []
+
+def test_startup_does_not_create_plugin_cache(core):
+    config, _, _, _ = core
+    assert not (config.data_dir / "plugins").exists()

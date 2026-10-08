@@ -186,7 +186,7 @@ async function setup(){
   w.fetch=async(url,options={})=>{
     const payload=options.body?JSON.parse(options.body):undefined;calls.push({url,method:options.method,payload});
     let result;
-    if(url==='/api/v1/settings')result={defaults,prefer_full_subtitles:true,theme_color:'purple',movie_path:'/tmp/movies',series_path:'/tmp/series',search_start:'00:00',seed_ratio:1,plugin_repository:''};
+    if(url==='/api/v1/settings')result={defaults,prefer_full_subtitles:true,theme_color:'purple',movie_path:'/tmp/movies',series_path:'/tmp/series',search_start:'00:00',seed_ratio:1};
     else if(url==='/api/v1/storage')result={roots:[{source:'/downloads/source',user:'/downloads/user'}],links:12};
     else if(url==='/api/v1/status')result=status();
     else if(url==='/api/v1/telegram')result={enabled:true,token_configured:true,bot_username:'test_bot',error:''};
@@ -1354,7 +1354,7 @@ test('mapping bug report keeps the draft and puts only the summary in the GitHub
     input(w,dialog.querySelector('textarea'),'Видео должно относиться ко второй серии');
     const link=new URL(dialog.querySelector('#mapping-report-issue').href);
     assert.equal(link.origin,'https://github.com');
-    assert.equal(link.pathname,'/Drun555/lazarr-search-engine/issues/new');
+    assert.equal(link.pathname,'/Drun555/Lazarr/issues/new');
     const body=link.searchParams.get('body');
     assert.match(body,/^## Комментарий\nВидео должно/);
     assert.match(body,/https:\/\/example.org\/topic\?t=7/);

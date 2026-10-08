@@ -23,7 +23,6 @@ class Scheduler:
         self.tasks = [
             asyncio.create_task(self._search_loop()),
             asyncio.create_task(self._download_loop()),
-            asyncio.create_task(self._plugin_loop()),
         ]
 
     async def search_tick(self, now=None):
@@ -185,23 +184,6 @@ class Scheduler:
                 await asyncio.wait_for(self.wake.wait(), timeout=10)
             except TimeoutError:
                 pass
-
-    async def _plugin_loop(self):
-        while True:
-            settings = self.service.settings()
-            for update in (
-                lambda: self.worker.plugins.auto_update(settings.plugin_repository),
-                lambda: self.worker.plugins.search_engine.update(
-                    settings.search_engine_repository, automatic=True
-                ),
-            ):
-                try:
-                    await update()
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    log.exception("Update failed; cached version remains active")
-            await asyncio.sleep(3600)
 
     async def _download_loop(self):
         while True:

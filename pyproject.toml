@@ -20,7 +20,7 @@ dev = ["pytest>=8", "pytest-asyncio>=0.24", "ruff>=0.9"]
 [project.scripts]
 lazarr = "lazarr.cli:main"
 [tool.setuptools.package-data]
-lazarr = ["templates/*.html", "static/*", "bundled/*", "migrations/*", "migrations/versions/*"]
+lazarr = ["templates/*.html", "static/*", "migrations/*", "migrations/versions/*"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 asyncio_mode = "auto"

@@ -1,6 +1,6 @@
 # Оценка раздач
 
-Алгоритм находится в `lazarr-search-engine`, `selection.py`: `SCORE_WEIGHTS`,
+Алгоритм находится в `src/lazarr/_search_builtin/selection.py`: `SCORE_WEIGHTS`,
 `STAGE_THRESHOLDS`, `assess_candidate`. Lazarr исполняет этапы, хранит отчёты и
 предоставляет ручной выбор. Новый отчёт требует SDK 1.7; старые движки продолжают
 работать без баллов через совместимый интерфейс.

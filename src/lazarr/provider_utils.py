@@ -1,4 +1,4 @@
-"""Compatibility facade for the replaceable search engine."""
+"""Compatibility facade for the application search engine."""
 
 from lazarr.search_runtime import engine_call, current_engine
 

@@ -64,9 +64,7 @@
       <div class="form-grid"><label>Хранилище фильмов<input name="movie_path" required></label><label>Хранилище сериалов<input name="series_path" required></label>
         <label>Время начала поиска<input name="search_start" type="time" required><small>Ежедневно. Начавшийся поиск выполняется до завершения.</small></label>
         <label>Коэффициент раздачи<input name="seed_ratio" type="number" min="0" step="0.1" placeholder="Без ограничения"><small>Пусто — без ограничения; 0 — до конца загрузки.</small></label>
-        <label>Движок поиска и сопоставления<input name="search_engine_repository" type="url" placeholder="https://…/catalog.json"><small>Совместимые версии устанавливаются автоматически. Пустой адрес отключает обновления.</small></label>
-        <div class="inline-form"><button type="button" class="ghost" id="search-engine-update">Обновить движок</button><button type="button" class="ghost" id="search-engine-rollback">Откатить движок</button><span class="fine" id="search-engine-status" role="status"></span></div>
-        <label>Каталог плагинов<input name="plugin_repository" type="url" placeholder="https://…/catalog.json"><small>Плагины обновляются автоматически.</small></label>
+        <p class="fine" id="search-engine-status" role="status">Провайдеры и движок поиска обновляются вместе с Lazarr.</p>
       </div><p class="fine" id="storage-status" role="status"></p><div class="form-footer"><p class="form-error" role="alert"></p><button class="primary" type="submit">Сохранить настройки</button></div>
     </form>
     <section class="panel" id="telegram-panel">

@@ -1023,58 +1023,6 @@ def create_app(config: RuntimeConfig | None = None):
     async def search_engine_status(request: Request, user=Depends(permission("providers"))):
         return context(request).plugins.search_engine.status()
 
-    @app.post("/api/v1/search-engine/{action}")
-    async def change_search_engine(action: str, request: Request, user=Depends(permission("providers"))):
-        ctx = context(request)
-        if action not in {"update", "rollback"}:
-            raise HTTPException(404, "Unknown action")
-        try:
-            result = (
-                await ctx.plugins.search_engine.rollback()
-                if action == "rollback"
-                else await ctx.plugins.search_engine.update(ctx.service.settings().search_engine_repository)
-            )
-        except Exception as exc:
-            raise HTTPException(422, f"Движок не изменён: {exc}") from exc
-        with ctx.db.session() as db:
-            audit(db, user.id, f"search_engine.{action}", result["identity"])
-        return result
-
-    @app.get("/api/v1/plugin-catalog")
-    async def catalog(request: Request, user=Depends(permission("providers"))):
-        ctx = context(request)
-        url = ctx.service.settings().plugin_repository
-        return await ctx.plugins.catalog(url) if url else []
-
-    @app.post("/api/v1/providers/{identity}/update")
-    async def update_plugin(identity: str, request: Request, user=Depends(permission("providers"))):
-        ctx = context(request)
-        try:
-            result = await ctx.plugins.update(ctx.service.settings().plugin_repository, identity)
-        except (ValueError, ProviderError):
-            raise
-        except Exception as exc:
-            raise HTTPException(502, "Не удалось получить обновление; активная версия сохранена") from exc
-        with ctx.db.session() as db:
-            audit(db, user.id, "plugin.update", identity, {"version": result.version})
-        return result
-
-    @app.post("/api/v1/providers/{identity}/rollback")
-    async def rollback_plugin(identity: str, request: Request, user=Depends(permission("providers"))):
-        ctx = context(request)
-        result = await ctx.plugins.rollback(identity)
-        with ctx.db.session() as db:
-            audit(db, user.id, "plugin.rollback", identity, {"version": result.version})
-        return result
-
-    @app.post("/api/v1/providers/{identity}/bundled")
-    async def bundled_plugin(identity: str, request: Request, user=Depends(permission("providers"))):
-        ctx = context(request)
-        result = ctx.plugins.use_bundled(identity)
-        with ctx.db.session() as db:
-            audit(db, user.id, "plugin.bundled", identity, {"version": result.version})
-        return result
-
     @app.get("/api/v1/downloads")
     async def downloads(request: Request, user=Depends(authenticated)):
         ctx = context(request)
