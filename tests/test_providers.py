@@ -218,6 +218,42 @@ def test_anime_search_uses_latin_alias_not_original_japanese():
     assert search_title(media) == "Re:Zero"
 
 
+async def test_tmdb_extracts_english_and_romanized_search_titles(core):
+    _, _, manager, _ = core
+    async with manager.open("tmdb") as provider:
+        item = provider.item(
+            {
+                "id": 279129,
+                "name": "Не слишком ли ты сладкая, Бог соли Сато?",
+                "original_name": "塩対応の佐藤さんが俺にだけ甘い",
+                "original_language": "ja",
+                "origin_country": ["JP"],
+                "translations": {
+                    "translations": [
+                        {
+                            "iso_639_1": "en",
+                            "iso_3166_1": "US",
+                            "data": {"name": "Salt God Sato-san Is Too Sweet to Me"},
+                        }
+                    ]
+                },
+                "alternative_titles": {
+                    "results": [
+                        {
+                            "iso_3166_1": "JP",
+                            "title": "Shiotaiō no Satō-san ga Ore ni dake Amai",
+                            "type": "Romaji",
+                        }
+                    ]
+                },
+            },
+            "tv",
+        )
+    assert item.english_title == "Salt God Sato-san Is Too Sweet to Me"
+    assert item.romanized_title == "Shiotaiou no Satou-san ga Ore ni dake Amai"
+    assert item.original_title not in item.english_title + item.romanized_title
+
+
 def test_language_aliases_and_adjectives():
     from lazarr.config import Requirements
     from lazarr.provider_utils import description_evidence, title_subtitle_evidence

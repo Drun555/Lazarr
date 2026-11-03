@@ -188,7 +188,7 @@ def search_title(media):
     """Preserve the principal spelling; alias order is not a language preference."""
     original = media.original_title or media.title
     if not re.search(r"[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]", original):
-        return original
+        return media.title or original
     # Localized titles sometimes retain a Latin brand before their translation.
     # Only use that prefix if metadata also lists it as a complete title.
     prefix = re.match(r"[A-Za-z0-9][A-Za-z0-9: .!?'_-]*", media.title)
@@ -203,16 +203,28 @@ def search_title(media):
     return media.title or original
 
 
-def search_titles(media):
+def search_title_groups(media):
     primary = search_title(media)
-    variants = [name for name in media.aliases if _title_key(name) == _title_key(primary)]
-    result = [primary]
-    seen = {primary.casefold()}
-    for name in sorted(variants, key=lambda name: (" " not in name, name.casefold(), name)):
-        if name.casefold() not in seen:
-            result.append(name)
-            seen.add(name.casefold())
-    return result[:4]
+    bases = [primary, media.english_title, media.romanized_title]
+    groups = []
+    seen = set()
+    for base in bases:
+        if not base or re.search(r"[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]", base):
+            continue
+        variants = [name for name in media.aliases if _title_key(name) == _title_key(base)]
+        group = []
+        for name in [base, *sorted(variants, key=lambda name: (" " not in name, name.casefold(), name))]:
+            key = name.casefold()
+            if key not in seen:
+                group.append(name)
+                seen.add(key)
+        if group:
+            groups.append(group)
+    return groups
+
+
+def search_titles(media):
+    return [title for group in search_title_groups(media) for title in group]
 
 
 def named_season(media, number):
@@ -238,17 +250,24 @@ def season_year(season):
     return int(date[:4]) if isinstance(date, str) and re.match(r"^\d{4}-", date) else None
 
 
-def search_queries(media, season=None, year=None):
+def search_query_groups(media, season=None, year=None):
     """Series alternatives plus the requested season's own title and premiere year."""
-    titles = search_titles(media)
-    result = [f"{title} {year}" for title in titles] if year else []
+    title_groups = search_title_groups(media)
     named = named_season(media, season)
-    if named:
-        title = named["title"].strip()
-        premiere = season_year(named) or year
-        if premiere:
-            result.append(f"{title} {premiere}")
-    result.extend(titles)
-    if named:
-        result.append(named["title"].strip())
-    return list(dict.fromkeys(result))
+    result = []
+    for index, titles in enumerate(title_groups):
+        queries = [f"{title} {year}" for title in titles] if year else []
+        if index == 0 and named:
+            title = named["title"].strip()
+            premiere = season_year(named) or year
+            if premiere:
+                queries.append(f"{title} {premiere}")
+        queries.extend(titles)
+        if index == 0 and named:
+            queries.append(named["title"].strip())
+        result.append(list(dict.fromkeys(queries)))
+    return result
+
+
+def search_queries(media, season=None, year=None):
+    return [query for group in search_query_groups(media, season=season, year=year) for query in group]

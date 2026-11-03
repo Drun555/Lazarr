@@ -283,8 +283,10 @@ async def test_search_expands_query_and_logs_actual_text(core, media, season, wo
     _, _, _, service = core
     worker, _, demo = worker_setup
     media.original_title = "日本語"
-    media.title = "Re:ZERO – Жизнь с нуля"
-    media.aliases = ["ReZero", "Re:Zero", "Re Zero", "Re Zero Empezar de cero en un mundo diferente"]
+    media.title = "Не слишком ли ты сладкая, Бог соли Сато?"
+    media.english_title = "Salt God Sato-san Is Too Sweet to Me"
+    media.romanized_title = "Shiotaiou no Satou-san ga Ore ni dake Amai"
+    media.aliases = [media.original_title, media.english_title, media.romanized_title]
     calls = []
 
     async def search(self, query, cursor=None):
@@ -296,9 +298,50 @@ async def test_search_expands_query_and_logs_actual_text(core, media, season, wo
         CreateTask(media_id="42", kind="tv", season=1, episodes=[1]), media, season, 1
     )
     await worker.run_due()
-    assert calls == ["Re:Zero 2020", "Re Zero 2020", "ReZero 2020", "Re:Zero", "Re Zero", "ReZero"]
+    assert calls == [
+        "Не слишком ли ты сладкая, Бог соли Сато? 2020",
+        "Не слишком ли ты сладкая, Бог соли Сато?",
+        "Salt God Sato-san Is Too Sweet to Me 2020",
+        "Salt God Sato-san Is Too Sweet to Me",
+        "Shiotaiou no Satou-san ga Ore ni dake Amai 2020",
+        "Shiotaiou no Satou-san ga Ore ni dake Amai",
+    ]
     history = [v["message"] for v in worker.progress.snapshot()["history"] if v["stage"] == "search"]
-    assert "Re:Zero" in history[0] and "Re Zero" in history[1]
+    assert media.title in history[0] and media.english_title in history[2]
+    assert all(media.original_title not in message for message in history)
+
+
+async def test_search_stops_language_fallback_after_first_results(
+    core, media, season, worker_setup, monkeypatch
+):
+    _, _, _, service = core
+    worker, _, demo = worker_setup
+    media.title = "Русское название"
+    media.english_title = "English title"
+    media.romanized_title = "Romaji title"
+    media.aliases = [media.english_title, media.romanized_title]
+    calls = []
+
+    async def search(self, query, cursor=None):
+        calls.append(query.text)
+        items = (
+            [candidate(provider="demo", title="English title S01E01")]
+            if query.text == "English title 2020"
+            else []
+        )
+        return SearchPage(items=items)
+
+    monkeypatch.setattr(demo, "search", search)
+    service.create_from_metadata(
+        CreateTask(media_id="42", kind="tv", season=1, episodes=[1]), media, season, 1
+    )
+    await worker.run_due()
+    assert calls == [
+        "Русское название 2020",
+        "Русское название",
+        "English title 2020",
+        "English title",
+    ]
 
 
 def test_season_and_episode_ranges_keep_partial_coverage(rezero):

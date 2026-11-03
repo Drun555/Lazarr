@@ -1,6 +1,7 @@
 """TMDB metadata adapter; all runtime dependencies are supplied by Lazarr."""
 
 import re
+import unicodedata
 from lazarr.sdk import (
     MetadataProvider,
     ProviderManifest,
@@ -81,6 +82,60 @@ class Plugin(MetadataProvider):
                 result.append({"Name": person["name"], "Type": job})
         return result
 
+    @staticmethod
+    def search_titles(data, kind, original):
+        key = "title" if kind == "movie" else "name"
+        translations = data.get("translations", {}).get("translations", [])
+        english = next(
+            (
+                row.get("data", {}).get(key)
+                for country in ("US", "GB", None)
+                for row in translations
+                if row.get("iso_639_1") == "en"
+                and (country is None or row.get("iso_3166_1") == country)
+                and row.get("data", {}).get(key)
+            ),
+            "",
+        )
+        if original and not re.search(r"[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]", original):
+            return english or "", original
+        countries = set(
+            data.get("origin_country", [])
+            or [row.get("iso_3166_1") for row in data.get("production_countries", [])]
+        )
+        alternatives = data.get("alternative_titles", {})
+        names = alternatives.get("titles", alternatives.get("results", []))
+        latin = [
+            row
+            for row in names
+            if row.get("title")
+            and re.search(r"[A-Za-z]", row["title"])
+            and not re.search(r"[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]", row["title"])
+            and row["title"].casefold() != (english or "").casefold()
+        ]
+        romanized = next(
+            (row["title"] for row in latin if re.search(r"roma(?:ji|nized)", row.get("type", ""), re.I)),
+            "",
+        ) or next((row["title"] for row in latin if row.get("iso_3166_1") in countries), "")
+        if romanized and (data.get("original_language") == "ja" or "JP" in countries):
+            romanized = unicodedata.normalize("NFC", romanized).translate(
+                str.maketrans(
+                    {
+                        "ā": "aa",
+                        "ī": "ii",
+                        "ū": "uu",
+                        "ē": "ee",
+                        "ō": "ou",
+                        "Ā": "Aa",
+                        "Ī": "Ii",
+                        "Ū": "Uu",
+                        "Ē": "Ee",
+                        "Ō": "Ou",
+                    }
+                )
+            )
+        return english or "", romanized
+
     def item(self, data, kind):
         title = data.get("title") if kind == "movie" else data.get("name")
         original = data.get("original_title") if kind == "movie" else data.get("original_name")
@@ -97,6 +152,7 @@ class Plugin(MetadataProvider):
         )
         alternatives = data.get("alternative_titles", {})
         names = alternatives.get("titles", alternatives.get("results", []))
+        english, romanized = self.search_titles(data, kind, original)
         ids = {"tmdb": str(data["id"])}
         ids.update(
             {
@@ -110,6 +166,8 @@ class Plugin(MetadataProvider):
             kind=kind,
             title=title or original or "Без названия",
             original_title=original or "",
+            english_title=english,
+            romanized_title=romanized,
             year=int(date[:4]) if date else None,
             genre_ids=data.get("genre_ids", [g["id"] for g in data.get("genres", [])]),
             genres=[g["name"] for g in data.get("genres", [])],
@@ -157,7 +215,11 @@ class Plugin(MetadataProvider):
             backdrop=f"https://image.tmdb.org/t/p/w1280{data['backdrop_path']}"
             if data.get("backdrop_path")
             else None,
-            aliases=list(dict.fromkeys([original or ""] + [n["title"] for n in names])),
+            aliases=list(
+                dict.fromkeys(
+                    [original or "", english, romanized] + [n["title"] for n in names if n.get("title")]
+                )
+            ),
             external_ids=ids,
             seasons=[
                 {
@@ -187,9 +249,9 @@ class Plugin(MetadataProvider):
             raise ProviderError("configuration", "Invalid TMDB identity")
         data = await self.get(
             f"/{kind}/{media_id}",
-            append_to_response="external_ids,alternative_titles,episode_groups,credits,videos,content_ratings,keywords"
+            append_to_response="external_ids,alternative_titles,translations,episode_groups,credits,videos,content_ratings,keywords"
             if kind == "tv"
-            else "external_ids,alternative_titles,credits,videos,release_dates,keywords",
+            else "external_ids,alternative_titles,translations,credits,videos,release_dates,keywords",
         )
         item = self.item(data, kind)
         groups = [

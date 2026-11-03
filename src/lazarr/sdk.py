@@ -62,6 +62,8 @@ class MetadataItem(BaseModel):
     kind: Literal["movie", "tv"]
     title: str
     original_title: str = ""
+    english_title: str = ""
+    romanized_title: str = ""
     year: int | None = None
     genre_ids: list[int] = Field(default_factory=list)
     genres: list[str] = Field(default_factory=list)

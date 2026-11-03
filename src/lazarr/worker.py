@@ -1,7 +1,7 @@
 from lazarr.search_runtime import current_engine, pinned
 from lazarr.notifications import queue_episode_notification
 from lazarr.selection import reject_reason, candidate_rank, assess_candidate
-from lazarr.provider_utils import search_queries
+from lazarr.provider_utils import search_query_groups
 
 import asyncio
 import logging
@@ -673,9 +673,15 @@ class Worker:
                     self.progress.record("provider_cooldown", f"{provider_name}: {reason}")
                     continue
                 cursor = None
-                variants = search_queries(query.media, season=query.season, year=year)
+                query_groups = search_query_groups(query.media, season=query.season, year=year)
+                variants = [variant for group in query_groups for variant in group]
+                group_ends = []
+                for group in query_groups:
+                    group_ends.append((group_ends[-1] if group_ends else 0) + len(group))
                 variant = 0
+                group = 0
                 variant_pages = 0
+                group_found = False
                 stopped = False
                 provider_candidates = []
                 for _page in range(3 * len(variants)):
@@ -713,6 +719,7 @@ class Worker:
                     variant_pages += 1
                     participation["requests"] += 1
                     participation["candidates"] += len(page.items)
+                    group_found |= bool(page.items)
                     participation.update(state="checking", reason="Проверка найденных кандидатов")
                     self.progress.value["search_requests"] += 1
                     self.progress.record(
@@ -742,9 +749,15 @@ class Worker:
                     participation.update(state="completed", reason="Поиск выполнен")
                     if page.next_cursor and page.next_cursor != cursor and variant_pages < 3:
                         cursor = page.next_cursor
-                    elif variant + 1 < len(variants):
+                    elif variant + 1 < group_ends[group]:
                         variant += 1
                         variant_pages = 0
+                        cursor = None
+                    elif not group_found and group + 1 < len(group_ends):
+                        group += 1
+                        variant += 1
+                        variant_pages = 0
+                        group_found = False
                         cursor = None
                     else:
                         break

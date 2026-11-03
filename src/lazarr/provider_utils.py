@@ -37,3 +37,10 @@ def search_queries(media, season=None, year=None):
         return build(media, season=season, year=year)
     titles = search_titles(media)
     return [f"{title} {year}" for title in titles] + titles if year else titles
+
+
+def search_query_groups(media, season=None, year=None):
+    build = getattr(current_engine().provider_utils, "search_query_groups", None)
+    if build is not None:
+        return build(media, season=season, year=year)
+    return [search_queries(media, season=season, year=year)]
