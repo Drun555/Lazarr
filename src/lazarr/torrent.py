@@ -20,6 +20,9 @@ DHT_BOOTSTRAP_NODES = (
     "router.utorrent.com:6881,router.bittorrent.com:6881,dht.transmissionbt.com:6881,"
     "dht.aelitis.com:6881,router.silotis.us:6881,dht.libtorrent.org:25401"
 )
+DOWNLOAD_CONNECTIONS = 60
+SEED_CONNECTIONS = 20
+TORRENT_UPLOAD_SLOTS = 2
 
 
 @dataclass
@@ -126,6 +129,16 @@ class LibtorrentEngine:
             "enable_lsd": not local_only,
             "enable_upnp": False,
             "enable_natpmp": False,
+            # Keep background seeding bounded on a shared media server. These
+            # limits also apply after restoring a session from an older release.
+            "connections_limit": 100,
+            "connections_slack": 5,
+            "connection_speed": 5,
+            "choking_algorithm": int(lt.choking_algorithm_t.fixed_slots_choker),
+            "unchoke_slots_limit": 4,
+            "max_peerlist_size": 500,
+            "max_paused_peerlist_size": 50,
+            "aio_threads": 2,
         }
         params = lt.session_params()
         state = self.root / "session.state"
@@ -246,6 +259,8 @@ class LibtorrentEngine:
                 lt.torrent_flags.paused | lt.torrent_flags.sequential_download | lt.torrent_flags.upload_mode
             )
             params.file_priorities = [0] * len(metadata.files)
+            params.max_connections = DOWNLOAD_CONNECTIONS
+            params.max_uploads = TORRENT_UPLOAD_SLOTS
             handle = self.session.add_torrent(params)
             self.handles[metadata.infohash], self.plans[metadata.infohash] = handle, plan
             self.priority_upload_mode.add(metadata.infohash)
@@ -282,6 +297,9 @@ class LibtorrentEngine:
         progress = handle.file_progress(self.lt.torrent_handle.piece_granularity)
         priorities, current = desired_priorities(plan, progress)
         if self.applied.get(infohash) != priorities:
+            # A selectively downloaded torrent may be finished without being a
+            # full seed. Base the budget on our requested files, not is_seeding.
+            handle.set_max_connections(DOWNLOAD_CONNECTIONS if current else SEED_CONNECTIONS)
             # File priorities apply asynchronously and reset piece priorities.
             # Do not request pieces using the previous plan during that window.
             if not handle.flags() & self.lt.torrent_flags.upload_mode:

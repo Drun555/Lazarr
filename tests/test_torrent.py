@@ -8,6 +8,77 @@ from lazarr.torrent import LibtorrentEngine, desired_priorities, pieces_for
 lt = pytest.importorskip("libtorrent")
 
 
+@pytest.mark.swarm
+def test_economical_seed_serves_selected_files_and_restores_download_budget(tmp_path):
+    source = tmp_path / "source"
+    (source / "Show").mkdir(parents=True)
+    content = os.urandom(512 * 1024)
+    (source / "Show/video.mkv").write_bytes(content)
+    (source / "Show/unrequested.bin").write_bytes(os.urandom(128 * 1024))
+    torrent = make_torrent(source, ["Show/video.mkv", "Show/unrequested.bin"])
+    seed_root = tmp_path / "seed"
+    (seed_root / "Show").mkdir(parents=True)
+    (seed_root / "Show/video.mkv").write_bytes(content)
+    seed = LibtorrentEngine(tmp_path / "seed-state", "127.0.0.1:0", local_only=True)
+    peer = LibtorrentEngine(tmp_path / "peer-state", "127.0.0.1:0", local_only=True)
+    try:
+        settings = seed.session.get_settings()
+        assert settings["connections_limit"] == 100
+        assert settings["connection_speed"] == 5
+        assert settings["unchoke_slots_limit"] == 4
+        assert settings["aio_threads"] == 2
+        metadata = seed.inspect(DownloadSource(torrent=torrent))
+        plan = DownloadPlan(
+            infohash=metadata.infohash,
+            files=metadata.files,
+            bindings=[FileBinding(subtask_id=1, video_index=0, video_path="Show/video.mkv", episode_order=1)],
+        )
+        # Old per-torrent limits in resume data must not bypass the new budget.
+        saved = lt.add_torrent_params()
+        saved.ti = lt.torrent_info(lt.bdecode(torrent))
+        saved.max_connections = 500
+        saved.max_uploads = 100
+        (seed.root / f"{metadata.infohash}.resume").write_bytes(lt.write_resume_data_buf(saved))
+        seed.add(torrent, str(seed_root), plan)
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            stats = seed.snapshot(metadata.infohash)
+            if stats["complete"] and not stats["priorities_pending"] and not stats["upload_only"]:
+                break
+            time.sleep(0.05)
+        handle = seed.handles[metadata.infohash]
+        assert stats["complete"], stats
+        assert handle.max_connections() == 20
+        assert handle.max_uploads() == 2
+        assert not handle.status().is_seeding  # The unrequested file is absent.
+        peer.add(torrent, str(tmp_path / "download"), plan)
+        peer.connect_peer(metadata.infohash, ("127.0.0.1", seed.session.listen_port()))
+        while time.monotonic() < deadline:
+            seed.snapshot(metadata.infohash)
+            stats = peer.snapshot(metadata.infohash)
+            if stats["complete"]:
+                break
+            time.sleep(0.05)
+        assert stats["complete"], stats
+        assert (tmp_path / "download/Show/video.mkv").read_bytes() == content
+        # Selecting another file must restore the download connection allowance.
+        expanded = plan.model_copy(
+            update={
+                "bindings": plan.bindings
+                + [
+                    FileBinding(
+                        subtask_id=2, video_index=1, video_path="Show/unrequested.bin", episode_order=2
+                    )
+                ]
+            }
+        )
+        seed.update_plan(metadata.infohash, expanded)
+        assert handle.max_connections() == 60
+    finally:
+        peer.close()
+        seed.close()
+
+
 def make_torrent(root, paths):
     storage = lt.file_storage()
     for path in paths:

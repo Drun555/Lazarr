@@ -1,13 +1,125 @@
 from pathlib import Path
+from types import SimpleNamespace
 from xml.etree import ElementTree as ET
 
 import httpx
-from sqlalchemy import select
+import pytest
+from sqlalchemy import event, select
 
 from lazarr.library import LibraryService
-from lazarr.library_metadata import media_nfo, sidecars
+from lazarr.library_metadata import media_nfo, sidecars, sync_artwork
 from lazarr.models import ConfigEntry, Episode, Media, Season
 from lazarr.services import CreateTask
+from lazarr.storage import MANIFEST
+
+
+async def test_artwork_batch_reads_manifest_twice(core, tmp_path, monkeypatch):
+    _, db, _, _ = core
+    root = tmp_path / "library"
+    image = tmp_path / "cached.jpg"
+    image.write_bytes(b"cached artwork")
+    entries = [
+        {"path": str(root / f"{i}.jpg"), "root": str(root), "image": "https://image.tmdb.org/t/p/w342/a.jpg"}
+        for i in range(40)
+    ]
+    with db.session() as session:
+        session.add(ConfigEntry(key=MANIFEST, value={"entries": entries}))
+    calls = []
+
+    async def fetch(*args, **kwargs):
+        calls.append(args[1])
+        return image
+
+    monkeypatch.setattr("lazarr.posters.fetch_poster", fetch)
+    reads = []
+
+    def count_reads(connection, cursor, statement, parameters, context, executemany):
+        if statement.startswith("SELECT") and parameters == (MANIFEST,):
+            reads.append(statement)
+
+    event.listen(db.engine, "before_cursor_execute", count_reads)
+    try:
+        await sync_artwork(SimpleNamespace(db=db))
+    finally:
+        event.remove(db.engine, "before_cursor_execute", count_reads)
+    assert len(reads) == 2
+    assert calls == ["a.jpg"]
+    assert all(Path(e["path"]).read_bytes() == image.read_bytes() for e in entries)
+    modified = {e["path"]: Path(e["path"]).stat().st_mtime_ns for e in entries}
+    await sync_artwork(SimpleNamespace(db=db))
+    assert all(Path(path).stat().st_mtime_ns == stamp for path, stamp in modified.items())
+
+
+@pytest.mark.parametrize("change", ["remove", "replace", "delete_manifest"])
+async def test_artwork_batch_rechecks_ownership_after_fetch(core, tmp_path, monkeypatch, change):
+    _, db, _, _ = core
+    root = tmp_path / "library"
+    entries = [
+        {
+            "path": str(root / f"{i}.jpg"),
+            "root": str(root),
+            "image": f"https://image.tmdb.org/t/p/w342/{i}.jpg",
+        }
+        for i in range(2)
+    ]
+    with db.session() as session:
+        session.add(ConfigEntry(key=MANIFEST, value={"entries": entries}))
+    image = tmp_path / "cached.jpg"
+    image.write_bytes(b"artwork")
+
+    async def fetch(ctx, name, **kwargs):
+        if name == "1.jpg":
+            with db.session() as session:
+                row = session.get(ConfigEntry, MANIFEST)
+                if change == "delete_manifest":
+                    session.delete(row)
+                elif change == "remove":
+                    row.value = {"entries": entries[1:]}
+                else:
+                    row.value = {"entries": [{**entries[0], "image": entries[1]["image"]}, entries[1]]}
+        return image
+
+    monkeypatch.setattr("lazarr.posters.fetch_poster", fetch)
+    await sync_artwork(SimpleNamespace(db=db))
+    assert not Path(entries[0]["path"]).exists()
+    assert Path(entries[1]["path"]).exists() == (change != "delete_manifest")
+
+
+async def test_artwork_batch_continues_after_fetch_and_publish_errors(core, tmp_path, monkeypatch):
+    _, db, _, _ = core
+    root = tmp_path / "library"
+    root.mkdir()
+    entries = [
+        {
+            "path": str(root / f"{i}.jpg"),
+            "root": str(root),
+            "image": f"https://image.tmdb.org/t/p/w342/{i}.jpg",
+        }
+        for i in range(3)
+    ]
+    Path(entries[0]["path"]).write_bytes(b"previous artwork")
+    # Refuse to overwrite a symlink, while still publishing the remaining image.
+    Path(entries[1]["path"]).symlink_to(entries[0]["path"])
+    with db.session() as session:
+        session.add(ConfigEntry(key=MANIFEST, value={"entries": entries}))
+    image = tmp_path / "cached.jpg"
+    image.write_bytes(b"new artwork")
+
+    async def fetch(ctx, name, **kwargs):
+        if name == "0.jpg":
+            raise OSError("Private remote URL must not reach status")
+        return image
+
+    monkeypatch.setattr("lazarr.posters.fetch_poster", fetch)
+    await sync_artwork(SimpleNamespace(db=db))
+    assert Path(entries[0]["path"]).read_bytes() == b"previous artwork"
+    assert Path(entries[1]["path"]).is_symlink()
+    assert Path(entries[2]["path"]).read_bytes() == b"new artwork"
+    with db.session() as session:
+        assert session.get(ConfigEntry, "storage.status").value["metadata_errors"] == [
+            "Не удалось сохранить изображение: 0.jpg",
+            "Не удалось сохранить изображение: 1.jpg",
+        ]
 
 
 async def test_tmdb_season_metadata_survives_database_and_nfo(core):

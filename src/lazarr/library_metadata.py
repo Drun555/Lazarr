@@ -163,6 +163,7 @@ async def sync_artwork(ctx):
         entries = [e for e in row.value.get("entries", []) if "image" in e] if row else []
     errors = []
     fetched = {}
+    ready = []
     for entry in entries:
         try:
             url = entry["image"]
@@ -177,19 +178,32 @@ async def sync_artwork(ctx):
                     raise ValueError("Источник изображения не поддерживается")
                 path = await fetch_poster(ctx, parsed.path.rsplit("/", 1)[-1], size="w1280")
                 fetched[url] = path
-
-            def publish():
-                with _lock:
-                    with ctx.db.session() as db:
-                        current = db.get(ConfigEntry, MANIFEST)
-                        if not current or entry not in current.value.get("entries", []):
-                            return
-                    write_sidecar(entry, fetched[url].read_bytes())
-
-            await asyncio.to_thread(publish)
+            ready.append(entry)
         except asyncio.CancelledError:
             raise
         except Exception:
             # Keep existing artwork and retry on the next cycle. No secrets/remote URLs in status.
             errors.append(f"Не удалось сохранить изображение: {Path(entry['path']).name}")
+
+    def publish():
+        # Reconciliation uses the same lock, so one ownership check covers the batch.
+        # Do not reload and decode the entire library manifest for every image.
+        with _lock:
+            with ctx.db.session() as db:
+                current = db.get(ConfigEntry, MANIFEST)
+                owned = (
+                    {e["path"]: e for e in current.value.get("entries", []) if "image" in e}
+                    if current
+                    else {}
+                )
+            for entry in ready:
+                if owned.get(entry["path"]) != entry:
+                    continue
+                try:
+                    write_sidecar(entry, fetched[entry["image"]].read_bytes())
+                except Exception:
+                    errors.append(f"Не удалось сохранить изображение: {Path(entry['path']).name}")
+
+    if ready:
+        await asyncio.to_thread(publish)
     await asyncio.to_thread(set_status, ctx.db, "metadata_errors", errors[:20])
