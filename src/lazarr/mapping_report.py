@@ -106,14 +106,16 @@ async def collect_report(ctx, candidate, requests, episodes, release):
     import asyncio
 
     source = "cache" if candidate.description else "unavailable"
+    cls = ctx.plugins.classes.get(candidate.provider)
+    options = {"offline": candidate.offline} if cls and cls.manifest.offline_capability else {}
     try:
         async with asyncio.timeout(45):
             async with ctx.plugins.open(
-                candidate.provider, allow_disabled=True, bypass_cooldown=True
+                candidate.provider, allow_disabled=True, bypass_cooldown=True, offline=candidate.offline
             ) as provider:
-                detailed = await provider.inspect(candidate)
+                detailed = await provider.inspect(candidate, **options)
         if detailed.description:
-            candidate, source = detailed, "live"
+            candidate, source = detailed, "offline" if candidate.offline else "live"
     except Exception:
         pass  # Network errors and logs are intentionally excluded from the export.
     cls = ctx.plugins.classes.get(candidate.provider)

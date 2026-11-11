@@ -33,8 +33,14 @@ class Plugin(ContentProvider):
         id="rutracker",
         name="Rutracker",
         kind="content",
-        version="1.0.5",
-        sdk=">=1.3,<2",
+        version="1.1.0",
+        sdk=">=1.9,<2",
+        offline_capability=True,
+        comment=(
+            "Рекомендуется использовать [оффлайн-базу Rutracker]"
+            "(https://rutracker.org/forum/viewtopic.php?t=5591249). "
+            "Положите её в /downloads/offline/rutracker."
+        ),
         config_fields=[
             ConfigField(name="base_url", label="URL форума", default="https://rutracker.org/forum"),
             ConfigField(name="username", label="Логин", secret=True),
@@ -48,6 +54,14 @@ class Plugin(ContentProvider):
 
     def base(self):
         return self.ctx.base_url("https://rutracker.org/forum")
+
+    def offline_catalog(self):
+        from lazarr.providers.rutracker_offline import Catalog
+
+        return Catalog(self.ctx.offline_directories, self.base(), self.ctx.background_directory)
+
+    async def offline_status(self):
+        return await self.offline_catalog().status()
 
     async def authenticate(self, values):
         cookie = values.get("session_cookie") or self.ctx.config.get("session_cookie")
@@ -126,7 +140,9 @@ class Plugin(ContentProvider):
             raise ProviderError("auth_required", "Сессия Rutracker истекла")
         return text
 
-    async def search(self, query, cursor=None):
+    async def search(self, query, cursor=None, *, offline=False):
+        if offline:
+            return await self.offline_catalog().search(query, cursor)
         await self.ensure_auth()
         title = query.text or search_title(query.media)
         params = {"nm": title, "o": "10", "s": "2", "start": str(int(cursor or 0))}
@@ -189,7 +205,9 @@ class Plugin(ContentProvider):
             cursor_next = match.group(1) if match else None
         return SearchPage(items=items, next_cursor=cursor_next)
 
-    async def inspect(self, candidate):
+    async def inspect(self, candidate, *, offline=False):
+        if offline:
+            return await self.offline_catalog().inspect(candidate)
         await self.ensure_auth()
         response = await self.ctx.request("GET", candidate.url, browser_html=True)
         soup = BeautifulSoup(self.require_page(response), "html.parser")
@@ -214,7 +232,9 @@ class Plugin(ContentProvider):
             }
         )
 
-    async def resolve_download(self, candidate):
+    async def resolve_download(self, candidate, *, offline=False):
+        if offline:
+            return await self.offline_catalog().resolve(candidate)
         await self.ensure_auth()
         response = await self.ctx.request(
             "GET", self.base() + "/dl.php", params={"t": candidate.id}, headers={"Referer": candidate.url}

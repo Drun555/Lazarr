@@ -375,7 +375,14 @@ def describe(database, settings):
         manifest = db.get(ConfigEntry, MANIFEST)
         roots = sorted({str(storage_root(p)) for p in (settings.movie_path, settings.series_path)})
         return {
-            "roots": [{"source": str(Path(p) / "source"), "user": str(Path(p) / "user")} for p in roots],
+            "roots": [
+                {
+                    "source": str(Path(p) / "source"),
+                    "user": str(Path(p) / "user"),
+                    "offline": str(Path(p) / "offline"),
+                }
+                for p in roots
+            ],
             "links": sum("target" in e for e in manifest.value.get("entries", [])) if manifest else 0,
             "metadata_files": sum("target" not in e for e in manifest.value.get("entries", []))
             if manifest

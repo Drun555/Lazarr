@@ -1159,7 +1159,7 @@ async def test_best_scored_candidate_wins_even_when_later_query(
     with db.session() as session:
         download = session.scalar(select(Download))
         assert session.get(Release, download.release_id).external_id == "strong"
-        assert session.scalar(select(func.count()).select_from(CandidateDecision)) == 2
+        assert session.scalar(select(func.count()).select_from(CandidateDecision)) == 1
 
 
 async def test_missing_episode_recommends_best_without_download_and_allows_manual_mapping(
@@ -1191,7 +1191,9 @@ async def test_missing_episode_recommends_best_without_download_and_allows_manua
         assert not session.get(CandidateDecision, choices[0]["id"]).report["needs_mapping"]
 
 
-async def test_topic_score_gates_torrent_fetch(core, media, season, worker_setup, monkeypatch):
+async def test_description_without_blockers_fetches_torrent_despite_low_score(
+    core, media, season, worker_setup, monkeypatch
+):
     _, db, _, service = core
     worker, engine, demo = worker_setup
     media.external_ids = {}
@@ -1204,12 +1206,14 @@ async def test_topic_score_gates_torrent_fetch(core, media, season, worker_setup
 
     monkeypatch.setattr(demo, "search", search)
     await worker.run_due()
-    assert engine.inspect_calls == 0
+    assert engine.inspect_calls == 1
     with db.session() as session:
-        assert session.scalar(select(Subtask)).status == "queued"
+        assert session.scalar(select(Subtask)).status == "needs_selection"
 
 
-async def test_only_top_twelve_title_candidates_are_inspected(core, media, season, worker_setup, monkeypatch):
+async def test_first_fully_matching_candidate_stops_inspection(
+    core, media, season, worker_setup, monkeypatch
+):
     _, db, _, service = core
     worker, engine, demo = worker_setup
     service.create_from_metadata(
@@ -1221,7 +1225,7 @@ async def test_only_top_twelve_title_candidates_are_inspected(core, media, seaso
 
     monkeypatch.setattr(demo, "search", search)
     await worker.run_due()
-    assert engine.inspect_calls == 12
+    assert engine.inspect_calls == 1
     with db.session() as session:
         assert session.get(Release, session.scalar(select(Download)).release_id).external_id == "19"
 
@@ -1405,7 +1409,7 @@ async def test_named_season_with_bare_tv_tag_reaches_files(core, media, season, 
     with db.session() as session:
         decision = session.scalar(select(CandidateDecision))
         assert decision.report["result"] == "MATCH"
-        assert decision.report["score"] == 140
+        assert decision.report["score"] == 200
         assert session.scalar(select(SubtaskAsset)) is not None
 
 

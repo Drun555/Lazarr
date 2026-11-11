@@ -12,6 +12,8 @@ import httpx
 from packaging.specifiers import SpecifierSet
 from sqlalchemy import select
 from lazarr.models import ProviderConfig, ConfigEntry
+from lazarr.config import Settings
+from lazarr.storage import storage_root, set_status
 from lazarr.rate_limit import RequestPacer
 from lazarr.sdk import (
     Provider,
@@ -19,6 +21,7 @@ from lazarr.sdk import (
     ProviderError,
     SDK_VERSION,
     ContentProvider,
+    OfflineStatus,
     MetadataProvider,
     ReleaseCalendarProvider,
 )
@@ -73,6 +76,17 @@ class PluginManager:
                 raise ValueError(f"Invalid provider contract: {name}")
             if SDK_VERSION not in SpecifierSet(manifest.sdk):
                 raise ValueError(f"Incompatible provider SDK: {name}")
+            if manifest.offline_capability:
+                if manifest.kind != "content":
+                    raise ValueError(f"Offline capability requires a content provider: {name}")
+                for method in ("search", "inspect", "resolve_download"):
+                    signature = inspect.signature(getattr(cls, method))
+                    try:
+                        signature.bind(None, None, offline=True)
+                    except TypeError as exc:
+                        raise ValueError(
+                            f"Offline provider must accept {method}(..., offline=True): {name}"
+                        ) from exc
             self.classes[name] = cls
         with self.db.session() as db:
             for plugin_id in self.classes:
@@ -237,6 +251,9 @@ class PluginManager:
                         "configured_secrets": list(secrets),
                         "error": row.last_error,
                         "retry_at": row.retry_at,
+                        "offline_directories": [str(path) for path in self.offline_directories(key)]
+                        if cls.manifest.offline_capability
+                        else [],
                     }
                 )
             for key, error in self.errors.items():
@@ -296,8 +313,93 @@ class PluginManager:
                     db.delete(backoff)
                 row.last_error = None
 
+    def offline_directories(self, plugin_id, settings=None):
+        cls = self.classes.get(plugin_id)
+        if not cls or cls.manifest.kind != "content" or not cls.manifest.offline_capability:
+            return ()
+        if settings is None:
+            with self.db.session() as db:
+                row = db.get(ConfigEntry, "app")
+                settings = Settings.model_validate(row.value) if row else Settings()
+        return tuple(
+            sorted(
+                {
+                    storage_root(path) / "offline" / cls.manifest.id
+                    for path in (settings.movie_path, settings.series_path)
+                }
+            )
+        )
+
+    def prepare_offline_storage(self, settings):
+        try:
+            for root in {storage_root(path) for path in (settings.movie_path, settings.series_path)}:
+                (root / "offline").mkdir(parents=True, exist_ok=True)
+            for identity in self.classes:
+                for directory in self.offline_directories(identity, settings):
+                    directory.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            set_status(self.db, "offline_error", str(exc))
+            return False
+        set_status(self.db, "offline_error", None)
+        return True
+
+    async def offline_status(self, plugin_id, *, allow_disabled=False):
+        async with self.open(plugin_id, offline=True, allow_disabled=allow_disabled) as provider:
+            return OfflineStatus.model_validate(await provider.offline_status())
+
     @asynccontextmanager
-    async def open(self, plugin_id, *, allow_disabled=False, bypass_cooldown=False):
+    async def _open_offline(self, plugin_id, *, allow_disabled=False):
+        cls = self.classes.get(plugin_id)
+        if not cls or cls.manifest.kind != "content" or not cls.manifest.offline_capability:
+            raise ProviderError("configuration", "Provider does not support offline data")
+        # Local catalogs remain usable during online cooldown. Session changes are ephemeral.
+        lock = self.session_locks.setdefault(f"{plugin_id}:offline", asyncio.Lock())
+        async with lock:
+            with self.db.session() as db:
+                row = db.get(ProviderConfig, plugin_id)
+                if not row or (not row.enabled and not allow_disabled):
+                    raise ProviderError("configuration", "Provider disabled")
+                config = {field.name: field.default for field in cls.manifest.config_fields}
+                config.update(row.config)
+                config.update(self.secrets.decrypt(row.secrets))
+                state = self.secrets.decrypt(row.session_state)
+            directories = self.offline_directories(plugin_id)
+            for directory in directories:
+                directory.mkdir(parents=True, exist_ok=True)
+
+            jar = httpx.Cookies()
+            for item in state.pop("cookies", []):
+                jar.set(item["name"], item["value"], domain=item["domain"], path=item["path"])
+            pacer = self.request_pacer(plugin_id)
+            async with httpx.AsyncClient(
+                timeout=25,
+                cookies=jar,
+                transport=self.transport,
+                verify=self._tls_context(cls),
+                headers={"User-Agent": "Lazarr/0.1"},
+                event_hooks={"request": [pacer.wait]},
+            ) as client:
+                context = ProviderContext(
+                    config,
+                    state,
+                    client,
+                    offline=True,
+                    offline_directories=directories,
+                    background_directory=self.config.data_dir / "background-jobs",
+                )
+                context.request_gate = pacer.wait
+                provider = cls(context)
+                try:
+                    yield provider
+                finally:
+                    await provider.close()
+
+    @asynccontextmanager
+    async def open(self, plugin_id, *, allow_disabled=False, bypass_cooldown=False, offline=False):
+        if offline:
+            async with self._open_offline(plugin_id, allow_disabled=allow_disabled) as provider:
+                yield provider
+            return
         # Pin a class before awaiting; updates cannot replace an in-flight generation.
         cls = self.classes.get(plugin_id)
         if not cls:
@@ -332,7 +434,13 @@ class PluginManager:
                 headers={"User-Agent": "Lazarr/0.1"},
                 event_hooks={"request": [pacer.wait]} if pacer else None,
             ) as client:
-                context = ProviderContext(config, state, client)
+                context = ProviderContext(
+                    config,
+                    state,
+                    client,
+                    offline_directories=self.offline_directories(plugin_id),
+                    background_directory=self.config.data_dir / "background-jobs",
+                )
                 context.request_gate = pacer.wait if pacer else None
                 provider = cls(context)
                 try:

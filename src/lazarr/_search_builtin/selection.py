@@ -96,6 +96,8 @@ def _hard_reject_reason(candidate, requests, *, detailed=False, allow_preference
     from .matcher import resolution
 
     title = candidate.title
+    if re.search(r"\bBDMV\b", title + ("\n" + candidate.description if detailed else ""), re.I):
+        return "Blu-ray контейнер BDMV не поддерживается"
     category = " ".join(str(e.value) for e in candidate.evidence if e.field == "category")
     unrelated = r"\b(?:manga|soundtrack|OST|EPUB|FB2|DOCX|PDF|NSP)\b|\[(?:Art|Nintendo Switch)\]|\b(?:манга|аудиокниги|саундтреки)\b"
     if re.search(unrelated, title + " " + category, re.I):
@@ -135,12 +137,6 @@ def _hard_reject_reason(candidate, requests, *, detailed=False, allow_preference
             for k in candidate.external_ids.keys() & request.media.external_ids.keys()
         ):
             reason = "Внешние идентификаторы различаются"
-        elif (
-            detailed
-            and request.requirements.keyword.strip().casefold()
-            not in (title + "\n" + candidate.description).casefold()
-        ):
-            reason = "Обязательная фраза отсутствует в заголовке и описании"
         # Only an explicitly complete, release-wide declaration can prove absence.
         elif (
             detailed
@@ -168,7 +164,80 @@ SCORE_WEIGHTS = {
     "episode_match": 60,
     "episode_missing": -20,
 }
-STAGE_THRESHOLDS = {1: 20, 2: 40, 3: 100}
+STAGE_THRESHOLDS = {1: 20, 2: 0, 3: 100}
+RESOLUTION_POINTS = {480: 5, 576: 10, 720: 20, 1080: 40, 1440: 60, 2160: 80, 4320: 100}
+
+
+def preference_signals(candidate, request, stage, binding):
+    from lazarr.sdk import ScoreSignal
+    from .matcher import resolution
+
+    signals = []
+    quality = (
+        binding.resolution if stage == 3 and binding else resolution(candidate.title) if stage < 3 else None
+    )
+    if quality and request.requirements.min_resolution <= quality <= request.requirements.max_resolution:
+        signals.append(
+            ScoreSignal(
+                group="quality",
+                points=RESOLUTION_POINTS.get(quality, 0),
+                reason=f"Предпочтительное разрешение в диапазоне задачи: {quality}p",
+                source="torrent" if stage == 3 else "title",
+            )
+        )
+    for field, criterion_field, wanted, label in (
+        ("audio_languages", "audio", request.requirements.audio_languages, "аудио"),
+        ("subtitle_languages", "subtitles", request.requirements.subtitle_languages, "субтитров"),
+    ):
+        if not wanted:
+            continue
+        if stage == 3:
+            present = (
+                {
+                    track.language
+                    for track in binding.tracks
+                    if track.kind == ("audio" if criterion_field == "audio" else "subtitle")
+                }
+                if binding
+                else set()
+            )
+        else:
+            present = {
+                value
+                for evidence in candidate.evidence
+                if evidence.field == field
+                and isinstance(evidence.value, list)
+                and (stage >= 2 or evidence.source == "title")
+                for value in evidence.value
+            }
+        matched = set(wanted) & present
+        if matched:
+            signals.append(
+                ScoreSignal(
+                    group=criterion_field + "_preference",
+                    points=20 * len(matched),
+                    reason=f"Заявлены запрошенные языки {label}: " + ", ".join(sorted(matched)),
+                    source="torrent" if stage == 3 else "title" if stage == 1 else "description",
+                )
+            )
+    return signals
+
+
+def keyword_signals(candidate, request, stage):
+    from lazarr.sdk import ScoreSignal
+
+    title = candidate.title.casefold()
+    description = candidate.description.casefold() if stage >= 2 else ""
+    return [
+        ScoreSignal(
+            group="keyword",
+            points=rule.points,
+            reason=f"Найдено ключевое слово: {rule.text}",
+            source="title" if rule.text.casefold() in title else "description",
+        )
+        for rule in request.requirements.keywords
+        if rule.text.casefold() in title or rule.text.casefold() in description
+    ]
 
 
 def identity_signal(candidate, request, stage):
@@ -231,7 +300,7 @@ def identity_signal(candidate, request, stage):
     return best
 
 
-def assess_candidate(candidate, request, stage=1, criteria=(), allow_preference_mismatch=False):
+def assess_candidate(candidate, request, stage=1, criteria=(), allow_preference_mismatch=False, binding=None):
     from lazarr.sdk import StageAssessment, ScoreSignal
 
     identity = identity_signal(candidate, request, stage)
@@ -301,13 +370,20 @@ def assess_candidate(candidate, request, stage=1, criteria=(), allow_preference_
         for criterion in criteria:
             if criterion.required and criterion.result != "MATCH":
                 blockers.append(criterion.reason)
-    total = sum(signal.points for signal in signals)
     threshold = STAGE_THRESHOLDS[stage]
+    identity_total = sum(signal.points for signal in signals)
+    if stage != 2 and identity_total < threshold:
+        blockers.append(
+            f"Недостаточно подтверждений произведения и эпизода: {identity_total} баллов, порог {threshold}"
+        )
+    signals.extend(preference_signals(candidate, request, stage, binding))
+    signals.extend(keyword_signals(candidate, request, stage))
+    total = sum(signal.points for signal in signals)
     return StageAssessment(
         stage=stage,
         total=total,
         threshold=threshold,
-        passed=total >= threshold and not blockers,
+        passed=not blockers,
         signals=signals,
         blockers=list(dict.fromkeys(blockers)),
     )

@@ -226,7 +226,7 @@ def test_identity_conflict_and_keyword(media):
     c = candidate(external_ids={"imdb": "tt99"}, evidence=[audio_claim(paths[0].path)])
     assert Matcher().evaluate(c, [request(media)], paths).plan is None
     c = candidate(evidence=[audio_claim(paths[0].path)])
-    assert Matcher().evaluate(c, [request(media, keyword="dub studio")], paths).plan is None
+    assert Matcher().evaluate(c, [request(media, keyword="dub studio")], paths).plan is not None
 
 
 def test_resolution_below_maximum_is_acceptable(media):

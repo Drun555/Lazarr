@@ -46,6 +46,7 @@ function openModal(title, content) { $('#modal-title').textContent=title; $('#mo
 const backgroundTaskNames={'next-up':'NextUp · следующий эпизод','library-detail':'Подготовка карточки','trickplay':'Trickplay · превью перемотки','chapter':'Thumbnail · кадр главы','image':'Обработка изображения','subtitle':'Извлечение субтитров','subtitle-interval':'Подготовка субтитров','attachment':'Извлечение вложения','probe':'Анализ медиа'};
 Object.assign(backgroundTaskNames,{'catalog':'Каталог','latest':'Последние добавления','search':'Поиск раздач','metadata-refresh':'Обновление метаданных'});
 backgroundTaskNames['season-mapping']='Применение сопоставления';
+backgroundTaskNames['offline-index']='Индексация оффлайн-каталога';
 let backgroundTasksTimer,backgroundTasksRequest;
 function renderProcessIndicator(items,downloads,selection){
   const active=items.filter(i=>['running','queued'].includes(i.state)),loading=downloads.filter(d=>['starting','downloading'].includes(d.state));
@@ -60,7 +61,7 @@ function renderProcessIndicator(items,downloads,selection){
   let content='';
   if(selection.length){const titles=[...new Set(selection.map(s=>s.title))];content+=group('selection','Требуют выбора',selection.length,`<p class="process-preview-description">${titles.slice(0,2).map(esc).join(' · ')}${titles.length>2?` · ещё ${titles.length-2}`:''}</p>`);}
   if(loading.length)content+=group('download','Загружается',loading.length,loading.slice(0,2).map(d=>`<div class="process-preview-item"><div><span>${esc(d.title)}</span><b>${progressPercent(d.progress).toFixed(0)}%</b></div><span class="process-preview-track"><span style="width:${progressPercent(d.progress)}%"></span></span></div>`).join('')+more(loading.length));
-  if(active.length)content+=group('activity','Фоновая работа',active.length,active.slice(0,2).map(i=>`<div class="process-preview-job"><span>${esc(backgroundTaskNames[i.kind]||i.kind)}</span><small>${i.state==='queued'?'В очереди':'Выполняется'}</small>${i.detail?`<p>${esc(i.detail)}</p>`:''}</div>`).join('')+more(active.length));
+  if(active.length)content+=group('activity','Фоновая работа',active.length,active.slice(0,2).map(i=>`<div class="process-preview-job"><span>${esc(backgroundTaskNames[i.kind]||i.kind)}</span><small>${i.state==='queued'?'В очереди':i.kind==='offline-index'?progressPercent(i.progress).toFixed(1)+'%':'Выполняется'}</small>${i.detail?`<p>${esc(i.detail)}</p>`:''}</div>`).join('')+more(active.length));
   $('#process-tooltip').innerHTML=`<span class="process-preview-title">Сейчас<span class="process-preview-live" aria-hidden="true"></span></span>${content||'<p class="process-preview-idle">Всё спокойно — активных процессов нет</p>'}<span class="process-preview-footer">Нажмите «Процессы», чтобы открыть подробности</span>`;
 }
 function renderBackgroundTasks(items,downloads=[],selection=[]){
@@ -74,13 +75,13 @@ function renderBackgroundTasks(items,downloads=[],selection=[]){
   }).join(''):'<p class="fine background-task-empty">Нет текущих загрузок</p>';
   const running=items.filter(item=>item.state==='running'),queued=items.filter(item=>item.state==='queued');
   $('#background-tasks-summary').textContent=`Выполняется: ${running.length} · В очереди: ${queued.length}`;
-  const groups=[['Выполняется',running],['В очереди',queued],['Недавние',items.filter(item=>['completed','failed'].includes(item.state))]];
+  const groups=[['Выполняется',running],['В очереди',queued],['Недавние',items.filter(item=>['completed','failed','cancelled','interrupted'].includes(item.state))]];
   $('#background-tasks-list').innerHTML=groups.map(([name,rows])=>`<section class="background-task-group"><h3>${name} <span class="count">${rows.length}</span></h3>${rows.length?rows.map(item=>{
-    const labels={running:'Выполняется',queued:'Ожидает',completed:'Завершено',failed:'Ошибка'};
+    const labels={running:'Выполняется',queued:'Ожидает',completed:'Завершено',failed:'Ошибка',cancelled:'Остановлено',interrupted:'Прервано'};
     const elapsed=item.started_at?Math.max(0,Math.round((item.finished_at||Date.now()/1000)-item.started_at)):0;
     const planned=item.kind==='search'&&item.state==='queued'&&Number(item.next_attempt_at)>0;
     const detail=planned?'Поиск запланирован на '+new Date(item.next_attempt_at*1000).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit',hour12:false}):item.detail;
-    return `<div class="background-task-row"><span class="background-task-dot ${esc(item.state)}" aria-hidden="true"></span><div><strong>${esc(backgroundTaskNames[item.kind]||item.kind)}</strong>${detail?`<p class="background-task-detail">${esc(detail)}</p>`:''}${item.kind==='season-mapping'?`<p class="fine">Сезон ${item.season_number} · ${item.completed??0}/${item.total??0}</p>${item.state==='failed'?`<button type="button" class="ghost" data-mapping-retry="${esc(item.id)}">Повторить сохранённый план</button>`:''}`:''}${item.kind==='search'?'':`<p class="fine">${esc(item.id.slice(0,8))} · ${item.lane==='catalog'?'Каталог':item.lane==='metadata'?'Метаданные':item.lane==='search'?'Поиск':'Медиа'}${item.started_at?` · ${elapsed} с`:''}</p>`}</div><span class="pill">${labels[item.state]}</span></div>`;
+    return `<div class="background-task-row"><span class="background-task-dot ${esc(item.state)}" aria-hidden="true"></span><div><strong>${esc(backgroundTaskNames[item.kind]||item.kind)}</strong>${detail?`<p class="background-task-detail">${esc(detail)}</p>`:''}${item.kind==='offline-index'?`<p class="fine">${esc(item.phase||'Чтение архива')} · ${progressPercent(item.progress).toFixed(1)}%</p>${progressBar(item.progress,'Прогресс индексации')}<p class="fine">Прочитано: ${bytes(item.completed_bytes)} / ${bytes(item.total_bytes)} · Обработано раздач: ${Number(item.scanned||0).toLocaleString('ru-RU')} · В индексе: ${Number(item.indexed||0).toLocaleString('ru-RU')}</p>`:''}${item.kind==='season-mapping'?`<p class="fine">Сезон ${item.season_number} · ${item.completed??0}/${item.total??0}</p>${item.state==='failed'?`<button type="button" class="ghost" data-mapping-retry="${esc(item.id)}">Повторить сохранённый план</button>`:''}`:''}${item.kind==='search'?'':`<p class="fine">${esc(item.id.slice(0,8))} · ${item.lane==='catalog'?'Каталог':item.lane==='metadata'?'Метаданные':item.lane==='search'?'Поиск':'Медиа'}${item.started_at?` · ${elapsed} с`:''}</p>`}</div><span class="pill">${labels[item.state]}</span></div>`;
   }).join(''):'<p class="fine background-task-empty">Нет задач</p>'}</section>`).join('');
 }
 document.addEventListener('click',async event=>{
@@ -113,12 +114,27 @@ $('#background-tasks-dialog')?.addEventListener('click',event=>{
   const rect=event.currentTarget.getBoundingClientRect();
   if(event.clientX<rect.left||event.clientX>rect.right||event.clientY<rect.top||event.clientY>rect.bottom)event.currentTarget.close();
 });
+function keywordRules(values) { return values.keywords??(values.keyword?.trim()?[{text:values.keyword.trim(),points:50}]:[]); }
+function keywordRuleRow(rule={text:'',points:50}) {
+  return `<div class="keyword-rule" data-keyword-rule><label>Слово или фраза<input data-keyword-text value="${esc(rule.text)}" placeholder="Например, название озвучки" maxlength="200" required></label><label>Баллы<input data-keyword-points type="number" value="${esc(rule.points)}" min="-10000" max="10000" step="1" required></label><button type="button" class="ghost" data-remove-keyword-rule aria-label="Удалить ключевое слово">Убрать</button></div>`;
+}
 function requirementFields(values, prefix='') {
   const resolutions=[480,576,720,1080,1440,2160,4320];
   const options=selected=>resolutions.map(r=>`<option value="${r}" ${r===selected?'selected':''}>${r}p</option>`).join('');
-  return `<div class="form-grid">${languagePicker(prefix+'audio_languages','Языки аудио',values.audio_languages,'Все указанные языки обязательны. Пусто — без ограничений.')}${languagePicker(prefix+'subtitle_languages','Языки субтитров',values.subtitle_languages,'Отсутствие субтитров не блокирует загрузку.')}<label>Минимальное качество<select name="${prefix}min_resolution">${options(values.min_resolution)}</select></label><label>Максимальное качество<select name="${prefix}max_resolution">${options(values.max_resolution)}</select></label></div><label>Обязательная фраза<input name="${prefix}keyword" value="${esc(values.keyword)}" placeholder="Например, название озвучки или релиз-группы" maxlength="200"></label>`;
+  return `<div class="form-grid">${languagePicker(prefix+'audio_languages','Языки аудио',values.audio_languages,'Все указанные языки обязательны. Пусто — без ограничений.')}${languagePicker(prefix+'subtitle_languages','Языки субтитров',values.subtitle_languages,'Отсутствие субтитров не блокирует загрузку.')}<label>Минимальное качество<select name="${prefix}min_resolution">${options(values.min_resolution)}</select></label><label>Максимальное качество<select name="${prefix}max_resolution">${options(values.max_resolution)}</select></label></div><section class="keyword-rules" data-keyword-rules="${esc(prefix)}"><h3>Ключевые слова и баллы</h3><p class="fine">Совпадение в заголовке или описании учитывается один раз, без учёта регистра. Положительные баллы повышают приоритет, отрицательные — понижают. Отсутствие слова не блокирует раздачу.</p><div data-keyword-rows>${keywordRules(values).map(keywordRuleRow).join('')}</div><button type="button" class="ghost" data-add-keyword-rule>Добавить слово</button></section>`;
 }
-function readRequirements(form,prefix='') { const data=new FormData(form); const langs=name=>selectedLanguages(form,prefix+name); return {audio_languages:langs('audio_languages'),subtitle_languages:langs('subtitle_languages'),min_resolution:Number(data.get(prefix+'min_resolution')),max_resolution:Number(data.get(prefix+'max_resolution')),keyword:String(data.get(prefix+'keyword')||'')}; }
+function readRequirements(form,prefix='') {
+  const data=new FormData(form),langs=name=>selectedLanguages(form,prefix+name);
+  const root=$$('[data-keyword-rules]',form).find(node=>node.dataset.keywordRules===prefix);
+  const keywords=root?$$('[data-keyword-rule]',root).map(row=>{
+    const text=$('[data-keyword-text]',row).value.trim(),raw=$('[data-keyword-points]',row).value,points=Number(raw);
+    if(!text)throw new Error('Введите ключевое слово или удалите пустую строку');
+    if(!raw||!Number.isInteger(points)||points < -10000||points > 10000)throw new Error('Баллы должны быть целым числом от −10000 до 10000');
+    return {text,points};
+  }):[];
+  if(new Set(keywords.map(rule=>rule.text.toLowerCase())).size!==keywords.length)throw new Error('Ключевые слова не должны повторяться');
+  return {audio_languages:langs('audio_languages'),subtitle_languages:langs('subtitle_languages'),min_resolution:Number(data.get(prefix+'min_resolution')),max_resolution:Number(data.get(prefix+'max_resolution')),keywords};
+}
 function episodeList(value) { if(!value.trim())return null; const result=new Set(); for(const part of value.split(',')) { const match=part.trim().match(/^(\d+)(?:\s*[-–]\s*(\d+))?$/); if(!match)throw new Error('Серии: используйте формат 1, 2, 5–8'); const first=Number(match[1]),last=Number(match[2]||match[1]); if(last<first||last-first>1000)throw new Error('Некорректный диапазон серий'); for(let i=first;i<=last;i++)result.add(i); } return [...result]; }
 function seasonOptions(item) {
   const groups=new Map();
@@ -210,7 +226,7 @@ async function loadStorage() {
   const node=$('#storage-status');if(!node)return;
   try {
     const storage=await api('/storage');
-    node.textContent=[...storage.roots.map(r=>`Оригиналы: ${r.source}. Медиатека: ${r.user}.`),`Ссылок: ${storage.links}.`,storage.migration_error,storage.links_error,storage.capability_error,...(storage.warnings||[]),...(storage.metadata_errors||[])].filter(Boolean).join(' \n');
+    node.textContent=[...storage.roots.map(r=>`Оригиналы: ${r.source}. Медиатека: ${r.user}.${r.offline?` Оффлайн-данные: ${r.offline}.`:""}`),`Ссылок: ${storage.links}.`,storage.migration_error,storage.links_error,storage.capability_error,storage.offline_error,...(storage.warnings||[]),...(storage.metadata_errors||[])].filter(Boolean).join(' \n');
   } catch(error) { node.textContent=`Не удалось проверить хранилище: ${error.message}`; }
 }
 async function loadSettings() { loadStorage(); state.settings=await api('/settings'); applyThemeColor(state.settings.theme_color); const form=$('#settings-form'); $('#settings-requirements').innerHTML=requirementFields(state.settings.defaults,'default_'); for(const [key,value] of Object.entries(state.settings)){const field=form.elements[key];if(key==='defaults'||!field)continue;if(field.type==='checkbox')field.checked=Boolean(value);else field.value=value??'';} }
@@ -231,13 +247,21 @@ function providerField(provider,field) {
   return `<label>${esc(field.label)}<span class="secret-field">${input}<button type="button" class="secret-toggle" data-provider-secret="${esc(provider.id)}" data-secret-field="${esc(field.name)}" aria-label="Показать ${esc(field.label)}" aria-pressed="false" title="Показать">${secretEyeIcon()}</button></span></label>`;
 }
 function secretEyeIcon() { return '<svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6-10-6-10-6Z"/><circle cx="12" cy="12" r="3"/></svg>'; }
+function providerComment(text) {
+  let result='',offset=0;
+  for(const match of text.matchAll(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/gi)){
+    result+=esc(text.slice(offset,match.index))+`<a href="${esc(match[2])}" target="_blank" rel="noopener noreferrer">${esc(match[1])}</a>`;
+    offset=match.index+match[0].length;
+  }
+  return (result+esc(text.slice(offset))).replace(/\n/g,'<br>');
+}
 function providerCard(provider) {
   const content=provider.kind==='content',bodyId=`provider-body-${provider.id}`;
   const heading=`<div><h3>${esc(provider.name)}</h3><span class="fine">${esc(provider.version||'—')}</span></div>`;
   const switchControl=content?`<label class="provider-switch"><input type="checkbox" role="switch" name="enabled" aria-label="Включить ${esc(provider.name)}" ${provider.enabled?'checked':''}><span>Включён</span></label>`:`<label class="check"><input type="checkbox" name="enabled" ${provider.enabled?'checked':''}>Включён</label>`;
   const header=content?`<div class="provider-header"><span class="provider-drag-handle" data-provider-drag="${esc(provider.id)}" draggable="true" role="button" tabindex="0" aria-label="Переместить ${esc(provider.name)}. Используйте стрелки вверх и вниз" title="Перетащить для изменения порядка" aria-grabbed="false">⋮⋮</span><button type="button" class="provider-expand" data-provider-expand aria-expanded="false" aria-controls="${esc(bodyId)}">${heading}<span class="provider-chevron" aria-hidden="true">⌄</span></button>${switchControl}</div>`:`<div class="provider-header">${heading}<div class="provider-controls"><button class="icon-button revert" type="button" data-provider-revert="${esc(provider.id)}" title="Revert — значения по умолчанию" aria-label="Revert: ${esc(provider.name)}">↶</button>${switchControl}</div></div>`;
   const revert=content?`<button class="icon-button revert" type="button" data-provider-revert="${esc(provider.id)}" title="Revert — значения по умолчанию" aria-label="Revert: ${esc(provider.name)}">↶</button>`:'';
-  return `<form class="panel provider-form${content?' provider-accordion':''}" data-provider-form="${esc(provider.id)}">${header}<div id="${esc(bodyId)}" class="provider-body" ${content?'hidden':''}><div class="stack">${provider.config_fields.map(field=>providerField(provider,field)).join('')}</div>${provider.error?`<p class="form-error">${esc(provider.error)}</p>`:''}<div class="provider-actions">${revert}<button class="primary" type="submit">Сохранить</button><button class="ghost" type="button" data-provider-health="${esc(provider.id)}">Проверить</button></div></div></form>`;
+  return `<form class="panel provider-form${content?' provider-accordion':''}" data-provider-form="${esc(provider.id)}">${header}<div id="${esc(bodyId)}" class="provider-body" ${content?'hidden':''}><div class="stack">${provider.config_fields.map(field=>providerField(provider,field)).join('')}</div>${provider.offline_capability?`<p class="fine">Оффлайн-данные: ${(provider.offline_directories||[]).map(esc).join(", ")}. Поместите сюда файлы каталога в формате этого провайдера.</p><p class="fine" data-offline-status="${esc(provider.id)}" role="status"></p><button type="button" class="ghost" data-provider-offline-check="${esc(provider.id)}">Проверить каталог</button>`:""}${provider.error?`<p class="form-error">${esc(provider.error)}</p>`:''}<div class="provider-actions">${revert}<button class="primary" type="submit">Сохранить</button><button class="ghost" type="button" data-provider-health="${esc(provider.id)}">Проверить</button></div>${content&&provider.comment?.trim()?`<p class="fine provider-comment" role="note">${providerComment(provider.comment)}</p>`:''}</div></form>`;
 }
 async function loadProviders() { const providers=await api('/providers');state.providers=providers; $('#provider-list').innerHTML=[['metadata','Провайдеры метаинформации'],['content','Провайдеры контента']].map(([kind,title])=>`<section class="provider-group provider-group-${kind}"><h3>${title}</h3>${kind==='content'?'<p class="fine provider-order-hint">Перетащите карточки, чтобы изменить порядок поиска. Изменения сохраняются сразу.</p>':''}<div class="provider-grid">${providers.filter(p=>p.kind===kind).map(providerCard).join('')}</div></section>`).join('')+providers.filter(p=>!['metadata','content'].includes(p.kind)).map(p=>`<div class="notice">${esc(p.name)}: ${esc(p.error||'Провайдер недоступен')}</div>`).join(''); }
 
@@ -267,7 +291,7 @@ function candidateScore(report) {
   if(!report.scoring?.length)return '';
   const names={1:'Заголовок',2:'Описание',3:'Файлы'};
   const sources={title:'заголовок',description:'описание',structured:'метаданные',torrent:'файлы'};
-  return `<details class="candidate-score"><summary>Оценка: ${esc(report.score)} баллов · почему</summary>${report.scoring.map(stage=>`<section><strong>${names[stage.stage]||'Проверка'}: ${esc(stage.total)} / порог ${esc(stage.threshold)}</strong><p class="fine">${stage.passed?'Порог пройден':stage.stage===3?'Автоматический выбор не разрешён':'Проверка не пройдена'}</p>${stage.signals.map(signal=>`<div class="criterion"><strong>${signal.points>0?'+':''}${esc(signal.points)}</strong><span>${esc(signal.reason)} <small class="fine">(${esc(sources[signal.source]||signal.source||'')})</small></span></div>`).join('')}${stage.blockers.map(reason=>`<p class="fine">${esc(reason)}</p>`).join('')}</section>`).join('')}<p class="fine">На каждом этапе оценка пересчитывается. Повторные подтверждения не суммируются.</p></details>`;
+  return `<details class="candidate-score"><summary>Оценка: ${esc(report.score)} баллов · почему</summary>${report.scoring.map(stage=>`<section><strong>${names[stage.stage]||'Проверка'}: ${esc(stage.total)}${stage.stage===2&&stage.threshold===0?'':` / порог подтверждений ${esc(stage.threshold)}`}</strong><p class="fine">${stage.passed?(stage.stage===2&&stage.threshold===0?'Явных блокеров нет':'Проверка пройдена'):stage.stage===3?'Автоматический выбор не разрешён':'Проверка не пройдена'}</p>${stage.signals.map(signal=>`<div class="criterion"><strong>${signal.points>0?'+':''}${esc(signal.points)}</strong><span>${esc(signal.reason)} <small class="fine">(${esc(sources[signal.source]||signal.source||'')})</small></span></div>`).join('')}${stage.blockers.map(reason=>`<p class="fine">${esc(reason)}</p>`).join('')}</section>`).join('')}<p class="fine">На каждом этапе оценка пересчитывается. Повторные подтверждения не суммируются.</p></details>`;
 }
 async function candidateDialog(subtaskId, pending) {
   pending??=$('#modal[open] [data-candidate-dialog]')?.dataset.candidateDialog===String(subtaskId)&&$('[data-candidate-dialog]')?.dataset.pendingChoice==='true';
@@ -452,6 +476,8 @@ document.addEventListener('click', async event=>{ const button=event.target.clos
   else if(button.id==='run-queue'){button.disabled=true;try{await api('/search/run','POST',{});await refreshDownloads();await refreshLibraryView();}finally{if(!state.search?.running)button.disabled=false;}}
   else if(button.id==='logout'){await api('/session','DELETE');location.assign('/login');}
   else if(button.id==='clear-selection'){state.generation++;state.selected=null;$('#selection').hidden=true;}
+  else if(button.hasAttribute('data-add-keyword-rule')){const root=button.closest('[data-keyword-rules]');if($$('[data-keyword-rule]',root).length>=50)throw new Error('Можно добавить до 50 ключевых слов');$('[data-keyword-rows]',root).insertAdjacentHTML('beforeend',keywordRuleRow());$$('[data-keyword-text]',root).at(-1).focus();}
+  else if(button.hasAttribute('data-remove-keyword-rule'))button.closest('[data-keyword-rule]').remove();
   else if(button.id==='add-task-season')addTaskSeason();
   else if(button.hasAttribute('data-remove-task-season')){button.closest('[data-task-season]').remove();updateTaskSeasonControls();}
   else if(button.id==='close-modal')$('#modal').close();
@@ -499,6 +525,7 @@ document.addEventListener('click', async event=>{ const button=event.target.clos
       input.type='password';button.setAttribute('aria-pressed','false');button.setAttribute('aria-label','Показать секрет');button.title='Показать';
     }
   }
+  else if(button.dataset.providerOfflineCheck){const node=button.closest("[data-provider-form]").querySelector("[data-offline-status]");node.textContent='Проверка каталога…';try{const result=await api(`/providers/${button.dataset.providerOfflineCheck}/offline`);node.textContent=result.message||'Каталог проверен';}catch(error){node.textContent=error.message;}}
   else if(button.dataset.providerHealth){await api(`/providers/${button.dataset.providerHealth}/health`,'POST',{});toast('Провайдер доступен');}
   else if(button.dataset.providerRevert){const provider=state.providers.find(p=>p.id===button.dataset.providerRevert);const form=button.closest('form');for(const field of provider.config_fields){form.elements[field.name].value=field.default||'';if(field.secret){form.elements[field.name].dataset.clearSecret='true';form.elements[field.name].placeholder='';}}toast('Значения по умолчанию. Нажмите «Сохранить», чтобы применить.');}
   else if(button.dataset.account){await api(`/accounts/${button.dataset.account}`,'PATCH',{active:button.dataset.active!=='true'});await loadAccounts();}

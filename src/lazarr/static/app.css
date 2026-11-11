@@ -559,3 +559,7 @@ dialog:has(#season-mapping-editor){width:min(1440px,calc(100% - 32px));padding:2
 .season-table .season-drop-before td{box-shadow:inset 0 2px var(--accent);}
 .season-table .season-drop-after td{box-shadow:inset 0 -2px var(--accent);}
 .season-table [data-remove-inline-season]{padding:4px 8px;margin-left:5px;}
+.keyword-rules{margin:20px 0}.keyword-rule{display:grid;grid-template-columns:minmax(0,1fr) 120px auto;align-items:end;gap:12px;margin-bottom:12px}.keyword-rule .ghost{min-height:44px}
+@media(max-width:600px){.keyword-rule{grid-template-columns:minmax(0,1fr) 100px}.keyword-rule .ghost{grid-column:1/-1;justify-self:end}}
+
+.provider-comment{margin:16px 0 0;padding-top:12px;border-top:1px solid var(--line);line-height:1.5;overflow-wrap:anywhere}

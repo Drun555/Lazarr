@@ -39,6 +39,8 @@ from lazarr.sdk import (
     Evidence,
     Criterion,
     EpisodeInfo,
+    OfflineStatus,
+    ProviderError,
     language,
 )
 from lazarr.security import audit
@@ -101,12 +103,21 @@ class Worker:
         ignore_filters=False,
         bypass_cooldown=False,
         record_progress=True,
+        offline=None,
     ):
         """Only TorrentEngine supplies the authoritative file list to Matcher."""
+        offline = candidate.offline if offline is None else offline
         record = self.progress.record if record_progress else lambda *args, **kwargs: None
-        record("inspect", f"Чтение описания: {candidate.title}", candidate=candidate.title)
-        async with self.plugins.open(candidate.provider, bypass_cooldown=bypass_cooldown) as provider:
-            detailed = await provider.inspect(candidate)
+        record(
+            "inspect",
+            f"{'Оффлайн: ' if offline else ''}Чтение описания: {candidate.title}",
+            candidate=candidate.title,
+        )
+        async with self.plugins.open(
+            candidate.provider, bypass_cooldown=bypass_cooldown, offline=offline
+        ) as provider:
+            options = {"offline": offline} if provider.manifest.offline_capability else {}
+            detailed = (await provider.inspect(candidate, **options)).model_copy(update={"offline": offline})
             reason = (
                 None
                 if ignore_filters
@@ -120,7 +131,7 @@ class Worker:
             if reason:
                 raise CandidateFiltered(reason)
             record("resolve", f"Получение torrent / magnet: {candidate.title}")
-            source = await provider.resolve_download(detailed)
+            source = await provider.resolve_download(detailed, **options)
         record("metadata", f"Получение структуры торрента: {candidate.title}")
         metadata = await asyncio.to_thread(self.engine.inspect, source)
         if any(
@@ -423,10 +434,11 @@ class Worker:
                 return int(date[:4])
         return None
 
-    async def search_page(self, provider, query, cursor, claimed, acquire):
+    async def search_page(self, provider, query, cursor, claimed, acquire, *, offline=False):
+        options = {"offline": offline} if provider.manifest.offline_capability else {}
         if not acquire:
-            return await provider.search(query, cursor)
-        search = asyncio.create_task(provider.search(query, cursor))
+            return await provider.search(query, cursor, **options)
+        search = asyncio.create_task(provider.search(query, cursor, **options))
         try:
             while True:
                 changed = asyncio.create_task(self.selection_changed.wait())
@@ -446,6 +458,122 @@ class Worker:
             search.cancel()
             await asyncio.gather(search, return_exceptions=True)
             raise
+
+    async def offline_candidates(self, requests, provider_ids, year, claimed, acquire):
+        """Exhaust local discovery before inspecting any online source."""
+        candidates, errors, seen = [], [], set()
+        for provider_id in provider_ids:
+            cls = self.plugins.classes[provider_id]
+            if not cls.manifest.offline_capability:
+                continue
+            name = cls.manifest.name
+            self.progress.record("offline_status", f"{name}: проверка локального каталога", provider=name)
+            try:
+                async with self.plugins.open(provider_id, offline=True) as provider:
+                    status = OfflineStatus.model_validate(await provider.offline_status())
+                    eligible = []
+                    for request in requests:
+                        release_year = year
+                        if (
+                            request.media.kind == "tv"
+                            and request.air_date
+                            and re.match(r"^\d{4}-", request.air_date)
+                        ):
+                            release_year = int(request.air_date[:4])
+                        if status.covers(release_year):
+                            eligible.append(request)
+                    if not eligible:
+                        self.progress.record(
+                            "offline_skipped",
+                            f"{name}: " + (status.message or "нет оффлайн-данных для искомого года"),
+                        )
+                        continue
+                    query = SearchQuery(
+                        media=requests[0].media,
+                        season=requests[0].season,
+                        episodes=[r.episode for r in eligible if r.episode is not None],
+                        requirements=requests[0].requirements,
+                    )
+                    variants = [
+                        text
+                        for group in search_query_groups(query.media, season=query.season, year=year)
+                        for text in group
+                    ]
+                    for text in variants:
+                        query.text, cursor, cursors = text, None, {None}
+                        while True:
+                            if acquire and not self.unresolved(claimed):
+                                return sorted(candidates, key=lambda c: candidate_rank(c, requests)), errors
+                            self.progress.record(
+                                "offline_search",
+                                f"{name}: оффлайн-поиск «{text}», смещение {cursor or 0}",
+                                provider=name,
+                            )
+                            with self.db.session() as db:
+                                db.execute(
+                                    update(Subtask)
+                                    .where(Subtask.id.in_(claimed))
+                                    .values(last_search_at=time.time())
+                                )
+                            page = await self.search_page(
+                                provider, query, cursor, claimed, acquire, offline=True
+                            )
+                            if page is None:
+                                return sorted(candidates, key=lambda c: candidate_rank(c, requests)), errors
+                            self.progress.value["search_requests"] += 1
+                            self.progress.value["pages_checked"] += 1
+                            self.progress.value["group_pages_checked"] += 1
+                            participation = next(
+                                p for p in self.progress.value["providers"] if p["id"] == provider_id
+                            )
+                            participation["requests"] += 1
+                            participation["candidates"] += len(page.items)
+                            self.progress.record(
+                                "offline_results", f"{name}: оффлайн-кандидатов — {len(page.items)}"
+                            )
+                            for candidate in page.items:
+                                if candidate.provider != provider_id:
+                                    raise ProviderError(
+                                        "offline_data",
+                                        "Оффлайн-каталог вернул чужой идентификатор провайдера",
+                                    )
+                                key = (provider_id, candidate.id, candidate.revision)
+                                if key in seen:
+                                    continue
+                                seen.add(key)
+                                candidate = candidate.model_copy(update={"offline": True})
+                                self.progress.value["candidates_found"] += 1
+                                reason = reject_reason(
+                                    candidate, eligible, allow_preference_mismatch=not acquire
+                                )
+                                if reason:
+                                    self.progress.value["candidates_filtered"] += 1
+                                    self.progress.record(
+                                        "filtered", f"Оффлайн: отсеяно {candidate.title} — {reason}"
+                                    )
+                                else:
+                                    candidates.append(candidate)
+                            if acquire:
+                                with self.db.session() as db:
+                                    db.execute(
+                                        update(Subtask)
+                                        .where(Subtask.id.in_(claimed))
+                                        .values(lease_until=time.time() + 600)
+                                    )
+                            if not page.next_cursor:
+                                break
+                            if page.next_cursor in cursors:
+                                raise ProviderError(
+                                    "offline_data", "Оффлайн-каталог повторяет страницу поиска"
+                                )
+                            cursor = page.next_cursor
+                            cursors.add(cursor)
+            except Exception as exc:
+                errors.append(self._error(exc))
+                self.progress.record(
+                    "offline_error", f"{name}: локальный каталог недоступен — {self._error(exc)}"
+                )
+        return sorted(candidates, key=lambda c: candidate_rank(c, requests)), errors
 
     async def search_alternatives(self, subtask_id):
         async with self.lock:
@@ -519,7 +647,13 @@ class Worker:
             )
             return [
                 Candidate.model_validate(release.data).model_copy(
-                    update={"description": "", "evidence": [], "external_ids": {}, "file_hints": []}
+                    update={
+                        "description": "",
+                        "evidence": [],
+                        "external_ids": {},
+                        "file_hints": [],
+                        "offline": False,
+                    }
                 )
                 for release in releases
             ]
@@ -553,6 +687,7 @@ class Worker:
             provider="",
         )
         choices = []
+        preferred = {}
         errors = []
         provider_ids = [
             p for p in self.plugins.available("content") if provider_filter is None or p in provider_filter
@@ -573,19 +708,28 @@ class Worker:
                 )
         checked_topics = set()
 
-        async def inspect_candidate(candidate, participation, provider_name):
+        async def inspect_candidate(candidate, participation, provider_name, *, offline=False):
             try:
                 detailed, metadata, report = await self.evaluate(
                     candidate,
                     requests,
                     allow_preference_mismatch=not acquire,
+                    offline=offline,
                 )
                 release_id, allowed = self._record(detailed, metadata, report)
                 choices.append((detailed, metadata, report, release_id, allowed))
-                checked_topics.add((candidate.provider, candidate.id))
+                for evaluation in report.evaluations:
+                    if (
+                        evaluation.result == MatchResult.MATCH
+                        and evaluation.subtask_id in allowed
+                        and evaluation.binding is not None
+                        and not evaluation.binding.missing_subtitle_languages
+                    ):
+                        preferred.setdefault(evaluation.subtask_id, choices[-1])
+                checked_topics.add((candidate.provider, candidate.id, offline))
                 self.progress.value["candidates_checked"] += 1
             except CandidateFiltered as exc:
-                checked_topics.add((candidate.provider, candidate.id))
+                checked_topics.add((candidate.provider, candidate.id, offline))
                 self.progress.value["candidates_filtered"] += 1
                 self.progress.record("filtered", f"Отсеяно: {candidate.title} — {exc}")
             except Exception as exc:
@@ -593,7 +737,7 @@ class Worker:
                 errors.append(self._error(exc))
                 self.progress.record("candidate_error", f"Кандидат не проверен: {self._error(exc)}")
                 latest = next(p for p in self.plugins.search_status() if p["id"] == candidate.provider)
-                if latest["state"] == "cooldown":
+                if not offline and latest["state"] == "cooldown":
                     if acquire:
                         self.defer_requests(claimed, candidate.provider, latest["retry_at"])
                     participation.update(
@@ -627,7 +771,32 @@ class Worker:
                 provider="",
             )
             seen = set()
-            for candidate in self.previous_candidates(claimed, provider_ids):
+            local_candidates, local_errors = await self.offline_candidates(
+                requests, provider_ids, year, claimed, acquire
+            )
+            errors.extend(local_errors)
+            for candidate in local_candidates:
+                if acquire and (set(claimed) <= preferred.keys() or not self.unresolved(claimed)):
+                    break
+                provider_name = self.plugins.classes[candidate.provider].manifest.name
+                self.progress.value["provider"] = provider_name
+                await inspect_candidate(
+                    candidate, provider_state[candidate.provider], provider_name, offline=True
+                )
+            if local_candidates:
+                complete = set(claimed) <= preferred.keys()
+                self.progress.record(
+                    "offline_done",
+                    "Оффлайн: все искомые серии и языки найдены"
+                    if complete
+                    else "Оффлайн-проход завершён; продолжаем поиск онлайн",
+                )
+            familiar = sorted(
+                self.previous_candidates(claimed, provider_ids), key=lambda c: candidate_rank(c, requests)
+            )
+            for candidate in familiar:
+                if acquire and set(claimed) <= preferred.keys():
+                    break
                 if acquire and not self.unresolved(claimed):
                     break
                 participation = provider_state[candidate.provider]
@@ -648,16 +817,11 @@ class Worker:
                 await inspect_candidate(candidate, participation, provider_name)
                 if participation["state"] != "cooldown":
                     participation.update(state="completed", reason="Ранее выбранная тема проверена")
-            covered = {
-                evaluation.subtask_id
-                for _, _, report, _, allowed in choices
-                for evaluation in report.evaluations
-                if evaluation.result == MatchResult.MATCH and evaluation.subtask_id in allowed
-            }
-            # Familiar topics are the first search phase. Compare all of them;
-            # broad discovery is needed only when they cannot cover this group.
-            discovery_providers = [] if acquire and set(claimed) <= covered else provider_ids
+            discovery_providers = [] if acquire and set(claimed) <= preferred.keys() else provider_ids
+            inspection_queue = []
             for provider_id in discovery_providers:
+                if acquire and set(claimed) <= preferred.keys():
+                    break
                 if acquire and not self.unresolved(claimed):
                     self.progress.value["satisfied"] = True
                     self.progress.record("finished", "Поиск остановлен: раздачи уже выбраны")
@@ -728,7 +892,10 @@ class Worker:
                     unique = []
                     for candidate in page.items:
                         key = (candidate.provider, candidate.id, candidate.revision)
-                        if key not in seen and (candidate.provider, candidate.id) not in checked_topics:
+                        if (
+                            key not in seen
+                            and (candidate.provider, candidate.id, False) not in checked_topics
+                        ):
                             seen.add(key)
                             unique.append(candidate)
                     self.progress.value["candidates_found"] += len(unique)
@@ -769,14 +936,25 @@ class Worker:
                         "limit",
                         f"{provider_name}: подробно проверяем {len(ordered)} лучших из {len(provider_candidates)} кандидатов",
                     )
-                for position, candidate in enumerate(ordered):
-                    if acquire and not self.unresolved(claimed):
-                        self.progress.value["satisfied"] = True
-                        break
-                    await inspect_candidate(candidate, participation, provider_name)
-                    if participation["state"] == "cooldown":
-                        self.progress.value["candidates_deferred"] += len(ordered) - position - 1
-                        break
+                inspection_queue.extend(ordered)
+            # Compare title scores across providers before opening any descriptions.
+            for candidate in sorted(inspection_queue, key=lambda c: candidate_rank(c, requests)):
+                if acquire and set(claimed) <= preferred.keys():
+                    self.progress.record("covered", "Все искомые серии и запрошенные языки найдены")
+                    break
+                if acquire and not self.unresolved(claimed):
+                    self.progress.value["satisfied"] = True
+                    break
+                participation = provider_state[candidate.provider]
+                if participation["state"] == "cooldown":
+                    self.progress.value["candidates_deferred"] += 1
+                    continue
+                provider_name = self.plugins.classes[candidate.provider].manifest.name
+                self.progress.value["provider"] = provider_name
+                participation.update(state="checking", reason="Проверка кандидатов по убыванию баллов")
+                await inspect_candidate(candidate, participation, provider_name)
+                if participation["state"] != "cooldown":
+                    participation.update(state="completed", reason="Кандидат проверен")
             if not acquire:
                 self.progress.record("alternatives", "Поиск вариантов завершён. Выберите раздачу вручную.")
                 return
@@ -786,7 +964,8 @@ class Worker:
                 if request.id not in self.unresolved([request.id]):
                     continue
                 ranked = []
-                for candidate, metadata, report, release_id, allowed in choices:
+                candidates = [preferred[request.id]] if request.id in preferred else choices
+                for candidate, metadata, report, release_id, allowed in candidates:
                     evaluation = next(e for e in report.evaluations if e.subtask_id == request.id)
                     if evaluation.result != MatchResult.MATCH or request.id not in allowed:
                         continue

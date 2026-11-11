@@ -173,7 +173,7 @@ async function setup(){
   w.HTMLElement.prototype.scrollIntoView=function(){};
   w.HTMLDialogElement.prototype.showModal=function(){this.open=true};
   w.HTMLDialogElement.prototype.close=function(){this.open=false};
-  const defaults={audio_languages:['ru'],subtitle_languages:[],min_resolution:720,max_resolution:1080,keyword:''};
+  const defaults={audio_languages:['ru'],subtitle_languages:[],min_resolution:720,max_resolution:1080,keywords:[]};
   let activity={running:false,state:'idle',pending_requests:0,history:[]};
   const status=()=>({engine_available:true,content_providers:['demo'],search:activity});
   const tasks=[];
@@ -187,7 +187,7 @@ async function setup(){
     const payload=options.body?JSON.parse(options.body):undefined;calls.push({url,method:options.method,payload});
     let result;
     if(url==='/api/v1/settings')result={defaults,prefer_full_subtitles:true,theme_color:'purple',movie_path:'/tmp/movies',series_path:'/tmp/series',search_start:'00:00',seed_ratio:1};
-    else if(url==='/api/v1/storage')result={roots:[{source:'/downloads/source',user:'/downloads/user'}],links:12};
+    else if(url==='/api/v1/storage')result={roots:[{source:'/downloads/source',user:'/downloads/user',offline:'/downloads/offline'}],links:12};
     else if(url==='/api/v1/status')result=status();
     else if(url==='/api/v1/telegram')result={enabled:true,token_configured:true,bot_username:'test_bot',error:''};
     else if(url==='/api/v1/telegram/users')result=telegramUsers;
@@ -466,9 +466,17 @@ test('create task sends canonical picks and immediately opens Libraries with liv
     d.querySelector('[data-media-id]').click();await settle();await settle();
     const picker=d.querySelector('[data-language-picker=audio_languages]'),query=picker.querySelector('.language-query');
     input(w,query,'Япон');picker.querySelector('[data-add-language=ja]').click();
+    const keywords=d.querySelector('#task-form [data-keyword-rules]');
+    for(const [text,points] of [['Studio',75],['CAMRip',-200]]){
+      keywords.querySelector('[data-add-keyword-rule]').click();
+      const row=[...keywords.querySelectorAll('[data-keyword-rule]')].at(-1);
+      row.querySelector('[data-keyword-text]').value=text;row.querySelector('[data-keyword-points]').value=points;
+    }
     d.querySelector('#task-form').dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}));await settle();await settle();
     const created=calls.find(c=>c.url==='/api/v1/tasks'&&c.method==='POST');
     assert.deepEqual(created.payload.requirements.audio_languages,['ru','ja']);
+    assert.deepEqual(created.payload.requirements.keywords,[{text:'Studio',points:75},{text:'CAMRip',points:-200}]);
+    assert.equal(created.payload.requirements.keyword,undefined);
     assert.equal(d.querySelector('#tab-library').hidden,false);
     assert.equal(d.querySelector('#tab-search').hidden,true);
     assert.equal(d.querySelector('#search-activity').hidden,false);
@@ -1256,7 +1264,7 @@ test('library displays ordered sections and navigation resets details, including
 test('media task edits inline, keeps draft across refresh and saves seasons with requirements',async()=>{
   const {dom,w,document:d,calls,errors,setTasks,setLibrary}=await setup();
   try{
-    const task={id:7,media_id:2,title:'Show',kind:'tv',seasons:[{season:1,whole_season:false}],subtasks:[{id:1,season:1,episode:2,status:'queued'}],requirements:{audio_languages:['ja'],subtitle_languages:['ru'],min_resolution:720,max_resolution:2160,keyword:''},paused:false};
+    const task={id:7,media_id:2,title:'Show',kind:'tv',seasons:[{season:1,whole_season:false}],subtasks:[{id:1,season:1,episode:2,status:'queued'}],requirements:{audio_languages:['ja'],subtitle_languages:['ru'],min_resolution:720,max_resolution:2160,keywords:[{text:'Studio',points:50},{text:'Avoid',points:-80}]},paused:false};
     setTasks([task]);setLibrary([{id:'series',name:'Сериалы',items:[{id:2,title:'Show'}]}],{id:2,title:'Show',kind:'tv',metadata:{seasons:[{number:1,title:'Сезон 1',episode_count:2},{number:2,title:'Сезон 2',episode_count:2}]},episodes:[],task});
     d.querySelector('[data-tab=library]').click();await settle();await settle();
     d.querySelector('[data-library-media="2"]').click();await settle();await settle();
@@ -1269,6 +1277,9 @@ test('media task edits inline, keeps draft across refresh and saves seasons with
     assert.equal(form.querySelector('[data-season-episodes]').value,'2');
     assert.equal(form.querySelector('[data-season-position]').disabled,true);
     form.querySelector('[name=min_resolution]').value='1080';
+    assert.equal(form.querySelector('[data-keyword-text]').value,'Studio');
+    form.querySelector('[data-keyword-points]').value='-20';
+    form.querySelectorAll('[data-remove-keyword-rule]')[1].click();
     form.querySelector('[data-source-season="1"] [data-season-enabled]').click();
     form.querySelector('[data-source-season="2"] [data-season-enabled]').click();
     form.querySelector('[data-source-season="2"] [data-season-episodes]').value='1-2';
@@ -1282,6 +1293,7 @@ test('media task edits inline, keeps draft across refresh and saves seasons with
     assert.equal(saved.payload.requirements.min_resolution,1080);
     assert.deepEqual(saved.payload.requirements.audio_languages,['ja']);
     assert.deepEqual(saved.payload.requirements.subtitle_languages,['ru']);
+    assert.deepEqual(saved.payload.requirements.keywords,[{text:'Studio',points:-20}]);
     assert.equal(d.querySelector('#inline-task-form'),null);
     d.querySelector('[data-edit-media-task]').click();
     d.querySelector('[data-cancel-inline-task]').click();
@@ -1294,7 +1306,7 @@ test('media task edits inline, keeps draft across refresh and saves seasons with
 test('pencil editor inserts manual seasons alongside TMDB seasons',async()=>{
   const {dom,w,document:d,calls,errors,setTasks,setLibrary}=await setup();
   try{
-    const task={id:7,media_id:2,title:'Show',kind:'tv',seasons:[{season:1,whole_season:true}],subtasks:[{id:1,season:1,episode:1,status:'queued'}],requirements:{audio_languages:['ja'],subtitle_languages:['ru'],min_resolution:720,max_resolution:2160,keyword:''},paused:false};
+    const task={id:7,media_id:2,title:'Show',kind:'tv',seasons:[{season:1,whole_season:true}],subtasks:[{id:1,season:1,episode:1,status:'queued'}],requirements:{audio_languages:['ja'],subtitle_languages:['ru'],min_resolution:720,max_resolution:2160,keywords:[]},paused:false};
     setTasks([task]);setLibrary([{id:'series',name:'Сериалы',items:[{id:2,title:'Show'}]}],{id:2,title:'Show',kind:'tv',metadata:{seasons:[{number:1,title:'Сезон 1',episode_count:2},{number:2,title:'Сезон 2',episode_count:2}]},episodes:[],task});
     d.querySelector('[data-tab=library]').click();await settle();await settle();
     d.querySelector('[data-library-media="2"]').click();await settle();await settle();
@@ -1421,6 +1433,7 @@ test('storage status reports paths and an unavailable status does not block sett
   const {dom,w,document:d}=await setup();
   try {
     assert.match(d.querySelector('#storage-status').textContent,/downloads\/user/);
+    assert.match(d.querySelector('#storage-status').textContent,/downloads\/offline/);
     const original=w.fetch;
     w.fetch=async(url,options)=>url==='/api/v1/storage'?{ok:false,status:503,json:async()=>({detail:'disk unavailable'})}:original(url,options);
     d.querySelector('[data-tab="settings"]').click();await settle();await settle();
@@ -1474,6 +1487,88 @@ test('special placement is fourth column only in specials and saves dependent se
     d.querySelector('#mapping-save').click();await settle();await settle();
     assert.deepEqual(calls.find(call=>call.method==='PUT').payload.rows[0].special_position,{mode:'manual',airsbefore_season:1,airsbefore_episode:2});
     await w.testSeasonMappingDialog(1,1);assert.equal(d.querySelector('.mapping-position'),null);
+    assert.deepEqual(errors,[]);
+  }finally{dom.window.close();}
+});
+
+test('weighted keyword defaults add and remove rules, validate duplicates and escape text',async()=>{
+  const {dom,w,document:d,calls,errors,setTasks,setLibrary}=await setup();
+  try{
+    d.querySelector('[data-tab=settings]').click();await settle();await settle();
+    const form=d.querySelector('#settings-form'),root=form.querySelector('[data-keyword-rules="default_"]');
+    root.querySelector('[data-add-keyword-rule]').click();
+    root.querySelector('[data-keyword-text]').value=' <img src=x> ';
+    root.querySelector('[data-keyword-points]').value='-40';
+    root.querySelector('[data-add-keyword-rule]').click();
+    const second=root.querySelectorAll('[data-keyword-rule]')[1];
+    second.querySelector('[data-keyword-text]').value='<IMG SRC=X>';
+    form.dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}));await settle();
+    assert.match(form.querySelector('.form-error').textContent,/не должны повторяться/);
+    assert.ok(!calls.some(call=>call.url==='/api/v1/settings'&&call.method==='PUT'));
+    second.querySelector('[data-remove-keyword-rule]').click();
+    form.dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}));await settle();await settle();
+    const saved=calls.find(call=>call.url==='/api/v1/settings'&&call.method==='PUT');
+    assert.deepEqual(saved.payload.defaults.keywords,[{text:'<img src=x>',points:-40}]);
+    const task={id:7,media_id:2,title:'Show',kind:'movie',seasons:[],subtasks:[],requirements:saved.payload.defaults};
+    setTasks([task]);setLibrary([{id:'movies',name:'Фильмы',items:[{id:2,title:'Show'}]}],{id:2,title:'Show',kind:'movie',metadata:{},episodes:[],task});
+    d.querySelector('[data-tab=library]').click();await settle();await settle();
+    d.querySelector('[data-library-media="2"]').click();await settle();await settle();
+    assert.match(d.querySelector('#media-task dl').textContent,/<img src=x> \(-40\)/);
+    assert.equal(d.querySelector('#media-task dl img'),null);
+    d.querySelector('[data-edit-media-task]').click();
+    assert.equal(d.querySelector('#inline-task-form [data-keyword-text]').value,'<img src=x>');
+    assert.equal(d.querySelector('#inline-task-form [data-keyword-rule] img'),null);
+    assert.deepEqual(errors,[]);
+  }finally{dom.window.close();}
+});
+
+test('offline catalog status is checked without authentication and rendered as text',async()=>{
+  const {dom,w,document:d,calls,errors,setProviders}=await setup();
+  try{
+    setProviders([{id:'rutracker',name:'Rutracker',kind:'content',enabled:true,config_fields:[],config:{},configured_secrets:[],offline_capability:true,offline_directories:['/downloads/offline/rutracker']}]);
+    const original=w.fetch;let checks=0;
+    w.fetch=async(url,options)=>url==='/api/v1/providers/rutracker/offline'?{ok:true,json:async()=>({available:true,year_to:2026,message:++checks===1?'Подготовка: 25%; <img src=x>':'Готовый каталог: 985506 раздач'})}:original(url,options);
+    d.querySelector('[data-tab=settings]').click();await settle();await settle();
+    const form=d.querySelector('[data-provider-form=rutracker]');
+    assert.match(form.textContent,/downloads\/offline\/rutracker/);
+    form.querySelector('[data-provider-offline-check]').click();await settle();await settle();
+    assert.match(form.querySelector('[data-offline-status]').textContent,/Подготовка: 25%; <img/);
+    assert.equal(form.querySelector('[data-offline-status] img'),null);
+    form.querySelector('[data-provider-offline-check]').click();await settle();await settle();
+    assert.match(form.querySelector('[data-offline-status]').textContent,/985506/);
+    assert.ok(!calls.some(c=>c.url.endsWith('/authenticate')));
+    assert.deepEqual(errors,[]);
+  }finally{dom.window.close();}
+});
+
+test('offline indexing is a separate live process with progress and no ETA',async()=>{
+  const {dom,w,document:d,errors}=await setup();
+  try{
+    const original=w.fetch;
+    let job={id:'offline-job-1',kind:'offline-index',lane:'catalog',state:'running',started_at:Date.now()/1000-3,detail:'Rutracker · <dump>.xml.xz',phase:'Чтение архива',progress:.25,completed_bytes:250,total_bytes:1000,scanned:100,indexed:40};
+    w.fetch=async(url,options)=>url==='/api/v1/background-tasks'?{ok:true,json:async()=>({items:[job],downloads:[],selection:[]})}:original(url,options);
+    d.querySelector('#background-tasks-open').click();await settle();await settle();
+    const list=d.querySelector('#background-tasks-list');
+    assert.match(list.textContent,/Индексация оффлайн-каталога/);
+    assert.match(list.textContent,/25\.0%/);
+    assert.match(list.textContent,/Обработано раздач: 100.*В индексе: 40/);
+    assert.equal(list.querySelector('dump'),null);
+    assert.equal(list.querySelector('[role=progressbar]').getAttribute('aria-valuenow'),'25.0');
+    assert.match(d.querySelector('#process-tooltip').textContent,/25\.0%/);
+    job={...job,progress:.65,completed_bytes:650,scanned:300,indexed:120};
+    await w.pollBackgroundTasks();
+    assert.match(list.textContent,/65\.0%/);
+    assert.match(list.textContent,/Обработано раздач: 300.*В индексе: 120/);
+    assert.doesNotMatch(list.textContent,/ETA|осталось/i);
+    job={...job,state:'completed',progress:1,phase:'Готово',finished_at:Date.now()/1000};
+    await w.pollBackgroundTasks();
+    assert.match(list.textContent,/100\.0%/);
+    assert.match(list.textContent,/Завершено/);
+    assert.equal(d.querySelector('#process-pill').hidden,true);
+    for(const [state,label] of [['cancelled','Остановлено'],['interrupted','Прервано']]){
+      job={...job,state,progress:.65};await w.pollBackgroundTasks();
+      assert.match(list.textContent,new RegExp(label));
+    }
     assert.deepEqual(errors,[]);
   }finally{dom.window.close();}
 });

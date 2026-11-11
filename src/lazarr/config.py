@@ -5,12 +5,36 @@ from typing import Literal
 import os
 
 
+class KeywordRule(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+    text: str = Field(min_length=1, max_length=200)
+    points: int = Field(default=50, ge=-10000, le=10000, strict=True)
+
+
 class Requirements(BaseModel):
     audio_languages: list[str] = Field(default_factory=lambda: ["ru"])
     subtitle_languages: list[str] = Field(default_factory=list)
     min_resolution: int = 720
     max_resolution: int = 1080
-    keyword: str = Field(default="", max_length=200)
+    keywords: list[KeywordRule] = Field(default_factory=list, max_length=50)
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_keyword(cls, values):
+        if isinstance(values, dict) and "keyword" in values:
+            values = dict(values)
+            legacy = str(values.pop("keyword") or "").strip()
+            if "keywords" not in values and legacy:
+                values["keywords"] = [{"text": legacy, "points": 50}]
+        return values
+
+    @field_validator("keywords")
+    @classmethod
+    def unique_keywords(cls, rules):
+        names = [rule.text.casefold() for rule in rules]
+        if len(names) != len(set(names)):
+            raise ValueError("Ключевые слова не должны повторяться")
+        return rules
 
     @field_validator("audio_languages", "subtitle_languages")
     @classmethod

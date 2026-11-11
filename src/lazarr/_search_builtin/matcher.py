@@ -483,18 +483,6 @@ class Matcher:
                     else "Нет однозначного соответствия видео и эпизода",
                 )
             )
-            keyword = request.requirements.keyword.strip().casefold()
-            criteria.append(
-                Criterion(
-                    field="keyword",
-                    result=MatchResult.MATCH
-                    if not keyword or keyword in f"{candidate.title}\n{candidate.description}".casefold()
-                    else MatchResult.MISMATCH,
-                    reason="Обязательная фраза найдена или не задана"
-                    if not keyword or keyword in f"{candidate.title}\n{candidate.description}".casefold()
-                    else "Обязательная фраза отсутствует",
-                )
-            )
             binding = None
             if video:
                 raw_resolution = resolution(video.path)
@@ -688,7 +676,7 @@ class Matcher:
             from .selection import assess_candidate
 
             stages = [
-                assess_candidate(candidate, request, stage, criteria if stage == 3 else ())
+                assess_candidate(candidate, request, stage, criteria if stage == 3 else (), binding=binding)
                 for stage in (1, 2, 3)
             ]
             if outcome == MatchResult.MATCH and not stages[-1].passed:

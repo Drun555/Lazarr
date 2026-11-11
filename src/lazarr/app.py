@@ -67,7 +67,7 @@ class Context:
         self.plugins = PluginManager(self.db, config, self.secret_store)
         self.plugins.bootstrap()
         self.service = TaskService(self.db, self.plugins)
-        self.service.settings()
+        self.plugins.prepare_offline_storage(self.service.settings())
         self.library = LibraryService(self.db, self.plugins, self.service)
         self.background_tasks = BackgroundTasks()
         self.preparation = MediaPreparation(self)
@@ -285,6 +285,9 @@ def create_app(config: RuntimeConfig | None = None):
         downloads = await asyncio.to_thread(ctx.service.download_activity)
         selection = await asyncio.to_thread(ctx.service.selection_activity)
         snapshot = ctx.background_tasks.snapshot(user.id)
+        from lazarr.task_progress import persisted_tasks
+
+        snapshot["items"] += await asyncio.to_thread(persisted_tasks, ctx.config.data_dir / "background-jobs")
         snapshot["items"] = await asyncio.to_thread(ctx.mapping_jobs.snapshot) + snapshot["items"]
         search = ctx.scheduler.snapshot()
         state = (
@@ -1022,6 +1025,18 @@ def create_app(config: RuntimeConfig | None = None):
     @app.get("/api/v1/search-engine")
     async def search_engine_status(request: Request, user=Depends(permission("providers"))):
         return context(request).plugins.search_engine.status()
+
+    @app.get("/api/v1/providers/{identity}/offline")
+    async def provider_offline_status(identity: str, request: Request, user=Depends(permission("providers"))):
+        plugins = context(request).plugins
+        cls = plugins.classes.get(identity)
+        if not cls or not cls.manifest.offline_capability:
+            raise HTTPException(404, "Провайдер не поддерживает оффлайн-данные")
+        status = await plugins.offline_status(identity, allow_disabled=True)
+        return {
+            **status.model_dump(),
+            "directories": [str(path) for path in plugins.offline_directories(identity)],
+        }
 
     @app.get("/api/v1/downloads")
     async def downloads(request: Request, user=Depends(authenticated)):

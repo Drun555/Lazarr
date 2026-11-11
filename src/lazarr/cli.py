@@ -16,6 +16,10 @@ def main():
     setup = sub.add_parser("create-admin", help="Create the initial administrator")
     setup.add_argument("username")
     sub.add_parser("migrate")
+    prepare = sub.add_parser("prepare-rutracker", help="Build a portable offline Rutracker catalog")
+    prepare.add_argument("archive", type=Path)
+    prepare.add_argument("--output", type=Path, required=True)
+    prepare.add_argument("--nice", type=int, choices=range(20), default=10, metavar="0..19")
     serve = sub.add_parser("serve")
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", default=8000, type=int)
@@ -29,6 +33,23 @@ def main():
         if args.log is not None:
             os.environ["LAZARR_LOG"] = args.log
         uvicorn.run("lazarr.app:create_app", factory=True, host=args.host, port=args.port, workers=1)
+        return
+    if args.command == "prepare-rutracker":
+        import logging
+        from lazarr.providers.rutracker_offline import export_index
+        from lazarr.task_progress import task_directory
+
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
+        os.nice(args.nice)
+        directory = Path(args.data_dir or os.getenv("LAZARR_DATA_DIR", "data")).absolute()
+        token = task_directory.set(directory / "background-jobs")
+        try:
+            metadata = export_index(args.archive.absolute(), args.output.absolute())
+        except Exception as exc:
+            parser.exit(1, f"Не удалось подготовить каталог: {exc}\n")
+        finally:
+            task_directory.reset(token)
+        print(f"Готово: {args.output.absolute()} — {metadata['topics']} раздач")
         return
     config = RuntimeConfig(args.data_dir)
     db = Database(config.data_dir / "lazarr.sqlite")

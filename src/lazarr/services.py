@@ -121,6 +121,7 @@ class TaskService:
             else:
                 db.add(ConfigEntry(key="app", value=settings.model_dump()))
             audit(db, user_id, "settings.update", "app")
+        self.plugins.prepare_offline_storage(settings)
 
     async def create(self, payload: CreateTask, user_id):
         selections = payload.selections()

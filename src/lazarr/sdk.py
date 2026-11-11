@@ -2,17 +2,17 @@
 
 from abc import ABC, abstractmethod
 from enum import StrEnum
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 from urllib.parse import urlparse
 import httpx
-from pydantic import BaseModel, Field, field_validator
+from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
 from lazarr.config import Requirements
 from lazarr.languages import language as language, ALIASES
 
 LANGUAGES = ALIASES
 
-SDK_VERSION = "1.8"
+SDK_VERSION = "1.9"
 
 
 def safe_relative_path(value: str) -> str:
@@ -47,6 +47,36 @@ class ProviderManifest(BaseModel):
     config_fields: list[ConfigField] = Field(default_factory=list)
     auth_methods: list[str] = Field(default_factory=list)
     capabilities: list[str] = Field(default_factory=list)
+    comment: str = ""
+    offline_capability: bool = Field(
+        default=False, validation_alias=AliasChoices("offline_capability", "offlineCapability")
+    )
+
+
+class OfflineStatus(BaseModel):
+    """Coverage of the files currently installed by the user, inclusive by release year."""
+
+    available: bool = False
+    year_from: int | None = Field(default=None, ge=1, le=9999)
+    year_to: int | None = Field(default=None, ge=1, le=9999)
+    message: str = ""
+
+    @model_validator(mode="after")
+    def valid_range(self):
+        if self.available and self.year_to is None:
+            raise ValueError("Available offline data must declare year_to")
+        if self.year_from is not None and self.year_to is not None and self.year_from > self.year_to:
+            raise ValueError("Offline year_from exceeds year_to")
+        return self
+
+    def covers(self, year: int | None) -> bool:
+        return bool(
+            self.available
+            and year is not None
+            and self.year_to is not None
+            and (self.year_from is None or self.year_from <= year)
+            and year <= self.year_to
+        )
 
 
 class AuthResult(BaseModel):
@@ -166,6 +196,7 @@ class Candidate(BaseModel):
     file_hints: list[str] = Field(default_factory=list)
     download_url: str | None = None
     magnet: str | None = None
+    offline: bool = False
 
 
 class SearchPage(BaseModel):
@@ -269,8 +300,19 @@ class ReleaseDate(BaseModel):
 
 
 class ProviderContext:
-    def __init__(self, config: dict, state: dict, client: httpx.AsyncClient):
+    def __init__(
+        self,
+        config: dict,
+        state: dict,
+        client: httpx.AsyncClient,
+        *,
+        offline: bool = False,
+        offline_directories: tuple[Path, ...] = (),
+        background_directory: Path | None = None,
+    ):
         self.config, self.state, self.http = config, state, client
+        self.offline, self.offline_directories = offline, offline_directories
+        self.background_directory = background_directory
         self.solver_transport = None
         self.request_gate = None
         if state.get("browser_user_agent"):
@@ -353,12 +395,18 @@ class MetadataProvider(Provider):
 
 
 class ContentProvider(Provider):
+    async def offline_status(self) -> OfflineStatus:
+        """Describe installed catalog coverage; unavailable by default."""
+        return OfflineStatus()
+
     @abstractmethod
-    async def search(self, query: SearchQuery, cursor: str | None = None) -> SearchPage: ...
+    async def search(
+        self, query: SearchQuery, cursor: str | None = None, *, offline: bool = False
+    ) -> SearchPage: ...
     @abstractmethod
-    async def inspect(self, candidate: Candidate) -> Candidate: ...
+    async def inspect(self, candidate: Candidate, *, offline: bool = False) -> Candidate: ...
     @abstractmethod
-    async def resolve_download(self, candidate: Candidate) -> DownloadSource: ...
+    async def resolve_download(self, candidate: Candidate, *, offline: bool = False) -> DownloadSource: ...
 
 
 class ReleaseCalendarProvider(ABC):
