@@ -530,3 +530,61 @@ def test_sidecar_episode_hint_handles_group_suffix_without_guessing_other_number
     assert episode_numbers("Bakemonogatari 01 [1080p].[Group].надписи.ass") == (None, {1}, True)
     assert episode_numbers("Bakemonogatari 01 alternate 02.ass", season_hint=1) == (None, set(), False)
     assert episode_numbers("Bakemonogatari 013 [1080p].[Group].mka", season_hint=1) == (None, {13}, True)
+
+
+def test_shinsekai_yori_bracketed_episodes_from_real_torrent():
+    import json
+    from pathlib import Path
+    from lazarr.sdk import Candidate, MetadataItem
+
+    media = MetadataItem(
+        id="53052",
+        kind="tv",
+        title="Из Нового Света",
+        original_title="新世界より",
+        aliases=["Shinsekai Yori", "Shin Sekai Yori"],
+        year=2012,
+        seasons=[{"number": 1, "episode_count": 25}],
+    )
+    item = Candidate(
+        provider="rutracker",
+        id="4210674",
+        url="https://rutracker.org/forum/viewtopic.php?t=4210674",
+        title="Из Нового Света / Из Нового Мира / Shinsekai Yori / From the New World "
+        "[Исихама Масаси][TV][25 из 25][2012., приключения, фантастика, HDTVRip]"
+        "[Трина Дубовицкая & Sad Kit]",
+    )
+    paths = [
+        TorrentFile.model_validate(file)
+        for file in json.loads((Path(__file__).parent / "fixtures/shinsekai-yori-files.json").read_text())
+    ]
+    requests = [
+        request(media, number, number, min_resolution=1080, audio_languages=["ja"], subtitle_languages=["ru"])
+        for number in range(1, 26)
+    ]
+    assert episode_numbers(paths[0].path, media.aliases, 1) == (1, {9}, False)
+    assert episode_numbers(paths[0].path, media.aliases) == (None, {9}, True)
+    report = Matcher().evaluate(item, requests, paths)
+    assert len(report.evaluations) == 25
+    for number, evaluation in enumerate(report.evaluations, 1):
+        assert evaluation.binding is not None
+        assert f"[{number:02d}]" in evaluation.binding.video_path
+        assert evaluation.binding.video_path.endswith(".mp4")
+        assert next(c for c in evaluation.criteria if c.field == "episode").result == MatchResult.MATCH
+        # Episode recognition alone cannot satisfy the task's quality/track requirements.
+        assert evaluation.result != MatchResult.MATCH
+    assert report.plan is None
+
+    duplicate = paths[0].model_copy(update={"index": 50, "path": "Alternative/" + paths[0].path})
+    ambiguous = Matcher().evaluate(item, [requests[8]], [*paths, duplicate]).evaluations[0]
+    assert ambiguous.binding is None
+    # Without the confirmed year and complete season count, do not invent a season.
+    unknown_season = item.model_copy(update={"title": "Shinsekai Yori"})
+    assert Matcher().evaluate(unknown_season, requests, paths).evaluations[0].binding is None
+
+
+def test_bracketed_episode_numbers_do_not_treat_metadata_as_episodes():
+    assert episode_numbers("Show [09][1080p][x264][12345678].mkv", season_hint=1) == (1, {9}, False)
+    assert episode_numbers("Show [1080p][x264][12345678].mkv", season_hint=1) == (None, set(), False)
+    assert episode_numbers("Show [09][10].mkv", season_hint=1) == (None, set(), False)
+    assert episode_numbers("Show [09][264].mkv", season_hint=1) == (None, {9}, True)

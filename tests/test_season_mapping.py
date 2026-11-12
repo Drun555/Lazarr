@@ -146,6 +146,34 @@ def test_related_files_sum_separate_fragments_and_preserve_short_titles():
     ) == {0: []}
 
 
+def test_added_release_suggests_only_unambiguous_episode_files(core, media, season):
+    config, db, _, service = core
+    service.create_from_metadata(CreateTask(media_id="42", kind="tv", season=1), media, season, 1)
+    identity = seed_release(config, db)
+    with TestClient(create_app(config)) as client:
+        login(client)
+        ctx = client.app.state.ctx
+        original = ctx.engine
+        ctx.engine = SimpleNamespace(
+            inspect=lambda _: SimpleNamespace(
+                files=files(
+                    "Show.S01E01.mkv",
+                    "Show.S01E01.ru.srt",
+                    "1080p/Show.S01E02.mkv",
+                    "720p/Show.S01E02.mkv",
+                    "Show.S02E03.mkv",
+                )
+            )
+        )
+        try:
+            response = client.post("/api/v1/tasks/1/seasons/1/mapping/releases", json={"candidate_id": 1})
+            assert response.status_code == 200, response.text
+            assert response.json()["release_id"] == identity
+            assert response.json()["suggestions"] == [{"subtask_id": 1, "number": 1, "video_index": 0}]
+        finally:
+            ctx.engine = original
+
+
 def seed_release(config, db):
     with db.session() as session:
         release = Release(

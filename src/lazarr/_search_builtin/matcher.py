@@ -114,7 +114,10 @@ def episode_numbers(path, aliases=(), season_hint=None):
     if match:
         return int(match[1]), {int(match[2])}, False
     parent = re.search(r"\b(?:season|сезон|tv|тв|s)[ ._-]*(\d{1,3})\b", str(PurePosixPath(path).parent), re.I)
-    cleaned = re.sub(r"\[[^]]*\]|\([^)]*\)", " ", name)
+    # Anime releases also put the episode itself in brackets: "Title [09][Group]".
+    # Keep short numeric tokens so normal ambiguity and quality-number checks apply.
+    cleaned = re.sub(r"\[\s*(\d{1,3})\s*\]", r" \1 ", name)
+    cleaned = re.sub(r"\[[^]]*\]|\([^)]*\)", " ", cleaned)
     # Sidecars append group tags and roles after the same episode stem.
     # Remove only known subtitle roles, leaving arbitrary numbered tails ambiguous.
     if PurePosixPath(path).suffix.lower() in SUBTITLE:

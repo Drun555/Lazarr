@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 
 from lazarr.search_runtime import engine_call, pinned
+from lazarr.matcher import Matcher
 from lazarr.specials import catalog_for, placement, refresh_catalog
 from typing import Literal
 
@@ -25,7 +26,7 @@ from lazarr.models import (
     SubtaskAsset,
     Task,
 )
-from lazarr.sdk import DownloadSource, TorrentFile
+from lazarr.sdk import Candidate, DownloadSource, TorrentFile
 from lazarr.release_files import mapping_catalog, remap_binding, file_identity
 from lazarr.security import audit
 
@@ -240,6 +241,7 @@ def register(app, context, authenticated, permission):
         }
 
     @app.post("/api/v1/tasks/{task_id}/seasons/{season_number}/mapping/releases")
+    @pinned
     async def add_release(
         task_id: int,
         season_number: int,
@@ -261,12 +263,37 @@ def register(app, context, authenticated, permission):
                 if not decision or decision.subtask_id not in {sub.id for sub, _ in rows}:
                     raise ValueError("Раздача не принадлежит сезону")
                 release = db.get(Release, decision.release_id)
-            await inspect(ctx, release)
             release_id = release.id
         else:
             release_id = await ctx.worker.add_manual_task_candidate(
                 task_id, payload.url, season_number, return_release=True
             )
+        with ctx.db.session() as db:
+            release = db.get(Release, release_id)
+            _, _, rows = scope(db, task_id, season_number)
+            requests = [ctx.service.request_for(db, sub) for sub, _ in rows]
+            numbers = {sub.id: episode.number for sub, episode in rows}
+            candidate = Candidate.model_validate(
+                {
+                    "provider": release.provider,
+                    "id": release.external_id,
+                    "url": "",
+                    **release.data,
+                }
+            )
+        metadata = await inspect(ctx, release)
+        report = await asyncio.to_thread(
+            Matcher().evaluate, candidate, requests, metadata.files, release.revision
+        )
+        suggestions = [
+            {
+                "subtask_id": item.binding.subtask_id,
+                "number": numbers[item.binding.subtask_id],
+                "video_index": item.binding.video_index,
+            }
+            for item in report.evaluations
+            if item.binding
+        ]
         with ctx.db.session() as db:
             key = releases_key(task, season_number)
             entry = db.get(ConfigEntry, key)
@@ -284,7 +311,7 @@ def register(app, context, authenticated, permission):
             else:
                 db.add(ConfigEntry(key=key, value=value))
             audit(db, user.id, "season_mapping.release", str(task_id), {"season": season_number, **value})
-        return {"ok": True, "release_id": release_id}
+        return {"ok": True, "release_id": release_id, "suggestions": suggestions}
 
     @app.post("/api/v1/tasks/{task_id}/seasons/{season_number}/mapping/releases/{release_id}/report")
     @pinned

@@ -339,6 +339,29 @@ document.addEventListener('click',async event=>{
     catch(exc){draft.busy=false;if(mappingEditorActive(draft)){renderSeasonMapping();$('#mapping-feedback').textContent=exc.message;}}
   }
 });
+function mappingAutofill(draft,releaseId,suggestions){
+  const release=draft.data.releases.find(release=>release.id===releaseId);
+  if(!release)return;
+  for(const suggestion of suggestions){
+    const row=draft.rows.find(row=>row.subtask_id===suggestion.subtask_id&&row.number===suggestion.number);
+    const video=release.files.find(file=>file.index===suggestion.video_index&&file.kind==='video'&&!file.legacy);
+    if(!row||!video||row.video_index!==null||row.track_indices.length)continue;
+    if(suggestions.filter(other=>other.video_index===video.index).length!==1)continue;
+    if(draft.rows.some(other=>other.release_id===releaseId&&other.video_index===video.index))continue;
+    row.release_id=releaseId;row.video_index=video.index;
+  }
+  if(!draft.smart)return;
+  for(const row of draft.rows.filter(row=>row.release_id===releaseId&&row.video_index!==null)){
+    const video=release.files.find(file=>file.index===row.video_index);
+    for(const kind of ['audio','subtitle']){
+      if(row.track_indices.some(index=>release.files.some(file=>file.index===index&&file.kind===kind)))continue;
+      const related=release.files.filter(file=>file.kind===kind&&!file.legacy&&video?.related?.includes(file.index));
+      for(const file of related){
+        if(!draft.rows.some(other=>other.release_id===releaseId&&other.track_indices.includes(file.index)))row.track_indices.push(file.index);
+      }
+    }
+  }
+}
 async function mappingAddRelease(payload){
   const draft=seasonMapping;if(!draft||draft.busy)return;
   draft.busy=true;draft.addingRelease=true;renderSeasonMapping();
@@ -361,6 +384,7 @@ async function mappingAddRelease(payload){
     draft.hiddenReleaseIds=draft.hiddenReleaseIds.filter(id=>id!==added);
     const known=new Set(draft.rows.map(row=>row.subtask_id));
     draft.rows=[...draft.rows.map(row=>remapped.get(row.subtask_id)),...mappingRows(updated).filter(row=>!known.has(row.subtask_id)&&!draft.deletedSubtaskIds.includes(row.subtask_id))];draft.data=updated;
+    mappingAutofill(draft,added,result.suggestions||[]);
     draft.busy=false;draft.addingRelease=false;draft.releaseUrl='';
     if(mappingEditorActive(draft))renderSeasonMapping();toast('Файлы раздачи готовы для сопоставления');
   }catch(exc){draft.busy=false;draft.addingRelease=false;if(mappingEditorActive(draft)){renderSeasonMapping();$('#mapping-feedback').textContent=exc.message;}}

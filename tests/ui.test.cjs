@@ -769,7 +769,7 @@ test('existing release picker adds zero-match releases and removal clears all as
     w.fetch=async(url,options={})=>{
       if(!url.includes('/mapping'))return original(url,options);
       const payload=options.body?JSON.parse(options.body):null;calls.push({url,method:options.method,payload});
-      if(url.endsWith('/releases')){mapping.releases=[{id:9,title:'Show S02',revision:'r1',files:[{index:0,path:'Zero.mkv',kind:'video',related:[1]},{index:1,path:'Zero.flac',kind:'audio',related:[]}]}];return {ok:true,status:200,json:async()=>({release_id:9})};}
+      if(url.endsWith('/releases')){mapping.releases=[{id:9,title:'Show S02',revision:'r1',files:[{index:0,path:'Zero.mkv',kind:'video',related:[1]},{index:1,path:'Zero.flac',kind:'audio',related:[]}]}];return {ok:true,status:200,json:async()=>({release_id:9,suggestions:[{subtask_id:2,number:1,video_index:0}]})};}
       return {ok:true,status:200,json:async()=>mapping};
     };
     season.querySelector('[data-season-mapping]').click();await settle();await settle();
@@ -781,7 +781,7 @@ test('existing release picker adds zero-match releases and removal clears all as
     d.querySelector('[data-mapping-candidate="91"]').click();await settle();await settle();
     assert.deepEqual(calls.find(call=>call.url.endsWith('/mapping/releases')).payload,{candidate_id:91});
     assert.equal(d.querySelector('#mapping-season-title').value,'Черновик');
-    d.querySelector('[data-mapping-file="9:0"]').click();d.querySelector('[data-mapping-episode="2"]').click();
+    assert.ok(d.querySelector('[data-mapping-row="2"][data-mapping-kind="video"] [data-mapping-file="9:0"]'));
     assert.equal(d.querySelectorAll('.mapping-table [data-mapping-file]').length,2);
     d.querySelector('[data-mapping-remove-release="9"]').click();
     assert.equal(d.querySelector('.mapping-release'),null);
@@ -1571,4 +1571,46 @@ test('offline indexing is a separate live process with progress and no ETA',asyn
     }
     assert.deepEqual(errors,[]);
   }finally{dom.window.close();}
+});
+
+test('adding a release fills empty cells, preserves draft choices and respects Smart mode',async()=>{
+  for(const smart of [true,false]){
+    const {dom,w,document:d,calls,errors}=await setup();
+    try{
+      const file=(index,kind,related=[])=>({index,path:`File${index}.${kind==='video'?'mkv':kind==='audio'?'flac':'srt'}`,size:100,kind,related});
+      const data={episodes:[
+        {subtask_id:1,number:1,title:'Other release',release_id:7,binding:{video_index:0,tracks:[]}},
+        {subtask_id:2,number:2,title:'Manual choice',release_id:9,binding:{video_index:3,tracks:[{file_index:4}]}},
+        ...[3,4,5].map(number=>({subtask_id:number,number,title:`Episode ${number}`,release_id:null,binding:null}))
+      ],releases:[
+        {id:7,title:'Other',files:[file(0,'video')]},
+        {id:9,title:'Added',files:[file(0,'video'),file(3,'video',[4,5,7]),file(4,'audio'),file(5,'subtitle'),file(7,'audio'),file(6,'video',[8]),file(8,'subtitle'),file(10,'video')]}
+      ]};
+      const suggestions=[{subtask_id:1,number:1,video_index:0},{subtask_id:2,number:2,video_index:0},{subtask_id:3,number:3,video_index:6},{subtask_id:4,number:4,video_index:10},{subtask_id:5,number:5,video_index:10}];
+      const original=w.fetch;
+      w.fetch=async(url,options={})=>{
+        if(!url.includes('/mapping'))return original(url,options);
+        calls.push({url,method:options.method,payload:options.body?JSON.parse(options.body):null});
+        return {ok:true,status:200,json:async()=>url.endsWith('/releases')?{release_id:9,suggestions}:data};
+      };
+      await w.testSeasonMappingDialog(1,1);
+      if(!smart){d.querySelector('#mapping-smart').checked=false;d.querySelector('#mapping-smart').dispatchEvent(new w.Event('change',{bubbles:true}));}
+      input(w,d.querySelector('[data-mapping-title="2"]'),'Draft title');
+      w.prompt=()=> 'https://nyaa.si/view/9';
+      d.querySelector('#mapping-toggle-release').click();await settle();await settle();
+      const cell=(row,kind,key)=>d.querySelector(`[data-mapping-row="${row}"][data-mapping-kind="${kind}"] [data-mapping-file="${key}"]`);
+      assert.ok(cell(1,'video','7:0'));
+      assert.ok(cell(2,'video','9:3'));
+      assert.ok(cell(2,'audio','9:4'));
+      assert.equal(cell(2,'audio','9:7'),null);
+      assert.equal(Boolean(cell(2,'subtitle','9:5')),smart);
+      assert.ok(cell(3,'video','9:6'));
+      assert.equal(Boolean(cell(3,'subtitle','9:8')),smart);
+      assert.equal(d.querySelector('[data-mapping-row="4"] [data-mapping-file]'),null);
+      assert.equal(d.querySelector('[data-mapping-row="5"] [data-mapping-file]'),null);
+      assert.equal(d.querySelector('[data-mapping-title="2"]').value,'Draft title');
+      assert.equal(calls.some(call=>call.method==='PUT'),false);
+      assert.deepEqual(errors,[]);
+    }finally{dom.window.close();}
+  }
 });
