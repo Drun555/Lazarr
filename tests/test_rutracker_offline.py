@@ -103,6 +103,12 @@ async def test_dump_search_inspect_and_magnet_without_auth(core, media, catalog,
         source = await provider.resolve_download(detailed, offline=True)
         assert source.torrent is None
         assert parse_qs(urlparse(source.magnet).query)["xt"] == [f"urn:btih:{42:040x}"]
+        assert parse_qs(urlparse(source.magnet).query)["tr"] == [
+            "http://bt.t-ru.org/ann?magnet",
+            "http://bt2.t-ru.org/ann?magnet",
+            "http://bt3.t-ru.org/ann?magnet",
+            "http://bt4.t-ru.org/ann?magnet",
+        ]
 
 
 async def test_unicode_search_query_escaping_and_pagination(core, media, catalog, monkeypatch):

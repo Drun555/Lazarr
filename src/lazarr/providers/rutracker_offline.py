@@ -30,6 +30,7 @@ from lazarr.task_progress import registered_task, task_directory
 log = logging.getLogger(__name__)
 INDEX_VERSION = 3
 PAGE_SIZE = 100
+MAGNET_TRACKERS = tuple(f"http://bt{suffix}.t-ru.org/ann?magnet" for suffix in ("", "2", "3", "4"))
 _cancelled = ContextVar("rutracker_index_cancelled", default=None)
 _index_task = ContextVar("rutracker_index_task", default=None)
 # Include disc images and uncommon video containers too: normal search stages
@@ -504,7 +505,11 @@ class Catalog:
             revision=row["infohash"],
             size=row["size"],
             offline=True,
-            magnet="magnet:?" + urlencode({"xt": "urn:btih:" + row["infohash"], "dn": row["title"]}),
+            magnet="magnet:?"
+            + urlencode(
+                {"xt": "urn:btih:" + row["infohash"], "dn": row["title"], "tr": MAGNET_TRACKERS},
+                doseq=True,
+            ),
             evidence=[Evidence(field="category", value=row["category"], source="structured")]
             if row["category"]
             else [],

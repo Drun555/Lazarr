@@ -23,6 +23,7 @@ DHT_BOOTSTRAP_NODES = (
 DOWNLOAD_CONNECTIONS = 60
 SEED_CONNECTIONS = 20
 TORRENT_UPLOAD_SLOTS = 2
+METADATA_TIMEOUT = 120
 
 
 @dataclass
@@ -184,6 +185,32 @@ class LibtorrentEngine:
             raise ValueError("Torrent contains duplicate file paths")
         return result
 
+    def _metadata_session_params(self):
+        lt = self.lt
+        params = lt.session_params()
+        if not self.local_only:
+            try:
+                routing = self.session.save_state(lt.save_state_flags_t.save_dht_state).get(b"dht state", {})
+                path = self.root / "session.state"
+                if not (routing.get(b"nodes") or routing.get(b"nodes6")) and path.exists():
+                    routing = lt.bdecode(path.read_bytes()).get(b"dht state", {})
+                # Bootstrap from known nodes, but give the separate session its own node ID.
+                state = {b"dht state": {key: routing[key] for key in (b"nodes", b"nodes6") if key in routing}}
+                params = lt.read_session_params(lt.bencode(state), lt.save_state_flags_t.save_dht_state)
+            except Exception:
+                log.warning("Cannot reuse DHT nodes for torrent metadata; bootstrapping a new table")
+        params.settings = {
+            "listen_interfaces": "127.0.0.1:0" if self.local_only else "0.0.0.0:0",
+            "enable_upnp": False,
+            "enable_natpmp": False,
+            "enable_lsd": not self.local_only,
+            "enable_dht": not self.local_only,
+            "dht_bootstrap_nodes": "" if self.local_only else DHT_BOOTSTRAP_NODES,
+            "announce_to_all_tiers": True,
+            "announce_to_all_trackers": True,
+        }
+        return params
+
     def inspect(self, source):
         lt = self.lt
         if source.torrent:
@@ -195,14 +222,7 @@ class LibtorrentEngine:
             raise ValueError("Expected torrent bytes or magnet URI")
         # A separate session fetches metadata only; it cannot stall ongoing downloads.
         with tempfile.TemporaryDirectory(prefix="lazarr-metadata-") as directory:
-            session = lt.session(
-                {
-                    "listen_interfaces": "0.0.0.0:0",
-                    "enable_upnp": False,
-                    "enable_natpmp": False,
-                    "dht_bootstrap_nodes": DHT_BOOTSTRAP_NODES,
-                }
-            )
+            session = lt.session(self._metadata_session_params())
             params = lt.parse_magnet_uri(source.magnet)
             params.save_path = directory
             params.flags &= ~lt.torrent_flags.auto_managed
@@ -210,13 +230,18 @@ class LibtorrentEngine:
             params.flags |= lt.torrent_flags.upload_mode | lt.torrent_flags.default_dont_download
             handle = session.add_torrent(params)
             try:
-                deadline = time.monotonic() + 40
+                deadline = time.monotonic() + METADATA_TIMEOUT
                 while not handle.has_metadata():
                     if time.monotonic() > deadline:
-                        raise TimeoutError("Torrent metadata unavailable; retry later")
+                        raise TimeoutError(
+                            f"Torrent metadata unavailable after {METADATA_TIMEOUT}s; retry later"
+                        )
                     time.sleep(0.1)
                 ti = handle.torrent_file()
-                torrent = lt.bencode(lt.create_torrent(ti).generate())
+                creator = lt.create_torrent(ti)
+                for tracker in handle.trackers():
+                    creator.add_tracker(tracker["url"], tracker["tier"])
+                torrent = lt.bencode(creator.generate())
                 return TorrentMetadata(self._identity(ti), self._files(ti), torrent)
             finally:
                 session.remove_torrent(handle)

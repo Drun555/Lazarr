@@ -617,7 +617,7 @@ class Worker:
                 task.update(running=False, state=state, message=self.progress.value["message"])
 
     def previous_candidates(self, ids, provider_ids):
-        """Refresh actual completed selections from these tasks and seasons."""
+        """Refresh online topics of completed selections, including offline discoveries."""
         with self.db.session() as db:
             scopes = list(
                 db.execute(
@@ -652,6 +652,8 @@ class Worker:
                         "evidence": [],
                         "external_ids": {},
                         "file_hints": [],
+                        "magnet": None,
+                        "download_url": None,
                         "offline": False,
                     }
                 )
@@ -771,26 +773,6 @@ class Worker:
                 provider="",
             )
             seen = set()
-            local_candidates, local_errors = await self.offline_candidates(
-                requests, provider_ids, year, claimed, acquire
-            )
-            errors.extend(local_errors)
-            for candidate in local_candidates:
-                if acquire and (set(claimed) <= preferred.keys() or not self.unresolved(claimed)):
-                    break
-                provider_name = self.plugins.classes[candidate.provider].manifest.name
-                self.progress.value["provider"] = provider_name
-                await inspect_candidate(
-                    candidate, provider_state[candidate.provider], provider_name, offline=True
-                )
-            if local_candidates:
-                complete = set(claimed) <= preferred.keys()
-                self.progress.record(
-                    "offline_done",
-                    "Оффлайн: все искомые серии и языки найдены"
-                    if complete
-                    else "Оффлайн-проход завершён; продолжаем поиск онлайн",
-                )
             familiar = sorted(
                 self.previous_candidates(claimed, provider_ids), key=lambda c: candidate_rank(c, requests)
             )
@@ -817,6 +799,28 @@ class Worker:
                 await inspect_candidate(candidate, participation, provider_name)
                 if participation["state"] != "cooldown":
                     participation.update(state="completed", reason="Ранее выбранная тема проверена")
+            local_candidates, local_errors = [], []
+            if not acquire or (not set(claimed) <= preferred.keys() and self.unresolved(claimed)):
+                local_candidates, local_errors = await self.offline_candidates(
+                    requests, provider_ids, year, claimed, acquire
+                )
+            errors.extend(local_errors)
+            for candidate in local_candidates:
+                if acquire and (set(claimed) <= preferred.keys() or not self.unresolved(claimed)):
+                    break
+                provider_name = self.plugins.classes[candidate.provider].manifest.name
+                self.progress.value["provider"] = provider_name
+                await inspect_candidate(
+                    candidate, provider_state[candidate.provider], provider_name, offline=True
+                )
+            if local_candidates:
+                complete = set(claimed) <= preferred.keys()
+                self.progress.record(
+                    "offline_done",
+                    "Оффлайн: все искомые серии и языки найдены"
+                    if complete
+                    else "Оффлайн-проход завершён; продолжаем поиск онлайн",
+                )
             discovery_providers = [] if acquire and set(claimed) <= preferred.keys() else provider_ids
             inspection_queue = []
             for provider_id in discovery_providers:

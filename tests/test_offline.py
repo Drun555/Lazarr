@@ -225,6 +225,47 @@ async def test_partial_offline_coverage_keeps_found_episode_and_online_refreshes
     assert sorted(b.subtask_id for plan in env.engine.plans.values() for b in plan.bindings) == [1, 2]
 
 
+@pytest.mark.parametrize("updated", [True, False])
+async def test_selected_offline_topic_is_refreshed_online_before_catalogs(
+    core, media, season, offline_setup, updated
+):
+    env = offline_setup
+    create(core, media, season, [1, 2])
+    first = {"id": "shared", "paths": ["Show.S01E01.1080p.mkv"]}
+    env.write([first])
+    await env.worker._run_group([1])
+    with core[1].session() as session:
+        release = session.scalar(select(Release))
+        assert release.data["offline"] is True
+        saved_url = release.data["url"]
+        release.data = {**release.data, "magnet": "magnet:?old", "download_url": "https://old.invalid"}
+        link = session.scalar(select(SubtaskAsset))
+        link.current, link.pending = True, False
+        session.get(Subtask, 1).status = "done"
+        old_download = session.scalar(select(Download))
+        old_hash, old_plan = old_download.infohash, old_download.plan
+
+    remembered = env.worker.previous_candidates([2], ["demo"])
+    assert len(remembered) == 1
+    assert remembered[0].id == "shared" and remembered[0].url == saved_url
+    assert not remembered[0].offline
+    assert remembered[0].magnet is None and remembered[0].download_url is None
+    if not updated:
+        env.provider.online = [first]
+    # Even a matching offline alternative must wait for the selected online topic.
+    env.write([first, {"id": "alternative", "paths": ["Show.S01E02.1080p.mkv"]}])
+    env.events.clear()
+    env.worker.progress.begin()
+    await env.worker._run_group([2])
+    assert env.events[:2] == [("inspect", False, "shared"), ("resolve", False, "shared")]
+    assert any(e[0] == "status" for e in env.events) == (not updated)
+    assert not any(e[0] == "search" and not e[1] for e in env.events)
+    with core[1].session() as session:
+        assert session.get(Subtask, 2).status == "starting"
+        assert session.scalar(select(Download).where(Download.infohash == old_hash)).plan == old_plan
+    assert len(env.engine.plans) == 2
+
+
 @pytest.mark.parametrize("year,eligible", [(2024, True), (2025, True), (2026, False), (None, False)])
 async def test_season_episode_year_controls_offline_eligibility(
     core, media, season, offline_setup, year, eligible
@@ -365,7 +406,9 @@ async def test_offline_pass_precedes_other_online_providers(core, media, season,
     assert env.engine.plans and all(e[1] for e in env.events)
 
 
-async def test_offline_pass_precedes_refresh_of_completed_topics(core, media, season, offline_setup):
+async def test_online_cooldown_keeps_offline_available_for_previously_selected_topics(
+    core, media, season, offline_setup
+):
     env = offline_setup
     create(core, media, season, [1, 2])
     env.write([{"id": "shared", "paths": ["Show.S01E01.1080p.mkv"]}])
@@ -374,6 +417,7 @@ async def test_offline_pass_precedes_refresh_of_completed_topics(core, media, se
         link = session.scalar(select(SubtaskAsset))
         link.current, link.pending = True, False
         session.get(Subtask, 1).status = "done"
+        session.get(ProviderConfig, "demo").retry_at = time.time() + 3600
     env.write()
     env.events.clear()
     await env.worker._run_group([2])
