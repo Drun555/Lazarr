@@ -499,6 +499,16 @@ class Worker:
                         for group in search_query_groups(query.media, season=query.season, year=year)
                         for text in group
                     ]
+                    # Local discovery is exhaustive: older saved metadata may have
+                    # aliases but no typed English/romanized search titles. A hit
+                    # for the localized title must not hide those other releases.
+                    for alias in [query.media.original_title, *query.media.aliases]:
+                        alias = alias.strip()
+                        if alias:
+                            if year:
+                                variants.append(f"{alias} {year}")
+                            variants.append(alias)
+                    variants = list(dict.fromkeys(variants))
                     for text in variants:
                         query.text, cursor, cursors = text, None, {None}
                         while True:

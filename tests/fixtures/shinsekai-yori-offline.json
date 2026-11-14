@@ -1,0 +1,772 @@
+{
+  "media": {
+    "id": "53052",
+    "kind": "tv",
+    "title": "Из Нового Света",
+    "original_title": "新世界より",
+    "year": 2012,
+    "aliases": [
+      "新世界より",
+      "Shin Sekai Yori: Do Novo Mundo",
+      "来自新世界",
+      "Shinsekai Yori",
+      "Shin Sekai Yori",
+      "من العالم الجديد"
+    ],
+    "seasons": [
+      {
+        "number": 1,
+        "title": "Сезон 1",
+        "episode_count": 25,
+        "air_date": "2012-09-29",
+        "id": "56214",
+        "poster": "https://image.tmdb.org/t/p/w342/6gKFkvEqbNpX5pOzMliOFnFLNBg.jpg",
+        "overview": "",
+        "community_rating": 6.1
+      }
+    ]
+  },
+  "candidate": {
+    "provider": "rutracker",
+    "id": "4782560",
+    "url": "https://rutracker.org/forum/viewtopic.php?t=4782560",
+    "title": "Из нового мира / Shinsekai Yori / From the New World [TV] [25 из 25] [RUS(ext), JAP+Sub] [2012, приключения, фантастика, мистика, BDRip] [1080p]",
+    "revision": "20dfeeeb3c16292e6d9e4c6e56316513aefd75fe",
+    "evidence": [
+      {
+        "field": "category",
+        "value": "Кино, Видео и ТВ - Аниме - Аниме (HD Video)",
+        "source": "structured",
+        "excerpt": "",
+        "file_path": null,
+        "scope": "release",
+        "complete": false,
+        "delivery": "unspecified"
+      },
+      {
+        "field": "audio_languages",
+        "value": [
+          "ja"
+        ],
+        "source": "description",
+        "excerpt": "Language                                 : Japanese",
+        "file_path": null,
+        "scope": "release",
+        "complete": false,
+        "delivery": "embedded"
+      },
+      {
+        "field": "audio_languages",
+        "value": [
+          "ja"
+        ],
+        "source": "description",
+        "excerpt": "Аудио JAP: FLAC, 48000Hz, ~1400 Kbps, 2ch, 24 bits",
+        "file_path": null,
+        "scope": "all_video_files",
+        "complete": false,
+        "delivery": "embedded"
+      },
+      {
+        "field": "audio_languages",
+        "value": [
+          "ru"
+        ],
+        "source": "description",
+        "excerpt": "Аудио RUS: AAC, 48000Hz, ~200 Kbps, 2ch (внешними файлами)",
+        "file_path": null,
+        "scope": "all_video_files",
+        "complete": false,
+        "delivery": "external"
+      }
+    ],
+    "offline": true
+  },
+  "infohash": "20dfeeeb3c16292e6d9e4c6e56316513aefd75fe",
+  "files": [
+    {
+      "index": 0,
+      "path": "Shinsekai Yori [BD] [1080p]/[=^_^=] Shinsekai Yori ep.01 [BD1080 x264 FLAC].mkv",
+      "size": 2382164784,
+      "offset": 0
+    },
+    {
+      "index": 1,
+      "path": "Shinsekai Yori [BD] [1080p]/[=^_^=] Shinsekai Yori ep.02 [BD1080 x264 FLAC].mkv",
+      "size": 2586343524,
+      "offset": 2382164784
+    },
+    {
+      "index": 2,
+      "path": "Shinsekai Yori [BD] [1080p]/[=^_^=] Shinsekai Yori ep.03 [BD1080 x264 FLAC].mkv",
+      "size": 2170536346,
+      "offset": 4968508308
+    },
+    {
+      "index": 3,
+      "path": "Shinsekai Yori [BD] [1080p]/[=^_^=] Shinsekai Yori ep.04 [BD1080 x264 FLAC].mkv",
+      "size": 2460700914,
+      "offset": 7139044654
+    },
+    {
+      "index": 4,
+      "path": "Shinsekai Yori [BD] [1080p]/[=^_^=] Shinsekai Yori ep.05 [BD1080 x264 FLAC].mkv",
+      "size": 2567793807,
+      "offset": 9599745568
+    },
+    {
+      "index": 5,
+      "path": "Shinsekai Yori [BD] [1080p]/[=^_^=] Shinsekai Yori ep.06 [BD1080 x264 FLAC].mkv",
+      "size": 2184993394,
+      "offset": 12167539375
+    },
+    {
+      "index": 6,
+      "path": "Shinsekai Yori [BD] [1080p]/[=^_^=] Shinsekai Yori ep.07 [BD1080 x264 FLAC].mkv",
+      "size": 2428823510,
+      "offset": 14352532769
+    },
+    {
+      "index": 7,
+      "path": "Shinsekai Yori [BD] [1080p]/[=^_^=] Shinsekai Yori ep.08 [BD1080 x264 FLAC].mkv",
+      "size": 2042865497,
+      "offset": 16781356279
+    },
+    {
+      "index": 8,
+      "path": "Shinsekai Yori [BD] [1080p]/[=^_^=] Shinsekai Yori ep.09 [BD1080 x264 FLAC].mkv",
+      "size": 2437366808,
+      "offset": 18824221776
+    },
+    {
+      "index": 9,
+      "path": "Shinsekai Yori [BD] [1080p]/[=^_^=] Shinsekai Yori ep.10 [BD1080 x264 FLAC].mkv",
+      "size": 3060925025,
+      "offset": 21261588584
+    },
+    {
+      "index": 10,
+      "path": "Shinsekai Yori [BD] [1080p]/[=^_^=] Shinsekai Yori ep.11 [BD1080 x264 FLAC].mkv",
+      "size": 2431332568,
+      "offset": 24322513609
+    },
+    {
+      "index": 11,
+      "path": "Shinsekai Yori [BD] [1080p]/[=^_^=] Shinsekai Yori ep.12 [BD1080 x264 FLAC].mkv",
+      "size": 3350208948,
+      "offset": 26753846177
+    },
+    {
+      "index": 12,
+      "path": "Shinsekai Yori [BD] [1080p]/[=^_^=] Shinsekai Yori ep.13 [BD1080 x264 FLAC].mkv",
+      "size": 2224711090,
+      "offset": 30104055125
+    },
+    {
+      "index": 13,
+      "path": "Shinsekai Yori [BD] [1080p]/[=^_^=] Shinsekai Yori ep.14 [BD1080 x264 FLAC].mkv",
+      "size": 2465098127,
+      "offset": 32328766215
+    },
+    {
+      "index": 14,
+      "path": "Shinsekai Yori [BD] [1080p]/[=^_^=] Shinsekai Yori ep.15 [BD1080 x264 FLAC].mkv",
+      "size": 2531378749,
+      "offset": 34793864342
+    },
+    {
+      "index": 15,
+      "path": "Shinsekai Yori [BD] [1080p]/[=^_^=] Shinsekai Yori ep.16 [BD1080 x264 FLAC].mkv",
+      "size": 2569800384,
+      "offset": 37325243091
+    },
+    {
+      "index": 16,
+      "path": "Shinsekai Yori [BD] [1080p]/[=^_^=] Shinsekai Yori ep.17 [BD1080 x264 FLAC].mkv",
+      "size": 2327630381,
+      "offset": 39895043475
+    },
+    {
+      "index": 17,
+      "path": "Shinsekai Yori [BD] [1080p]/[=^_^=] Shinsekai Yori ep.18 [BD1080 x264 FLAC].mkv",
+      "size": 3011380246,
+      "offset": 42222673856
+    },
+    {
+      "index": 18,
+      "path": "Shinsekai Yori [BD] [1080p]/[=^_^=] Shinsekai Yori ep.19 [BD1080 x264 FLAC].mkv",
+      "size": 3391248765,
+      "offset": 45234054102
+    },
+    {
+      "index": 19,
+      "path": "Shinsekai Yori [BD] [1080p]/[=^_^=] Shinsekai Yori ep.20 [BD1080 x264 FLAC].mkv",
+      "size": 2685986431,
+      "offset": 48625302867
+    },
+    {
+      "index": 20,
+      "path": "Shinsekai Yori [BD] [1080p]/[=^_^=] Shinsekai Yori ep.21 [BD1080 x264 FLAC].mkv",
+      "size": 2676291381,
+      "offset": 51311289298
+    },
+    {
+      "index": 21,
+      "path": "Shinsekai Yori [BD] [1080p]/[=^_^=] Shinsekai Yori ep.22 [BD1080 x264 FLAC].mkv",
+      "size": 3180388829,
+      "offset": 53987580679
+    },
+    {
+      "index": 22,
+      "path": "Shinsekai Yori [BD] [1080p]/[=^_^=] Shinsekai Yori ep.23 [BD1080 x264 FLAC].mkv",
+      "size": 3141732908,
+      "offset": 57167969508
+    },
+    {
+      "index": 23,
+      "path": "Shinsekai Yori [BD] [1080p]/[=^_^=] Shinsekai Yori ep.24 [BD1080 x264 FLAC].mkv",
+      "size": 2634917317,
+      "offset": 60309702416
+    },
+    {
+      "index": 24,
+      "path": "Shinsekai Yori [BD] [1080p]/[=^_^=] Shinsekai Yori ep.25 [BD1080 x264 FLAC].mkv",
+      "size": 2394178426,
+      "offset": 62944619733
+    },
+    {
+      "index": 25,
+      "path": "Shinsekai Yori [BD] [1080p]/Bonus/BD menu/BD menu Vol.1.png",
+      "size": 2431341,
+      "offset": 65338798159
+    },
+    {
+      "index": 26,
+      "path": "Shinsekai Yori [BD] [1080p]/Bonus/BD menu/BD menu Vol.2.png",
+      "size": 2623994,
+      "offset": 65341229500
+    },
+    {
+      "index": 27,
+      "path": "Shinsekai Yori [BD] [1080p]/Bonus/BD menu/BD menu Vol.3.png",
+      "size": 2968200,
+      "offset": 65343853494
+    },
+    {
+      "index": 28,
+      "path": "Shinsekai Yori [BD] [1080p]/Bonus/BD menu/BD menu Vol.4.png",
+      "size": 2480960,
+      "offset": 65346821694
+    },
+    {
+      "index": 29,
+      "path": "Shinsekai Yori [BD] [1080p]/Bonus/BD menu/BD menu Vol.5.png",
+      "size": 2432385,
+      "offset": 65349302654
+    },
+    {
+      "index": 30,
+      "path": "Shinsekai Yori [BD] [1080p]/Bonus/BD menu/BD menu Vol.6.png",
+      "size": 2757041,
+      "offset": 65351735039
+    },
+    {
+      "index": 31,
+      "path": "Shinsekai Yori [BD] [1080p]/Bonus/BD menu/BD menu Vol.7.png",
+      "size": 2214317,
+      "offset": 65354492080
+    },
+    {
+      "index": 32,
+      "path": "Shinsekai Yori [BD] [1080p]/Bonus/BD menu/BD menu Vol.8.png",
+      "size": 2322899,
+      "offset": 65356706397
+    },
+    {
+      "index": 33,
+      "path": "Shinsekai Yori [BD] [1080p]/Bonus/BD menu/BD menu Vol.9.png",
+      "size": 2632865,
+      "offset": 65359029296
+    },
+    {
+      "index": 34,
+      "path": "Shinsekai Yori [BD] [1080p]/Bonus/NC/[=^_^=] Shinsekai Yori (Creditless ED.1) [BD1080 x264 FLAC].mkv",
+      "size": 123208040,
+      "offset": 65361662161
+    },
+    {
+      "index": 35,
+      "path": "Shinsekai Yori [BD] [1080p]/Bonus/NC/[=^_^=] Shinsekai Yori (Creditless ED.2) [BD1080 x264 FLAC].mkv",
+      "size": 190181382,
+      "offset": 65484870201
+    },
+    {
+      "index": 36,
+      "path": "Shinsekai Yori [BD] [1080p]/Bonus/PV/[=^_^=] Shinsekai Yori pv.1 [BD1080 x264 FLAC].mkv",
+      "size": 124163899,
+      "offset": 65675051583
+    },
+    {
+      "index": 37,
+      "path": "Shinsekai Yori [BD] [1080p]/Bonus/PV/[=^_^=] Shinsekai Yori pv.2 [BD1080 x264 FLAC].mkv",
+      "size": 278774381,
+      "offset": 65799215482
+    },
+    {
+      "index": 38,
+      "path": "Shinsekai Yori [BD] [1080p]/Bonus/PV/[=^_^=] Shinsekai Yori pv.3 [BD1080 x264 FLAC].mkv",
+      "size": 284156666,
+      "offset": 66077989863
+    },
+    {
+      "index": 39,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Sound [Zendos & Eladiel]/[=^_^=] Shinsekai Yori ep.01 [BD1080 x264 FLAC].mka",
+      "size": 37800175,
+      "offset": 66362146529
+    },
+    {
+      "index": 40,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Sound [Zendos & Eladiel]/[=^_^=] Shinsekai Yori ep.02 [BD1080 x264 FLAC].mka",
+      "size": 32331036,
+      "offset": 66399946704
+    },
+    {
+      "index": 41,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Sound [Zendos & Eladiel]/[=^_^=] Shinsekai Yori ep.03 [BD1080 x264 FLAC].mka",
+      "size": 37813999,
+      "offset": 66432277740
+    },
+    {
+      "index": 42,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Sound [Zendos & Eladiel]/[=^_^=] Shinsekai Yori ep.04 [BD1080 x264 FLAC].mka",
+      "size": 37814237,
+      "offset": 66470091739
+    },
+    {
+      "index": 43,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Sound [Zendos & Eladiel]/[=^_^=] Shinsekai Yori ep.05 [BD1080 x264 FLAC].mka",
+      "size": 37814252,
+      "offset": 66507905976
+    },
+    {
+      "index": 44,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Sound [Zendos & Eladiel]/[=^_^=] Shinsekai Yori ep.06 [BD1080 x264 FLAC].mka",
+      "size": 37396730,
+      "offset": 66545720228
+    },
+    {
+      "index": 45,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Sound [Zendos & Eladiel]/[=^_^=] Shinsekai Yori ep.07 [BD1080 x264 FLAC].mka",
+      "size": 37814582,
+      "offset": 66583116958
+    },
+    {
+      "index": 46,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Sound [Zendos & Eladiel]/[=^_^=] Shinsekai Yori ep.08 [BD1080 x264 FLAC].mka",
+      "size": 37813171,
+      "offset": 66620931540
+    },
+    {
+      "index": 47,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Sound [Zendos & Eladiel]/[=^_^=] Shinsekai Yori ep.09 [BD1080 x264 FLAC].mka",
+      "size": 37813508,
+      "offset": 66658744711
+    },
+    {
+      "index": 48,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Sound [Zendos & Eladiel]/[=^_^=] Shinsekai Yori ep.10 [BD1080 x264 FLAC].mka",
+      "size": 37812820,
+      "offset": 66696558219
+    },
+    {
+      "index": 49,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Sound [Zendos & Eladiel]/[=^_^=] Shinsekai Yori ep.11 [BD1080 x264 FLAC].mka",
+      "size": 32837470,
+      "offset": 66734371039
+    },
+    {
+      "index": 50,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Sound [Zendos & Eladiel]/[=^_^=] Shinsekai Yori ep.12 [BD1080 x264 FLAC].mka",
+      "size": 32837655,
+      "offset": 66767208509
+    },
+    {
+      "index": 51,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Sound [Zendos & Eladiel]/[=^_^=] Shinsekai Yori ep.13 [BD1080 x264 FLAC].mka",
+      "size": 32757820,
+      "offset": 66800046164
+    },
+    {
+      "index": 52,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Sound [Zendos & Eladiel]/[=^_^=] Shinsekai Yori ep.14 [BD1080 x264 FLAC].mka",
+      "size": 37815506,
+      "offset": 66832803984
+    },
+    {
+      "index": 53,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Sound [Zendos & Eladiel]/[=^_^=] Shinsekai Yori ep.15 [BD1080 x264 FLAC].mka",
+      "size": 37814808,
+      "offset": 66870619490
+    },
+    {
+      "index": 54,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Sound [Zendos & Eladiel]/[=^_^=] Shinsekai Yori ep.16 [BD1080 x264 FLAC].mka",
+      "size": 37814462,
+      "offset": 66908434298
+    },
+    {
+      "index": 55,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Sound [Zendos & Eladiel]/[=^_^=] Shinsekai Yori ep.17 [BD1080 x264 FLAC].mka",
+      "size": 37815437,
+      "offset": 66946248760
+    },
+    {
+      "index": 56,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Sound [Zendos & Eladiel]/[=^_^=] Shinsekai Yori ep.18 [BD1080 x264 FLAC].mka",
+      "size": 38274408,
+      "offset": 66984064197
+    },
+    {
+      "index": 57,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Sound [Zendos & Eladiel]/[=^_^=] Shinsekai Yori ep.19 [BD1080 x264 FLAC].mka",
+      "size": 38274364,
+      "offset": 67022338605
+    },
+    {
+      "index": 58,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Sound [Zendos & Eladiel]/[=^_^=] Shinsekai Yori ep.20 [BD1080 x264 FLAC].mka",
+      "size": 38274251,
+      "offset": 67060612969
+    },
+    {
+      "index": 59,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Sound [Zendos & Eladiel]/[=^_^=] Shinsekai Yori ep.21 [BD1080 x264 FLAC].mka",
+      "size": 37814090,
+      "offset": 67098887220
+    },
+    {
+      "index": 60,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Sound [Zendos & Eladiel]/[=^_^=] Shinsekai Yori ep.22 [BD1080 x264 FLAC].mka",
+      "size": 37814997,
+      "offset": 67136701310
+    },
+    {
+      "index": 61,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Sound [Zendos & Eladiel]/[=^_^=] Shinsekai Yori ep.23 [BD1080 x264 FLAC].mka",
+      "size": 37813668,
+      "offset": 67174516307
+    },
+    {
+      "index": 62,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Sound [Zendos & Eladiel]/[=^_^=] Shinsekai Yori ep.24 [BD1080 x264 FLAC].mka",
+      "size": 32356828,
+      "offset": 67212329975
+    },
+    {
+      "index": 63,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Sound [Zendos & Eladiel]/[=^_^=] Shinsekai Yori ep.25 [BD1080 x264 FLAC].mka",
+      "size": 37396165,
+      "offset": 67244686803
+    },
+    {
+      "index": 64,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Subs [Dreamers Team]/[=^_^=] Shinsekai Yori ep.01 [BD1080 x264 FLAC].ass",
+      "size": 48514,
+      "offset": 67282082968
+    },
+    {
+      "index": 65,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Subs [Dreamers Team]/[=^_^=] Shinsekai Yori ep.02 [BD1080 x264 FLAC].ass",
+      "size": 47402,
+      "offset": 67282131482
+    },
+    {
+      "index": 66,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Subs [Dreamers Team]/[=^_^=] Shinsekai Yori ep.03 [BD1080 x264 FLAC].ass",
+      "size": 44301,
+      "offset": 67282178884
+    },
+    {
+      "index": 67,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Subs [Dreamers Team]/[=^_^=] Shinsekai Yori ep.04 [BD1080 x264 FLAC].ass",
+      "size": 50616,
+      "offset": 67282223185
+    },
+    {
+      "index": 68,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Subs [Dreamers Team]/[=^_^=] Shinsekai Yori ep.05 [BD1080 x264 FLAC].ass",
+      "size": 27471,
+      "offset": 67282273801
+    },
+    {
+      "index": 69,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Subs [Dreamers Team]/[=^_^=] Shinsekai Yori ep.06 [BD1080 x264 FLAC].ass",
+      "size": 40331,
+      "offset": 67282301272
+    },
+    {
+      "index": 70,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Subs [Dreamers Team]/[=^_^=] Shinsekai Yori ep.07 [BD1080 x264 FLAC].ass",
+      "size": 41021,
+      "offset": 67282341603
+    },
+    {
+      "index": 71,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Subs [Dreamers Team]/[=^_^=] Shinsekai Yori ep.08 [BD1080 x264 FLAC].ass",
+      "size": 32349,
+      "offset": 67282382624
+    },
+    {
+      "index": 72,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Subs [Dreamers Team]/[=^_^=] Shinsekai Yori ep.09 [BD1080 x264 FLAC].ass",
+      "size": 32801,
+      "offset": 67282414973
+    },
+    {
+      "index": 73,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Subs [Dreamers Team]/[=^_^=] Shinsekai Yori ep.10 [BD1080 x264 FLAC].ass",
+      "size": 28358,
+      "offset": 67282447774
+    },
+    {
+      "index": 74,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Subs [Dreamers Team]/[=^_^=] Shinsekai Yori ep.11 [BD1080 x264 FLAC].ass",
+      "size": 48476,
+      "offset": 67282476132
+    },
+    {
+      "index": 75,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Subs [Dreamers Team]/[=^_^=] Shinsekai Yori ep.12 [BD1080 x264 FLAC].ass",
+      "size": 46513,
+      "offset": 67282524608
+    },
+    {
+      "index": 76,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Subs [Dreamers Team]/[=^_^=] Shinsekai Yori ep.13 [BD1080 x264 FLAC].ass",
+      "size": 36907,
+      "offset": 67282571121
+    },
+    {
+      "index": 77,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Subs [Dreamers Team]/[=^_^=] Shinsekai Yori ep.14 [BD1080 x264 FLAC].ass",
+      "size": 45050,
+      "offset": 67282608028
+    },
+    {
+      "index": 78,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Subs [Dreamers Team]/[=^_^=] Shinsekai Yori ep.15 [BD1080 x264 FLAC].ass",
+      "size": 39330,
+      "offset": 67282653078
+    },
+    {
+      "index": 79,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Subs [Dreamers Team]/[=^_^=] Shinsekai Yori ep.16 [BD1080 x264 FLAC].ass",
+      "size": 37570,
+      "offset": 67282692408
+    },
+    {
+      "index": 80,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Subs [Dreamers Team]/[=^_^=] Shinsekai Yori ep.17 [BD1080 x264 FLAC].ass",
+      "size": 49114,
+      "offset": 67282729978
+    },
+    {
+      "index": 81,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Subs [Dreamers Team]/[=^_^=] Shinsekai Yori ep.18 [BD1080 x264 FLAC].ass",
+      "size": 40052,
+      "offset": 67282779092
+    },
+    {
+      "index": 82,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Subs [Dreamers Team]/[=^_^=] Shinsekai Yori ep.19 [BD1080 x264 FLAC].ass",
+      "size": 39191,
+      "offset": 67282819144
+    },
+    {
+      "index": 83,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Subs [Dreamers Team]/[=^_^=] Shinsekai Yori ep.20 [BD1080 x264 FLAC].ass",
+      "size": 33324,
+      "offset": 67282858335
+    },
+    {
+      "index": 84,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Subs [Dreamers Team]/[=^_^=] Shinsekai Yori ep.21 [BD1080 x264 FLAC].ass",
+      "size": 33996,
+      "offset": 67282891659
+    },
+    {
+      "index": 85,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Subs [Dreamers Team]/[=^_^=] Shinsekai Yori ep.22 [BD1080 x264 FLAC].ass",
+      "size": 52223,
+      "offset": 67282925655
+    },
+    {
+      "index": 86,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Subs [Dreamers Team]/[=^_^=] Shinsekai Yori ep.23 [BD1080 x264 FLAC].ass",
+      "size": 33797,
+      "offset": 67282977878
+    },
+    {
+      "index": 87,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Subs [Dreamers Team]/[=^_^=] Shinsekai Yori ep.24 [BD1080 x264 FLAC].ass",
+      "size": 45435,
+      "offset": 67283011675
+    },
+    {
+      "index": 88,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Subs [Dreamers Team]/[=^_^=] Shinsekai Yori ep.25 [BD1080 x264 FLAC].ass",
+      "size": 42439,
+      "offset": 67283057110
+    },
+    {
+      "index": 89,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Subs [Dreamers Team]/Надписи/[=^_^=] Shinsekai Yori ep.01 [BD1080 x264 FLAC].ass",
+      "size": 7570,
+      "offset": 67283099549
+    },
+    {
+      "index": 90,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Subs [Dreamers Team]/Надписи/[=^_^=] Shinsekai Yori ep.02 [BD1080 x264 FLAC].ass",
+      "size": 9366,
+      "offset": 67283107119
+    },
+    {
+      "index": 91,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Subs [Dreamers Team]/Надписи/[=^_^=] Shinsekai Yori ep.03 [BD1080 x264 FLAC].ass",
+      "size": 6755,
+      "offset": 67283116485
+    },
+    {
+      "index": 92,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Subs [Dreamers Team]/Надписи/[=^_^=] Shinsekai Yori ep.04 [BD1080 x264 FLAC].ass",
+      "size": 6209,
+      "offset": 67283123240
+    },
+    {
+      "index": 93,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Subs [Dreamers Team]/Надписи/[=^_^=] Shinsekai Yori ep.05 [BD1080 x264 FLAC].ass",
+      "size": 7158,
+      "offset": 67283129449
+    },
+    {
+      "index": 94,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Subs [Dreamers Team]/Надписи/[=^_^=] Shinsekai Yori ep.06 [BD1080 x264 FLAC].ass",
+      "size": 5351,
+      "offset": 67283136607
+    },
+    {
+      "index": 95,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Subs [Dreamers Team]/Надписи/[=^_^=] Shinsekai Yori ep.07 [BD1080 x264 FLAC].ass",
+      "size": 5537,
+      "offset": 67283141958
+    },
+    {
+      "index": 96,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Subs [Dreamers Team]/Надписи/[=^_^=] Shinsekai Yori ep.08 [BD1080 x264 FLAC].ass",
+      "size": 5466,
+      "offset": 67283147495
+    },
+    {
+      "index": 97,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Subs [Dreamers Team]/Надписи/[=^_^=] Shinsekai Yori ep.09 [BD1080 x264 FLAC].ass",
+      "size": 6937,
+      "offset": 67283152961
+    },
+    {
+      "index": 98,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Subs [Dreamers Team]/Надписи/[=^_^=] Shinsekai Yori ep.10 [BD1080 x264 FLAC].ass",
+      "size": 5889,
+      "offset": 67283159898
+    },
+    {
+      "index": 99,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Subs [Dreamers Team]/Надписи/[=^_^=] Shinsekai Yori ep.11 [BD1080 x264 FLAC].ass",
+      "size": 6094,
+      "offset": 67283165787
+    },
+    {
+      "index": 100,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Subs [Dreamers Team]/Надписи/[=^_^=] Shinsekai Yori ep.12 [BD1080 x264 FLAC].ass",
+      "size": 6090,
+      "offset": 67283171881
+    },
+    {
+      "index": 101,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Subs [Dreamers Team]/Надписи/[=^_^=] Shinsekai Yori ep.13 [BD1080 x264 FLAC].ass",
+      "size": 5966,
+      "offset": 67283177971
+    },
+    {
+      "index": 102,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Subs [Dreamers Team]/Надписи/[=^_^=] Shinsekai Yori ep.14 [BD1080 x264 FLAC].ass",
+      "size": 5555,
+      "offset": 67283183937
+    },
+    {
+      "index": 103,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Subs [Dreamers Team]/Надписи/[=^_^=] Shinsekai Yori ep.15 [BD1080 x264 FLAC].ass",
+      "size": 5573,
+      "offset": 67283189492
+    },
+    {
+      "index": 104,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Subs [Dreamers Team]/Надписи/[=^_^=] Shinsekai Yori ep.16 [BD1080 x264 FLAC].ass",
+      "size": 9352,
+      "offset": 67283195065
+    },
+    {
+      "index": 105,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Subs [Dreamers Team]/Надписи/[=^_^=] Shinsekai Yori ep.17 [BD1080 x264 FLAC].ass",
+      "size": 6321,
+      "offset": 67283204417
+    },
+    {
+      "index": 106,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Subs [Dreamers Team]/Надписи/[=^_^=] Shinsekai Yori ep.18 [BD1080 x264 FLAC].ass",
+      "size": 4998,
+      "offset": 67283210738
+    },
+    {
+      "index": 107,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Subs [Dreamers Team]/Надписи/[=^_^=] Shinsekai Yori ep.19 [BD1080 x264 FLAC].ass",
+      "size": 5096,
+      "offset": 67283215736
+    },
+    {
+      "index": 108,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Subs [Dreamers Team]/Надписи/[=^_^=] Shinsekai Yori ep.20 [BD1080 x264 FLAC].ass",
+      "size": 4637,
+      "offset": 67283220832
+    },
+    {
+      "index": 109,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Subs [Dreamers Team]/Надписи/[=^_^=] Shinsekai Yori ep.21 [BD1080 x264 FLAC].ass",
+      "size": 4955,
+      "offset": 67283225469
+    },
+    {
+      "index": 110,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Subs [Dreamers Team]/Надписи/[=^_^=] Shinsekai Yori ep.22 [BD1080 x264 FLAC].ass",
+      "size": 6325,
+      "offset": 67283230424
+    },
+    {
+      "index": 111,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Subs [Dreamers Team]/Надписи/[=^_^=] Shinsekai Yori ep.23 [BD1080 x264 FLAC].ass",
+      "size": 4919,
+      "offset": 67283236749
+    },
+    {
+      "index": 112,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Subs [Dreamers Team]/Надписи/[=^_^=] Shinsekai Yori ep.24 [BD1080 x264 FLAC].ass",
+      "size": 5111,
+      "offset": 67283241668
+    },
+    {
+      "index": 113,
+      "path": "Shinsekai Yori [BD] [1080p]/RUS Subs [Dreamers Team]/Надписи/[=^_^=] Shinsekai Yori ep.25 [BD1080 x264 FLAC].ass",
+      "size": 5433,
+      "offset": 67283246779
+    }
+  ]
+}

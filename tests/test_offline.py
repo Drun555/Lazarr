@@ -2,6 +2,7 @@
 
 import json
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
@@ -24,6 +25,74 @@ from lazarr.sdk import DownloadSource, OfflineStatus, ProviderError, ProviderMan
 from lazarr.services import CreateTask
 from lazarr.storage import describe, storage_root
 from test_worker import worker_setup as worker_setup
+
+
+@pytest.fixture
+def shinsekai():
+    from lazarr.sdk import Candidate, MetadataItem, SubtaskRequest, TorrentFile
+
+    data = json.loads((Path(__file__).parent / "fixtures/shinsekai-yori-offline.json").read_text())
+    media = MetadataItem.model_validate(data["media"])
+    requirements = Requirements(
+        audio_languages=["ja"], subtitle_languages=["ru"], min_resolution=1080, max_resolution=2160
+    )
+    return SimpleNamespace(
+        media=media,
+        candidate=Candidate.model_validate(data["candidate"]),
+        files=[TorrentFile.model_validate(file) for file in data["files"]],
+        infohash=data["infohash"],
+        requests=[
+            SubtaskRequest(
+                id=i, media=media, season=1, episode=i, absolute_number=i, requirements=requirements
+            )
+            for i in range(1, 26)
+        ],
+    )
+
+
+async def test_offline_discovers_aliases_missing_typed_search_titles(offline_setup, shinsekai, monkeypatch):
+    env = offline_setup
+    assert not shinsekai.media.english_title and not shinsekai.media.romanized_title
+    searches = []
+
+    async def search(provider, query, cursor=None, *, offline=False):
+        assert offline
+        searches.append(query.text)
+        if "Shinsekai Yori" in query.text:
+            return SearchPage(items=[shinsekai.candidate.model_copy(update={"provider": "demo"})])
+        # A localized-title hit must not stop the alias search.
+        if query.text.startswith("Из Нового Света"):
+            return SearchPage(items=[candidate(provider="demo", title="Из Нового Света 2012 720p")])
+        return SearchPage(items=[])
+
+    monkeypatch.setattr(env.provider, "search", search)
+    env.worker.progress.value["providers"] = env.worker.plugins.search_status()
+    found, errors = await env.worker.offline_candidates(shinsekai.requests, ["demo"], 2012, [], False)
+    assert not errors
+    assert shinsekai.candidate.id in {item.id for item in found}
+    assert "Shinsekai Yori" in searches
+    assert len(searches) == len(set(searches))
+
+
+def test_shinsekai_real_torrent_matches_all_episodes_without_guessing_duplicates(shinsekai):
+    from lazarr.matcher import Matcher
+    from lazarr.sdk import MatchResult
+
+    report = Matcher().evaluate(shinsekai.candidate, shinsekai.requests, shinsekai.files, shinsekai.infohash)
+    assert all(e.result == MatchResult.MATCH for e in report.evaluations)
+    assert len(report.plan.bindings) == 25
+    assert {b.resolution for b in report.plan.bindings} == {1080}
+    assert len({b.video_index for b in report.plan.bindings}) == 25
+    first = report.plan.bindings[0]
+    assert first.video_path.endswith("Shinsekai Yori ep.01 [BD1080 x264 FLAC].mkv")
+    assert any(t.kind == "audio" and t.language == "ja" for t in first.tracks)
+    assert any(t.kind == "subtitle" and t.language == "ru" and not t.forced for t in first.tracks)
+    duplicate = shinsekai.files[first.video_index].model_copy(
+        update={"index": len(shinsekai.files), "path": "Alternate/" + first.video_path}
+    )
+    ambiguous = Matcher().evaluate(shinsekai.candidate, shinsekai.requests[:1], [*shinsekai.files, duplicate])
+    assert ambiguous.evaluations[0].result != MatchResult.MATCH
+    assert ambiguous.plan is None
 
 
 @pytest.fixture
