@@ -7,7 +7,7 @@ from lazarr.models import ConfigEntry
 PREFIX = "search.request."
 
 
-def enqueue(db, task_id=None):
+def enqueue(db, task_id=None, *, manual=False):
     key = PREFIX + (str(task_id) if task_id is not None else "all")
     if task_id is None:
         # Leading-edge debounce: accept the first click immediately and coalesce
@@ -21,10 +21,14 @@ def enqueue(db, task_id=None):
         else:
             db.add(ConfigEntry(key="search.manual", value={"accepted_at": now}))
     row = db.get(ConfigEntry, key)
-    if row is not None and task_id is not None:
-        row.value = {"task_id": task_id, "created_at": time.time()}
+    if row is not None and (task_id is not None or manual):
+        row.value = {
+            "task_id": task_id,
+            "created_at": time.time(),
+            "manual": manual or row.value.get("manual", False),
+        }
     elif row is None:
-        db.add(ConfigEntry(key=key, value={"task_id": task_id, "created_at": time.time()}))
+        db.add(ConfigEntry(key=key, value={"task_id": task_id, "created_at": time.time(), "manual": manual}))
     return key
 
 

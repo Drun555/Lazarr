@@ -127,18 +127,22 @@ class PluginManager:
         return sorted(ids, key=lambda key: order.index(key) if key in order else -1)
 
     def manual_candidate(self, value):
-        """Turn a URL from a shipped content provider into a safe candidate stub."""
+        """Turn a provider URL or a custom magnet into a safe candidate stub."""
         from lazarr.sdk import Candidate
 
         raw = str(value).strip()
         parsed = urlparse(raw)
+        if parsed.scheme == "magnet":
+            from lazarr.manual_magnet import magnet_candidate
+
+            return magnet_candidate(raw)
         if (
             parsed.scheme not in {"http", "https"}
             or not parsed.hostname
             or parsed.username
             or parsed.password
         ):
-            raise ValueError("Укажите корректный HTTP(S) URL раздачи")
+            raise ValueError("Укажите корректный HTTP(S) URL раздачи или magnet-ссылку")
         query = parse_qs(parsed.query)
         enabled = set(self.available("content"))
         with self.db.session() as db:

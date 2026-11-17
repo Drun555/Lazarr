@@ -64,6 +64,7 @@ class Settings(BaseModel):
     movie_path: str = Field(default_factory=lambda: os.getenv("LAZARR_MOVIE_PATH", "downloads/movies"))
     series_path: str = Field(default_factory=lambda: os.getenv("LAZARR_SERIES_PATH", "downloads/series"))
     search_start: str = "00:00"
+    automatic_search_enabled: bool = True
     seed_ratio: float | None = Field(default=1.0, ge=0, le=10000)
 
     @model_validator(mode="before")

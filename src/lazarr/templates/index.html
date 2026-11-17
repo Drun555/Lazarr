@@ -61,6 +61,8 @@
       </div></fieldset>
       <label class="check"><input type="checkbox" role="switch" name="prefer_full_subtitles">Предпочитать Full-субтитры</label>
       <div class="divider"></div><h2>Хранение и расписание</h2>
+      <label class="check"><input type="checkbox" role="switch" name="automatic_search_enabled">Автоматически искать недостающие серии и фильмы</label>
+      <p class="fine">Поиск по расписанию, после изменений задач и повторы после пауз провайдера. При выключении текущий автоматический поиск прерывается; ручной запуск остаётся доступен.</p>
       <div class="form-grid"><label>Хранилище фильмов<input name="movie_path" required></label><label>Хранилище сериалов<input name="series_path" required></label>
         <label>Время начала поиска<input name="search_start" type="time" required><small>Ежедневно. Начавшийся поиск выполняется до завершения.</small></label>
         <label>Коэффициент раздачи<input name="seed_ratio" type="number" min="0" step="0.1" placeholder="Без ограничения"><small>Пусто — без ограничения; 0 — до конца загрузки.</small></label>

@@ -186,7 +186,7 @@ async function setup(){
   w.fetch=async(url,options={})=>{
     const payload=options.body?JSON.parse(options.body):undefined;calls.push({url,method:options.method,payload});
     let result;
-    if(url==='/api/v1/settings')result={defaults,prefer_full_subtitles:true,theme_color:'purple',movie_path:'/tmp/movies',series_path:'/tmp/series',search_start:'00:00',seed_ratio:1};
+    if(url==='/api/v1/settings')result={defaults,prefer_full_subtitles:true,automatic_search_enabled:true,theme_color:'purple',movie_path:'/tmp/movies',series_path:'/tmp/series',search_start:'00:00',seed_ratio:1};
     else if(url==='/api/v1/storage')result={roots:[{source:'/downloads/source',user:'/downloads/user',offline:'/downloads/offline'}],links:12};
     else if(url==='/api/v1/status')result=status();
     else if(url==='/api/v1/telegram')result={enabled:true,token_configured:true,bot_username:'test_bot',error:''};
@@ -440,6 +440,25 @@ test('full subtitles preference loads and saves as a checkbox',async()=>{
   }finally{dom.window.close();}
 });
 
+test('automatic search switch loads and saves both states while manual search remains available',async()=>{
+  const {dom,w,document:d,calls,errors}=await setup();
+  try{
+    d.querySelector('[data-tab=settings]').click();await settle();await settle();
+    const checkbox=d.querySelector('[name=automatic_search_enabled]');
+    assert.equal(checkbox.checked,true);
+    for(const enabled of [false,true]){
+      checkbox.checked=enabled;
+      d.querySelector('#settings-form').dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}));
+      await settle();await settle();
+      const saved=calls.filter(c=>c.url==='/api/v1/settings'&&c.method==='PUT').at(-1);
+      assert.equal(saved.payload.automatic_search_enabled,enabled);
+    }
+    d.querySelector('[data-tab=library]').click();await settle();await settle();
+    assert.equal(d.querySelector('#run-queue').disabled,false);
+    assert.deepEqual(errors,[]);
+  }finally{dom.window.close();}
+});
+
 test('accent presets preview immediately and save with settings',async()=>{
   const {dom,w,document:d,calls,errors}=await setup();
   try{
@@ -564,6 +583,13 @@ test('release choices expose a live expandable search log',async()=>{
     manual.elements.url.value='https://nyaa.si/view/321';
     manual.dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}));await settle();await settle();
     assert.deepEqual(calls.find(c=>c.url==='/api/v1/subtasks/11/candidates/manual').payload,{url:'https://nyaa.si/view/321'});
+    const magnetForm=d.querySelector('#manual-candidate-form');
+    const magnet='magnet:?xt=urn:btih:'+'a'.repeat(40)+'&dn=My+Show';
+    assert.match(magnetForm.textContent,/magnet/);
+    magnetForm.elements.url.value=magnet;
+    assert.equal(magnetForm.checkValidity(),true);
+    magnetForm.dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true}));await settle();await settle();
+    assert.deepEqual(calls.filter(c=>c.url==='/api/v1/subtasks/11/candidates/manual').at(-1).payload,{url:magnet});
     log=d.querySelector('.candidate-search-log');
     log.open=true;
     setActivity({running:true,state:'running',message:'Чтение структуры торрента',history:[{time:1,message:'Demo: найден кандидат'},{time:2,message:'Получение структуры торрента'}]});

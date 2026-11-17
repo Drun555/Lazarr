@@ -17,6 +17,29 @@ class Scheduler:
         self.tasks = []
         self.wake = asyncio.Event()
         self.queue_lock = asyncio.Lock()
+        self.automatic_task = None
+        self.automatic_stop_requested = False
+
+    def settings_changed(self):
+        if not self.service.settings().automatic_search_enabled and self.automatic_task:
+            self.automatic_stop_requested = True
+            self.automatic_task.cancel()
+        self.wake.set()
+
+    async def _run_automatic(self, operation, *args, **kwargs):
+        if not self.service.settings().automatic_search_enabled:
+            return False
+        task = self.automatic_task = asyncio.create_task(operation(*args, **kwargs))
+        self.automatic_stop_requested = False
+        try:
+            return await task
+        except asyncio.CancelledError:
+            if not self.automatic_stop_requested or asyncio.current_task().cancelling():
+                raise
+            return False
+        finally:
+            self.automatic_task = None
+            self.automatic_stop_requested = False
 
     async def start(self):
         await self.worker.restore()
@@ -27,6 +50,8 @@ class Scheduler:
 
     async def search_tick(self, now=None):
         settings = self.service.settings()
+        if not settings.automatic_search_enabled:
+            return
         local = (now or datetime.now(timezone.utc)).astimezone(settings.timezone)
         with self.service.db.session() as db:
             row = db.get(ConfigEntry, "scheduler.daily")
@@ -44,16 +69,19 @@ class Scheduler:
                 row = ConfigEntry(key="scheduler.daily", value={})
                 db.add(row)
             row.value = {**row.value, "started": key}
-        await self.service.refresh_seasons()
-        if not await self.worker.run_due():
+        if not await self._run_automatic(self._daily_search):
             return
         with self.service.db.session() as db:
             row = db.get(ConfigEntry, "scheduler.daily")
             row.value = {**row.value, "completed": key}
 
+    async def _daily_search(self):
+        await self.service.refresh_seasons()
+        return await self.worker.run_due()
+
     def enqueue(self, task_id=None):
         with self.service.db.session() as db:
-            key = enqueue(db, task_id)
+            key = enqueue(db, task_id, manual=True)
         self.wake.set()
         return key
 
@@ -92,8 +120,11 @@ class Scheduler:
                 db.delete(row)
 
     def snapshot(self, task_id=None):
+        automatic_enabled = self.service.settings().automatic_search_enabled
         with self.service.db.session() as db:
             entries = list(db.scalars(select(ConfigEntry).where(ConfigEntry.key.startswith(PREFIX))))
+            if not automatic_enabled:
+                entries = [row for row in entries if row.value.get("manual", False)]
             if task_id is not None:
                 entries = [r for r in entries if r.value.get("task_id") in (None, task_id)]
             pending = len(entries)
@@ -118,6 +149,14 @@ class Scheduler:
             result["providers"] = self.worker.plugins.search_status()
         result["pending_requests"] = pending
         result["next_attempt_at"] = next_attempt
+        result["automatic_search_enabled"] = automatic_enabled
+        if (
+            not automatic_enabled
+            and not pending
+            and not result["running"]
+            and result["state"] in {"idle", "queued"}
+        ):
+            result.update(state="paused", message="Автоматический поиск выключен")
         if pending and next_attempt > time.time() and not result["running"]:
             result.update(state="queued", message="Повтор поиска запланирован после паузы провайдера")
         if pending and not result["running"] and result["state"] not in {"blocked", "error"}:
@@ -138,6 +177,14 @@ class Scheduler:
             with self.service.db.session() as db:
                 entries = list(db.scalars(select(ConfigEntry).where(ConfigEntry.key.startswith(PREFIX))))
             entries = [row for row in entries if row.value.get("not_before", 0) <= time.time()]
+            manual = [row for row in entries if row.value.get("manual", False)]
+            if manual:
+                # Explicit requests cover only their tasks; unrelated automatic
+                # work remains separately cancellable through the settings switch.
+                manual_ids = {row.value["task_id"] for row in manual}
+                entries = [row for row in entries if None in manual_ids or row.value["task_id"] in manual_ids]
+            elif not self.service.settings().automatic_search_enabled:
+                return False
             if not entries:
                 return False
             if self.worker.engine is None or not self.worker.plugins.available("content"):
@@ -160,7 +207,9 @@ class Scheduler:
                 if all(row.value.get("provider") for row in entries)
                 else None
             )
-            if not await self.worker.run_due(task_ids=task_ids, force=True, provider_filter=provider_filter):
+            operation = self.worker.run_due if manual else self._run_automatic
+            args = () if manual else (self.worker.run_due,)
+            if not await operation(*args, task_ids=task_ids, force=True, provider_filter=provider_filter):
                 return False
             with self.service.db.session() as db:
                 for entry in entries:

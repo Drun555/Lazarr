@@ -18,7 +18,7 @@ import pytest
 from sqlalchemy import select
 
 from lazarr.config import Requirements
-from lazarr.models import Release, SubtaskAsset
+from lazarr.models import ProviderConfig, Release, SubtaskAsset
 from lazarr.providers import rutracker_offline as offline
 from lazarr.sdk import DownloadSource, ProviderError, SearchQuery
 from lazarr.services import CreateTask
@@ -109,6 +109,127 @@ async def test_dump_search_inspect_and_magnet_without_auth(core, media, catalog,
             "http://bt3.t-ru.org/ann?magnet",
             "http://bt4.t-ru.org/ann?magnet",
         ]
+
+
+@pytest.mark.parametrize("scope", ["episode", "season", "task", "mapping"])
+async def test_manual_url_uses_dump_before_online(
+    core, media, season, catalog, worker_setup, monkeypatch, scope
+):
+    worker, engine, _ = worker_setup
+    task_id = core[3].create_from_metadata(
+        CreateTask(media_id="42", kind="tv", season=1, episodes=[1]), media, season, 1
+    )
+    write_archive(catalog)
+    original_inspect = engine.inspect
+
+    def inspect(source):
+        assert source.magnet and not source.torrent
+        return original_inspect(DownloadSource(torrent=b'["Show.S01E01.1080p.mkv"]'))
+
+    monkeypatch.setattr(engine, "inspect", inspect)
+    with core[1].session() as db:
+        db.get(ProviderConfig, "rutracker").retry_at = time.time() + 3600
+    url = "https://rutracker.org/forum/viewtopic.php?t=42"
+    if scope == "episode":
+        await worker.add_manual_candidate(1, url)
+    else:
+        await worker.add_manual_task_candidate(
+            task_id,
+            url,
+            season_number=1 if scope in {"season", "mapping"} else None,
+            return_release=scope == "mapping",
+        )
+    with core[1].session() as db:
+        release = db.scalar(select(Release))
+        assert release.data["offline"] is True
+        assert release.data["title"] == "Example Show (2020) 1080p"
+        assert release.external_id == "42"
+    assert not engine.plans
+
+
+def test_manual_url_api_reads_offline_dump(core, media, season, catalog, worker_setup, monkeypatch):
+    from fastapi.testclient import TestClient
+    from lazarr.app import create_app
+    from test_api import login
+
+    worker, engine, _ = worker_setup
+    core[3].create_from_metadata(
+        CreateTask(media_id="42", kind="tv", season=1, episodes=[1]), media, season, 1
+    )
+    write_archive(catalog)
+    original_inspect = engine.inspect
+
+    def inspect(source):
+        assert source.magnet
+        return original_inspect(DownloadSource(torrent=b'["Show.S01E01.1080p.mkv"]'))
+
+    monkeypatch.setattr(engine, "inspect", inspect)
+    with TestClient(create_app(core[0])) as client:
+        login(client)
+        ctx = client.app.state.ctx
+        monkeypatch.setattr(ctx, "worker", worker)
+        if ctx.engine is None:
+            from types import SimpleNamespace
+
+            monkeypatch.setattr(ctx, "engine", SimpleNamespace(close=lambda: None))
+        response = client.post(
+            "/api/v1/subtasks/1/candidates/manual",
+            json={"url": "https://rutracker.org/forum/viewtopic.php?t=42"},
+        )
+        assert response.status_code == 200, response.text
+        choices = client.get("/api/v1/subtasks/1/candidates").json()
+        assert choices[0]["id"] == response.json()["id"]
+        assert choices[0]["candidate"]["offline"] is True
+    assert not engine.plans
+
+
+@pytest.mark.parametrize("case", ["absent", "missing_topic", "corrupt", "metadata"])
+async def test_manual_url_offline_failure_falls_back_to_online(
+    core, media, season, catalog, worker_setup, monkeypatch, case
+):
+    worker, engine, _ = worker_setup
+    core[3].create_from_metadata(
+        CreateTask(media_id="42", kind="tv", season=1, episodes=[1]), media, season, 1
+    )
+    if case != "absent":
+        path = write_archive(catalog, [topic(43)] if case == "missing_topic" else None)
+        if case == "corrupt":
+            path.write_bytes(b"broken archive")
+    calls = []
+    provider = core[2].classes["rutracker"]
+    original_inspect = provider.inspect
+
+    async def inspect(self, item, *, offline=False):
+        calls.append(("inspect", offline))
+        if offline:
+            return await original_inspect(self, item, offline=True)
+        assert not item.offline and not item.magnet
+        return item.model_copy(update={"title": "Online Show"})
+
+    async def resolve(self, item, *, offline=False):
+        calls.append(("resolve", offline))
+        if offline:
+            return DownloadSource(magnet=item.magnet)
+        return DownloadSource(torrent=b'["Show.S01E01.1080p.mkv"]')
+
+    original_metadata = engine.inspect
+
+    def metadata(source):
+        if source.magnet:
+            raise TimeoutError("Magnet metadata unavailable")
+        return original_metadata(source)
+
+    monkeypatch.setattr(provider, "inspect", inspect)
+    monkeypatch.setattr(provider, "resolve_download", resolve)
+    monkeypatch.setattr(engine, "inspect", metadata)
+    await worker.add_manual_candidate(1, "https://rutracker.org/forum/viewtopic.php?t=42")
+    assert calls[0] == ("inspect", True)
+    assert calls[-2:] == [("inspect", False), ("resolve", False)]
+    with core[1].session() as db:
+        release = db.scalar(select(Release))
+        assert release.data["offline"] is False
+        assert release.data["title"] == "Online Show"
+    assert not engine.plans
 
 
 async def test_unicode_search_query_escaping_and_pagination(core, media, catalog, monkeypatch):

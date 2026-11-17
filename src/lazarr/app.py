@@ -521,7 +521,7 @@ def create_app(config: RuntimeConfig | None = None):
         ctx = context(request)
         identity = await ctx.service.create(payload, user.id)
         ctx.scheduler.wake.set()
-        return {"id": identity, "search_queued": True}
+        return {"id": identity, "search_queued": ctx.service.settings().automatic_search_enabled}
 
     @app.post("/api/v1/search/run", status_code=202)
     async def run_queue(request: Request, user=Depends(permission("tasks"))):
@@ -892,7 +892,9 @@ def create_app(config: RuntimeConfig | None = None):
 
     @app.put("/api/v1/settings")
     async def put_settings(payload: Settings, request: Request, user=Depends(permission("settings"))):
-        context(request).service.set_settings(payload, user.id)
+        ctx = context(request)
+        ctx.service.set_settings(payload, user.id)
+        ctx.scheduler.settings_changed()
         return {"ok": True}
 
     @app.get("/api/v1/accounts")

@@ -26,11 +26,11 @@ function mappingMoveRow(identity,target,after=false){
   $(`[data-mapping-reorder="${identity}"]`)?.focus({preventScroll:true});
 }
 async function mappingPromptUrl(value){
-  try{return window.prompt('Введите URL раздачи',value);}catch{
+  try{return window.prompt('Введите URL раздачи или magnet',value);}catch{
     return new Promise(resolve=>{
       const dialog=document.createElement('dialog');dialog.className='mapping-url-prompt';
-      dialog.setAttribute('aria-label','Введите URL раздачи');
-      dialog.innerHTML=`<form><h3>Введите URL раздачи</h3><input type="url" aria-label="URL раздачи" required maxlength="2048" placeholder="https://…" value="${esc(value)}"><div class="form-footer"><button type="button" class="ghost">Отмена</button><button type="submit" class="primary">Добавить</button></div></form>`;
+      dialog.setAttribute('aria-label','Введите URL раздачи или magnet');
+      dialog.innerHTML=`<form><h3>Введите URL раздачи или magnet</h3><input type="text" inputmode="url" aria-label="URL раздачи или magnet" required maxlength="2048" placeholder="https://… или magnet:?…" value="${esc(value)}"><div class="form-footer"><button type="button" class="ghost">Отмена</button><button type="submit" class="primary">Добавить</button></div></form>`;
       let result=null;
       dialog.querySelector('form').addEventListener('submit',event=>{event.preventDefault();event.stopPropagation();result=dialog.querySelector('input').value;dialog.close();});
       dialog.querySelector('[type=button]').addEventListener('click',()=>dialog.close());

@@ -113,27 +113,28 @@ class Worker:
             f"{'Оффлайн: ' if offline else ''}Чтение описания: {candidate.title}",
             candidate=candidate.title,
         )
-        async with self.plugins.open(
-            candidate.provider, bypass_cooldown=bypass_cooldown, offline=offline
-        ) as provider:
-            options = {"offline": offline} if provider.manifest.offline_capability else {}
-            detailed = (await provider.inspect(candidate, **options)).model_copy(update={"offline": offline})
-            reason = (
-                None
-                if ignore_filters
-                else reject_reason(
-                    detailed,
-                    subtasks,
-                    detailed=True,
-                    allow_preference_mismatch=allow_preference_mismatch,
-                )
+        if candidate.provider == "magnet":
+            detailed = candidate
+            source = DownloadSource(magnet=candidate.magnet)
+        else:
+            detailed, source = await self._inspect_provider_candidate(
+                candidate,
+                subtasks,
+                offline=offline,
+                bypass_cooldown=bypass_cooldown,
+                ignore_filters=ignore_filters,
+                allow_preference_mismatch=allow_preference_mismatch,
+                record=record,
             )
-            if reason:
-                raise CandidateFiltered(reason)
-            record("resolve", f"Получение torrent / magnet: {candidate.title}")
-            source = await provider.resolve_download(detailed, **options)
         record("metadata", f"Получение структуры торрента: {candidate.title}")
         metadata = await asyncio.to_thread(self.engine.inspect, source)
+        if candidate.provider == "magnet":
+            detailed = detailed.model_copy(
+                update={
+                    "revision": metadata.infohash,
+                    "size": sum(file.size for file in metadata.files),
+                }
+            )
         if any(
             part.casefold() == "bdmv" for file in metadata.files for part in PurePosixPath(file.path).parts
         ):
@@ -155,6 +156,38 @@ class Worker:
                     + ("; ".join(final.blockers) if final.blockers else "проверка завершена"),
                 )
         return detailed, metadata, report
+
+    async def _inspect_provider_candidate(
+        self,
+        candidate,
+        subtasks,
+        *,
+        offline,
+        bypass_cooldown,
+        ignore_filters,
+        allow_preference_mismatch,
+        record,
+    ):
+        async with self.plugins.open(
+            candidate.provider, bypass_cooldown=bypass_cooldown, offline=offline
+        ) as provider:
+            options = {"offline": offline} if provider.manifest.offline_capability else {}
+            detailed = (await provider.inspect(candidate, **options)).model_copy(update={"offline": offline})
+            reason = (
+                None
+                if ignore_filters
+                else reject_reason(
+                    detailed,
+                    subtasks,
+                    detailed=True,
+                    allow_preference_mismatch=allow_preference_mismatch,
+                )
+            )
+            if reason:
+                raise CandidateFiltered(reason)
+            record("resolve", f"Получение torrent / magnet: {candidate.title}")
+            source = await provider.resolve_download(detailed, **options)
+        return detailed, source
 
     async def add_manual_candidate(self, subtask_id, url):
         """Inspect and save one explicitly supplied torrent URL for manual selection."""
@@ -199,17 +232,27 @@ class Worker:
     @pinned
     async def _save_manual_candidate(self, requests, url, *, return_release=False):
         candidate = self.plugins.manual_candidate(url)
-        try:
-            detailed, metadata, report = await self.evaluate(
-                candidate,
-                requests,
-                allow_preference_mismatch=True,
-                ignore_filters=True,
-                bypass_cooldown=True,
-                record_progress=False,
-            )
-        except CandidateFiltered as exc:
-            raise ValueError(str(exc)) from exc
+        provider = self.plugins.classes.get(candidate.provider)
+        modes = (True, False) if provider and provider.manifest.offline_capability else (False,)
+        for offline in modes:
+            try:
+                detailed, metadata, report = await self.evaluate(
+                    candidate,
+                    requests,
+                    allow_preference_mismatch=True,
+                    ignore_filters=True,
+                    bypass_cooldown=True,
+                    record_progress=False,
+                    offline=offline,
+                )
+                break
+            except Exception as exc:
+                if offline:
+                    log.info("Manual URL offline lookup failed for %s: %s", candidate.url, self._error(exc))
+                    continue
+                if isinstance(exc, CandidateFiltered):
+                    raise ValueError(str(exc)) from exc
+                raise
         release_id, _ = self._record(detailed, metadata, report)
         if return_release:
             return release_id
