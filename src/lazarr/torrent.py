@@ -242,7 +242,28 @@ class LibtorrentEngine:
                 for tracker in handle.trackers():
                     creator.add_tracker(tracker["url"], tracker["tier"])
                 torrent = lt.bencode(creator.generate())
-                return TorrentMetadata(self._identity(ti), self._files(ti), torrent)
+                identity = self._identity(ti)
+                # Metadata and payload use different sessions. Keep the peers that
+                # actually supplied metadata, including across confirmation/restart.
+                # upload_mode may already have disconnected them; resume data
+                # includes the known peer list as well as active connections.
+                peers = lt.add_torrent_params()
+                peers.peers = [peer.ip for peer in handle.get_peer_info()][:500]
+                handle.save_resume_data()
+                peer_deadline = time.monotonic() + 2
+                saved = False
+                while not saved and time.monotonic() < peer_deadline:
+                    for alert in session.pop_alerts():
+                        if isinstance(alert, lt.save_resume_data_alert):
+                            peers.peers = list(dict.fromkeys([*peers.peers, *alert.params.peers]))[:500]
+                            saved = True
+                        elif isinstance(alert, lt.save_resume_data_failed_alert):
+                            saved = True
+                    if not saved:
+                        session.wait_for_alert(100)
+                if peers.peers:
+                    atomic_write(self.root / f"{identity}.peers", lt.write_resume_data_buf(peers))
+                return TorrentMetadata(identity, self._files(ti), torrent)
             finally:
                 session.remove_torrent(handle)
                 session.pause()
@@ -274,6 +295,13 @@ class LibtorrentEngine:
                     "Cannot restore torrent resume data for %s; checking existing files", metadata.infohash
                 )
                 params = lt.add_torrent_params()
+            peer_cache = self.root / f"{metadata.infohash}.peers"
+            if peer_cache.exists():
+                try:
+                    peers = lt.read_resume_data(peer_cache.read_bytes()).peers
+                    params.peers = list(dict.fromkeys([*params.peers, *peers]))[:500]
+                except Exception:
+                    log.warning("Cannot restore metadata peers for %s", metadata.infohash)
             params.ti = lt.torrent_info(lt.bdecode(torrent))
             if counters:
                 params.total_uploaded = max(params.total_uploaded, counters["uploaded"])
@@ -507,6 +535,7 @@ class LibtorrentEngine:
                 self.removed.discard(infohash)
                 self.removing.discard(infohash)
             (self.root / f"{infohash}.resume").unlink(missing_ok=True)
+            (self.root / f"{infohash}.peers").unlink(missing_ok=True)
 
     def pause(self, infohash):
         with self.lock:

@@ -187,6 +187,29 @@ def test_magnet_metadata_uses_http_tracker_without_dht_and_keeps_trackers(tmp_pa
         restored = lt.torrent_info(lt.bdecode(result.torrent))
         assert url in [entry.url for entry in restored.trackers()]
         assert seed_handle.status().total_payload_upload == 0
+        # Once metadata is confirmed, discovery may no longer work. The payload
+        # session must reconnect to the metadata peer even after an app restart.
+        tracker.shutdown()
+        tracker.server_close()
+        engine.close()
+        engine = LibtorrentEngine(tmp_path / "client", "127.0.0.1:0", local_only=True)
+        plan = DownloadPlan(
+            infohash=result.infohash,
+            files=result.files,
+            bindings=[FileBinding(subtask_id=1, video_index=0, video_path="video.mkv", episode_order=1)],
+        )
+        destination = tmp_path / "download"
+        engine.add(result.torrent, str(destination), plan)
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            stats = engine.snapshot(result.infohash)
+            if stats["complete"]:
+                break
+            time.sleep(0.05)
+        assert stats["complete"], stats
+        assert (destination / "video.mkv").read_bytes() == (source / "video.mkv").read_bytes()
+        engine.remove(result.infohash)
+        assert not (engine.root / f"{result.infohash}.peers").exists()
     finally:
         engine.close()
         seed.pause()

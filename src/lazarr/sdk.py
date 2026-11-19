@@ -2,7 +2,7 @@
 
 from abc import ABC, abstractmethod
 from enum import StrEnum
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Literal
 from urllib.parse import urlparse
 import httpx
@@ -19,7 +19,9 @@ def safe_relative_path(value: str) -> str:
     path = PurePosixPath(value.replace("\\", "/"))
     if path.is_absolute() or not path.parts or any(p in {"..", "."} for p in path.parts):
         raise ValueError("Unsafe torrent path")
-    if ":" in value or "\x00" in value:
+    # Colons are valid filename characters on Linux (including bundled fonts).
+    # Reject Windows drive paths without rejecting colons in ordinary names.
+    if PureWindowsPath(value).drive or "\x00" in value:
         raise ValueError("Unsafe torrent path")
     return str(path)
 
